@@ -2,6 +2,7 @@ import { verifyEvent } from 'https://cdn.jsdelivr.net/npm/nostr-tools@2.7.2/+esm
 // FILE: identity/sw/relayIn.js
 
 import { nip04Decrypt } from './nostr.js';
+import { randomBytes, b64url } from './crypto.js';
 import { getDevice } from './deviceStore.js';
 import { getIdentity, setIdentity } from './identityStore.js';
 import { notifAdd, notifClear, notifRemove } from './notifs.js';
@@ -18,6 +19,8 @@ import { publishAppEvent } from './relayOut.js';
 const REPLAY_WINDOW_SEC = 10 * 60;
 const REPLAY_SKEW_SEC = 2 * 60;
 const REPLAY_CAP = 400;
+const PAIR_OFFER_KEY = 'pairOffer';
+const PAIR_CLAIM_ACTIVE_KEY = 'pairClaimActive';
 
 function createdAtOk(createdAt) {
   const ts = Number(createdAt || 0);
@@ -73,6 +76,20 @@ async function replayAccept(identityLabel, ev) {
   if (keep.length > REPLAY_CAP) keep.length = REPLAY_CAP;
   await kvSet(key, keep);
   return true;
+}
+
+function zoneTagsFromEvent(ev) {
+  const out = [];
+  const tags = Array.isArray(ev?.tags) ? ev.tags : [];
+  for (const t of tags) {
+    if (!Array.isArray(t) || t[0] !== 'z') continue;
+    const key = String(t[1] || '').trim();
+    if (!key) continue;
+    if (!out.some((x) => Array.isArray(x) && x[0] === 'z' && x[1] === key)) {
+      out.push(['z', key]);
+    }
+  }
+  return out;
 }
 
 
@@ -354,6 +371,49 @@ export async function handleRelayFrame(sw, raw) {
     return;
   }
 
+  // --- Pair claim (owner enters joiner-generated code) ---
+  if (payload.type === 'pair_claim') {
+    const pendingLabel = String((await kvGet('pendingJoinIdentityLabel')) || '').trim();
+    if (!pendingLabel) return;
+    if (String(payload.identity || '').trim() !== pendingLabel) return;
+
+    const offer = (await kvGet(PAIR_OFFER_KEY)) || null;
+    if (!offer || String(offer.identityLabel || '').trim() !== pendingLabel) return;
+
+    const nowMs = Date.now();
+    const expiresAt = Number(offer.expiresAt || 0);
+    if (expiresAt && nowMs > expiresAt) {
+      await kvSet(PAIR_OFFER_KEY, null);
+      return;
+    }
+
+    const claimHash = String(payload.codeHash || '').trim();
+    const offerHash = String(offer.codeHash || '').trim();
+    if (!claimHash || !offerHash || claimHash !== offerHash) return;
+
+    const ownerPk = String(payload.fromPk || ev.pubkey || '').trim();
+    if (!ownerPk) return;
+    if (String(payload.fromPk || '').trim() && ownerPk !== String(ev.pubkey || '').trim()) return;
+
+    const reqId = `req-${b64url(randomBytes(8))}`;
+    await publishAppEvent(sw, {
+      type: 'pair_request',
+      identity: pendingLabel,
+      requestId: reqId,
+      claimId: String(payload.claimId || '').trim(),
+      codeHash: offerHash,
+      devicePk: String(offer.devicePk || dev?.nostr?.pk || '').trim(),
+      deviceDid: String(offer.deviceDid || dev?.did || '').trim(),
+      deviceLabel: String(offer.deviceLabel || '').trim(),
+      ts: Date.now(),
+      ttl: 120,
+    }, [['i', pendingLabel], ['p', ownerPk], ...zoneTagsFromEvent(ev)]);
+
+    log(sw, `pair_claim matched; pair_request published requestId=${reqId}`);
+    pokeUi(sw);
+    return;
+  }
+
   // --- Pair request ---
   if (payload.type === 'pair_request') {
     if (!ident?.linked || !ident?.label) return;
@@ -372,11 +432,28 @@ export async function handleRelayFrame(sw, raw) {
       return;
     }
 
-    const reqId = `${payload.identity}:${payload.code}:${payload.devicePk}`;
+    const codeHash = String(payload.codeHash || '').trim();
+    if (codeHash) {
+      const activeClaim = (await kvGet(PAIR_CLAIM_ACTIVE_KEY)) || null;
+      const nowMs = Date.now();
+      const claimOk = !!activeClaim
+        && String(activeClaim.identityLabel || '').trim() === String(payload.identity || '').trim()
+        && String(activeClaim.codeHash || '').trim() === codeHash
+        && nowMs <= Number(activeClaim.expiresAt || 0);
+      if (!claimOk) {
+        log(sw, 'pair_request ignored: no active matching code claim');
+        return;
+      }
+      await kvSet(PAIR_CLAIM_ACTIVE_KEY, null);
+    }
+
+    const reqId = String(payload.requestId || '').trim()
+      || `${payload.identity}:${payload.codeHash || payload.code || ''}:${payload.devicePk}`;
     const req = {
       id: reqId,
       identityLabel: payload.identity,
       code: payload.code,
+      codeHash,
       devicePk: payload.devicePk,
       deviceDid: payload.deviceDid,
       deviceLabel: payload.deviceLabel || '',
@@ -414,6 +491,8 @@ export async function handleRelayFrame(sw, raw) {
         linked: true,
         devices: Array.isArray(obj.devices) ? obj.devices : [],
       });
+      await kvSet(PAIR_OFFER_KEY, null);
+      await kvSet('pendingJoinIdentityLabel', '');
 
       await notifAdd({
         id: `n-approve-${payload.identity}-${payload.code}`,

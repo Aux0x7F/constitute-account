@@ -170,11 +170,10 @@
 
       <div class="card">
         <div class="cardTitle">Add Device</div>
-        <div class="small muted">Generate a one-time pairing code on the owner device, then paste it on the joining device during onboarding.</div>
+        <div class="small muted">On the new device, finish onboarding and note its pairing code. Enter that code here to claim and start pairing.</div>
         <div class="row" style="margin-top:.5rem;">
-          <input id="pairCodeOutput" type="text" readonly placeholder="Generate a code" />
-          <button id="btnGeneratePairCode" type="button">Generate Code</button>
-          <button id="btnCopyPairCode" type="button">Copy</button>
+          <input id="pairCodeInput" type="text" placeholder="Enter code from new device" />
+          <button id="btnClaimPairCode" type="button">Claim Code</button>
         </div>
         <div id="pairCodeStatus" class="small muted" style="margin-top:.5rem;"></div>
       </div>

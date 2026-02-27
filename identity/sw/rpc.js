@@ -52,6 +52,15 @@ function pairingTags(identityLabel, zones = [], toPk = '') {
   return tags;
 }
 
+const PAIR_OFFER_KEY = 'pairOffer';
+const PAIR_CLAIM_ACTIVE_KEY = 'pairClaimActive';
+const PAIR_OFFER_TTL_MS = 10 * 60 * 1000;
+const PAIR_CLAIM_TTL_MS = 2 * 60 * 1000;
+
+async function pairCodeHash(identityLabel, code) {
+  return await sha256B64Url(`${String(identityLabel || '').trim()}|${String(code || '').trim()}`);
+}
+
 export async function handleRpc(sw, method, params, getRelayState, setRelayState) {
   const LIST_MAX_AGE_MS = 3 * 60 * 1000;
   async function startPresenceLoop() {
@@ -506,20 +515,57 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
     await kvSet('device', dev);
     await setPendingJoinIdentityLabel(identityLabel);
 
-    const zones = await listZones({}).catch(() => []);
-    await publishAppEvent(sw, {
-      type: 'pair_request',
-      identity: identityLabel,
+    const codeHash = await pairCodeHash(identityLabel, code);
+    await kvSet(PAIR_OFFER_KEY, {
+      identityLabel,
+      codeHash,
       code,
       devicePk: dev.nostr.pk,
       deviceDid: dev.did,
       deviceLabel,
-    }, pairingTags(identityLabel, zones));
+      createdAt: Date.now(),
+      expiresAt: Date.now() + PAIR_OFFER_TTL_MS,
+    });
 
-    log(sw, `pair_request sent identity=${identityLabel} code=${code}`);
-    status(sw, 'pair request sent');
+    log(sw, `pair offer ready identity=${identityLabel} codeHash=${codeHash.slice(0, 12)}…`);
+    status(sw, 'pair offer ready');
     pokeUi(sw);
-    return { ok: true, code };
+    return { ok: true, code, codeHash };
+  }
+
+  if (method === 'pairing.claimCode') {
+    const ident = await getIdentity();
+    if (!ident?.linked || !ident?.label) throw new Error('no linked identity on this device');
+
+    const code = String(params?.code || '').trim();
+    if (!code) throw new Error('code required');
+
+    const dev = await ensureDevice();
+    const codeHash = await pairCodeHash(ident.label, code);
+    const claimId = makeSwarmRequestId('claim');
+    const zones = await listZones(ident || {}).catch(() => []);
+
+    await kvSet(PAIR_CLAIM_ACTIVE_KEY, {
+      identityLabel: ident.label,
+      codeHash,
+      claimId,
+      createdAt: Date.now(),
+      expiresAt: Date.now() + PAIR_CLAIM_TTL_MS,
+    });
+
+    await publishAppEvent(sw, {
+      type: 'pair_claim',
+      identity: ident.label,
+      codeHash,
+      claimId,
+      fromPk: dev.nostr.pk,
+      ts: Date.now(),
+      ttl: 120,
+    }, pairingTags(ident.label, zones));
+
+    status(sw, 'pair claim sent');
+    pokeUi(sw);
+    return { ok: true, claimId, codeHash };
   }
 
   // --- notifications ---

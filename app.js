@@ -48,9 +48,8 @@ const blockedList = document.getElementById('blockedList');
 
 const pairingList = document.getElementById('pairingList');
 const pairingEmpty = document.getElementById('pairingEmpty');
-const pairCodeOutput = document.getElementById('pairCodeOutput');
-const btnGeneratePairCode = document.getElementById('btnGeneratePairCode');
-const btnCopyPairCode = document.getElementById('btnCopyPairCode');
+const pairCodeInput = document.getElementById('pairCodeInput');
+const btnClaimPairCode = document.getElementById('btnClaimPairCode');
 const pairCodeStatus = document.getElementById('pairCodeStatus');
 
 const identityLabelEl = document.getElementById('identityLabel');
@@ -1040,9 +1039,12 @@ function renderPairRequests(reqs, identityDevices) {
     top.className = 'itemTop';
 
     const left = document.createElement('div');
+    const codeMeta = r.code
+      ? `code ${r.code}`
+      : (r.codeHash ? `code# ${String(r.codeHash).slice(0, 12)}…` : 'code n/a');
     left.innerHTML = `
       <div class="itemTitle">${escapeHtml(r.identityLabel || '(no identity label)')}</div>
-      <div class="itemMeta">Device: ${escapeHtml(r.deviceLabel || '(no label)')} • pk ${escapeHtml((r.devicePk || '').slice(0, 12))}… • code ${escapeHtml(r.code || '')}</div>
+      <div class="itemMeta">Device: ${escapeHtml(r.deviceLabel || '(no label)')} • pk ${escapeHtml((r.devicePk || '').slice(0, 12))}… • ${escapeHtml(codeMeta)}</div>
     `;
 
     const actions = document.createElement('div');
@@ -1514,32 +1516,18 @@ function wireUi() {
   // settings tabs
   for (const b of tabButtons) b.addEventListener('click', () => setSettingsTab(b.dataset.tab));
 
-  if (btnGeneratePairCode) {
-    btnGeneratePairCode.onclick = async () => {
-      try {
-        const ident = await client.call('identity.get', {}, { timeoutMs: 20000 });
-        if (!ident?.linked) {
-          setPairCodeStatus('Link an identity before generating a code.', true);
-          return;
-        }
-        const res = await client.call('identity.newPairCode', {}, { timeoutMs: 20000 });
-        if (pairCodeOutput) pairCodeOutput.value = String(res?.code || '');
-        setPairCodeStatus('Code generated. Share it with the joining device.');
-      } catch (e) {
-        setPairCodeStatus(`Failed to generate code: ${String(e?.message || e)}`, true);
+  if (btnClaimPairCode) {
+    btnClaimPairCode.onclick = async () => {
+      const code = String(pairCodeInput?.value || '').trim();
+      if (!code) {
+        setPairCodeStatus('Enter a code from the new device.', true);
+        return;
       }
-    };
-  }
-
-  if (btnCopyPairCode) {
-    btnCopyPairCode.onclick = async () => {
-      const code = String(pairCodeOutput?.value || '').trim();
-      if (!code) return;
       try {
-        await navigator.clipboard.writeText(code);
-        setPairCodeStatus('Code copied.');
-      } catch {
-        setPairCodeStatus('Could not copy code.', true);
+        await client.call('pairing.claimCode', { code }, { timeoutMs: 20000 });
+        setPairCodeStatus('Claim sent. Wait for the pairing request, then approve it below.');
+      } catch (e) {
+        setPairCodeStatus(`Claim failed: ${String(e?.message || e)}`, true);
       }
     };
   }
@@ -1676,8 +1664,8 @@ function wireUi() {
 
       const usedCode = String(res?.code || code || '').trim();
       existingInfo.textContent = usedCode
-        ? `Waiting for approval… Share code ${usedCode} with the owner.`
-        : 'Waiting for approval…';
+        ? `Pairing code: ${usedCode}. Ask the owner to enter this in Settings > Pairing > Add Device, then approve.`
+        : 'Waiting for owner claim and approval…';
       const ok = await waitForPairAcceptance({ identityLabel: ilabel, myDevicePk, timeoutMs: 90000 });
 
         if (ok) {
