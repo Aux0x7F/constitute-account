@@ -17,13 +17,17 @@ import { listZones, addZone, joinZone, publishZonePresence, publishZoneProbe, pu
 import {
   makeIdentityRecord,
   makeDeviceRecord,
+  makeDhtRecord,
   putIdentityRecord,
   putDeviceRecord,
+  putDhtRecord,
   resolveIdentityById,
   resolveDeviceByPk,
   resolveIdentityForDevice,
+  getDhtRecord,
   listIdentityRecords,
   listDeviceRecords,
+  listDhtRecords,
 } from './swarm/index.js';
 
 let presenceTimer = null;
@@ -31,6 +35,10 @@ let swarmPublishTimer = null;
 
 function makePairCode() {
   return (Math.floor(Math.random() * 900000) + 100000).toString();
+}
+
+function makeSwarmRequestId(prefix = 'req') {
+  return `${prefix}-${b64url(randomBytes(8))}`;
 }
 
 export async function handleRpc(sw, method, params, getRelayState, setRelayState) {
@@ -290,9 +298,90 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
     if (drec) await publishAppEvent(sw, { type: 'swarm_device_record', record: drec }).catch(() => {});
     return { ok: true };
   }
-  if (method === 'swarm.discovery.request') {
-    await publishAppEvent(sw, { type: 'swarm_discovery_request', want: ['identity', 'device'] }).catch(() => {});
-    return { ok: true };
+  if (method === 'swarm.record.request' || method === 'swarm.discovery.request') {
+    const requestId = String(params?.requestId || '').trim() || makeSwarmRequestId('record');
+    const want = Array.isArray(params?.want) && params.want.length
+      ? params.want.map(String)
+      : ['identity', 'device'];
+    const payload = {
+      type: 'swarm_record_request',
+      requestId,
+      want,
+      identityId: String(params?.identityId || '').trim(),
+      devicePk: String(params?.devicePk || '').trim(),
+      zone: String(params?.zone || '').trim(),
+      timeoutMs: Number(params?.timeoutMs || 0) || undefined,
+      ts: Date.now(),
+      ttl: 120,
+    };
+    await publishAppEvent(sw, payload).catch(() => {});
+
+    // Legacy compatibility while both contracts are in flight.
+    if (method === 'swarm.discovery.request') {
+      await publishAppEvent(sw, { ...payload, type: 'swarm_discovery_request' }).catch(() => {});
+    }
+    return { ok: true, requestId };
+  }
+  if (method === 'swarm.dht.put') {
+    const scope = String(params?.scope || params?.dhtScope || '').trim();
+    const key = String(params?.key || params?.dhtKey || '').trim();
+    if (!scope || !key) throw new Error('missing scope or key');
+    if (!Object.prototype.hasOwnProperty.call(params || {}, 'value')) throw new Error('missing value');
+    const requestId = String(params?.requestId || '').trim() || makeSwarmRequestId('dht-put');
+    await publishAppEvent(sw, {
+      type: 'swarm_dht_put',
+      requestId,
+      scope,
+      key,
+      value: params?.value,
+      zone: String(params?.zone || '').trim(),
+      updatedAt: Number(params?.updatedAt || Date.now()),
+      expiresAt: Number(params?.expiresAt || (Date.now() + 24 * 60 * 60 * 1000)),
+      ts: Date.now(),
+      ttl: 120,
+    }).catch(() => {});
+    return { ok: true, requestId };
+  }
+  if (method === 'swarm.dht.get') {
+    const scope = String(params?.scope || params?.dhtScope || '').trim();
+    const key = String(params?.key || params?.dhtKey || '').trim();
+    if (!scope || !key) throw new Error('missing scope or key');
+    const requestId = String(params?.requestId || '').trim() || makeSwarmRequestId('dht-get');
+    await publishAppEvent(sw, {
+      type: 'swarm_dht_get',
+      requestId,
+      scope,
+      key,
+      zone: String(params?.zone || '').trim(),
+      timeoutMs: Number(params?.timeoutMs || 0) || undefined,
+      ts: Date.now(),
+      ttl: 120,
+    }).catch(() => {});
+    return { ok: true, requestId };
+  }
+  if (method === 'swarm.dht.record') {
+    const scope = String(params?.scope || params?.dhtScope || '').trim();
+    const key = String(params?.key || params?.dhtKey || '').trim();
+    if (!scope || !key) throw new Error('missing scope or key');
+    if (!Object.prototype.hasOwnProperty.call(params || {}, 'value')) throw new Error('missing value');
+    return await makeDhtRecord(scope, key, params?.value, {
+      updatedAt: Number(params?.updatedAt || Date.now()),
+      expiresAt: Number(params?.expiresAt || (Date.now() + 24 * 60 * 60 * 1000)),
+    });
+  }
+  if (method === 'swarm.dht.putLocal') {
+    return await putDhtRecord(params?.record || null);
+  }
+  if (method === 'swarm.dht.getLocal') {
+    const scope = String(params?.scope || params?.dhtScope || '').trim();
+    const key = String(params?.key || params?.dhtKey || '').trim();
+    if (!scope || !key) throw new Error('missing scope or key');
+    const ev = await getDhtRecord(scope, key);
+    if (!ev) return null;
+    return JSON.parse(ev.content || '{}');
+  }
+  if (method === 'swarm.dht.listLocal') {
+    return await listDhtRecords();
   }
   if (method === 'swarm.signal.send') {
     const toPk = String(params?.toPk || '').trim();

@@ -848,9 +848,13 @@ function renderZones(list) {
           nostrSeen ? 'nostr' : '',
           swarmSeen ? 'swarm' : '',
         ].filter(Boolean).join(' + ') || 'unknown';
+        const role = String(e.role || '').trim();
+        const serviceVersion = String(e.serviceVersion || '').trim();
+        const roleLine = serviceVersion ? `${role || 'unknown'} (${serviceVersion})` : (role || 'unknown');
         row.innerHTML = `
           <div class="itemTitle">${escapeHtml(e.devicePk || '')}</div>
           <div class="itemMeta">Source: ${escapeHtml(sources)}</div>
+          <div class="itemMeta">Role: ${escapeHtml(roleLine)}</div>
           <div class="itemMeta">Nostr seen ${nostrSeen ? new Date(nostrSeen).toLocaleString() : 'n/a'}</div>
           <div class="itemMeta">Swarm seen ${swarmSeen ? new Date(swarmSeen).toLocaleString() : 'n/a'}</div>
         `;
@@ -900,9 +904,13 @@ function renderPeers(list) {
       nostrSeen ? 'nostr' : '',
       swarmSeen ? 'swarm' : '',
     ].filter(Boolean).join(' + ') || 'unknown';
+    const role = String(e.role || '').trim();
+    const serviceVersion = String(e.serviceVersion || '').trim();
+    const roleLine = serviceVersion ? `${role || 'unknown'} (${serviceVersion})` : (role || 'unknown');
     item.innerHTML = `
       <div class="itemTitle">${escapeHtml(e.devicePk || '')}</div>
       <div class="itemMeta">Source: ${escapeHtml(sources)}</div>
+      <div class="itemMeta">Role: ${escapeHtml(roleLine)}</div>
       <div class="itemMeta">Nostr seen ${nostrSeen ? new Date(nostrSeen).toLocaleString() : 'n/a'}</div>
       <div class="itemMeta">Swarm seen ${swarmSeen ? new Date(swarmSeen).toLocaleString() : 'n/a'}</div>
     `;
@@ -991,7 +999,9 @@ async function refreshAll() {
     swarm.cacheDeviceRecords(swarmDevices || []);
     if (!swarmBootRequested) {
       swarmBootRequested = true;
-      client.call('swarm.discovery.request', {}, { timeoutMs: 20000 }).catch(() => {});
+      client.call('swarm.record.request', { want: ['identity', 'device'] }, { timeoutMs: 20000 })
+        .catch(() => client.call('swarm.discovery.request', {}, { timeoutMs: 20000 }))
+        .catch(() => {});
     }
   } else {
     setSwarmState('disabled');

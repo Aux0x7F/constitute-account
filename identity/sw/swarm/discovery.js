@@ -14,6 +14,9 @@ const RECORD_TAG = 'swarm_discovery';
 const MAX_SKEW_SEC = 10 * 60;
 const ID_INDEX_KEY = 'swarm:index:identity';
 const DEV_INDEX_KEY = 'swarm:index:device';
+const DHT_INDEX_KEY = 'swarm:index:dht';
+const BROWSER_ROLE = 'browser';
+const SERVICE_VERSION = 'web-dev';
 
 function nowSec() {
   return Math.floor(Date.now() / 1000);
@@ -23,11 +26,28 @@ function recordKey(type, id) {
   return `swarm:${type}:${String(id || '').trim()}`;
 }
 
-function asTags(type) {
-  return [
+function dhtIndexId(scope, key) {
+  return `${encodeURIComponent(String(scope || '').trim())}|${encodeURIComponent(String(key || '').trim())}`;
+}
+
+function parseDhtIndexId(id) {
+  const raw = String(id || '');
+  const [scopeEnc, keyEnc] = raw.split('|');
+  if (!scopeEnc || !keyEnc) return null;
+  return {
+    scope: decodeURIComponent(scopeEnc),
+    key: decodeURIComponent(keyEnc),
+  };
+}
+
+function asTags(type, role = '') {
+  const tags = [
     ['t', RECORD_TAG],
     ['type', type],
   ];
+  const normalizedRole = String(role || '').trim();
+  if (normalizedRole) tags.push(['role', normalizedRole]);
+  return tags;
 }
 
 function parseContent(ev) {
@@ -53,6 +73,7 @@ export async function makeIdentityRecord() {
     devicePks: (ident.devices || []).map(d => d.pk).filter(Boolean),
     updatedAt: Date.now(),
     expiresAt: Date.now() + 24 * 60 * 60 * 1000,
+    serviceVersion: SERVICE_VERSION,
   };
 
   const unsigned = {
@@ -77,12 +98,42 @@ export async function makeDeviceRecord() {
     deviceLabel: dev.label || '',
     updatedAt: Date.now(),
     expiresAt: Date.now() + 24 * 60 * 60 * 1000,
+    role: BROWSER_ROLE,
+    relays: [],
+    serviceVersion: SERVICE_VERSION,
   };
 
   const unsigned = {
     kind: RECORD_KIND,
     created_at: nowSec(),
-    tags: asTags('device'),
+    tags: asTags('device', BROWSER_ROLE),
+    content: JSON.stringify(payload),
+    pubkey: dev.nostr.pk,
+  };
+
+  return finalizeEvent(unsigned, hexToBytes(dev.nostr.skHex));
+}
+
+export async function makeDhtRecord(scope, key, value, opts = {}) {
+  const dev = await ensureDevice();
+  if (!dev?.nostr?.pk) throw new Error('no device key');
+  const dhtScope = String(scope || '').trim();
+  const dhtKey = String(key || '').trim();
+  if (!dhtScope || !dhtKey) throw new Error('missing scope or key');
+
+  const payload = {
+    scope: dhtScope,
+    key: dhtKey,
+    value,
+    authorPk: dev.nostr.pk,
+    updatedAt: Number(opts?.updatedAt || Date.now()),
+    expiresAt: Number(opts?.expiresAt || (Date.now() + 24 * 60 * 60 * 1000)),
+  };
+
+  const unsigned = {
+    kind: RECORD_KIND,
+    created_at: nowSec(),
+    tags: asTags('dht'),
     content: JSON.stringify(payload),
     pubkey: dev.nostr.pk,
   };
@@ -108,12 +159,27 @@ export async function putDeviceRecord(ev) {
   return { ok: true };
 }
 
+export async function putDhtRecord(ev) {
+  const ok = await validateRecord(ev, 'dht');
+  if (!ok) return { ok: false };
+  const payload = parseContent(ev);
+  const id = dhtIndexId(payload.scope, payload.key);
+  await kvSet(recordKey('dht', id), ev);
+  await addToIndex(DHT_INDEX_KEY, id);
+  return { ok: true };
+}
+
 export async function getIdentityRecord(identityId) {
   return await kvGet(recordKey('identity', identityId));
 }
 
 export async function getDeviceRecord(devicePk) {
   return await kvGet(recordKey('device', devicePk));
+}
+
+export async function getDhtRecord(scope, key) {
+  const id = dhtIndexId(scope, key);
+  return await kvGet(recordKey('dht', id));
 }
 
 export async function listIdentityRecords() {
@@ -136,6 +202,21 @@ export async function listDeviceRecords() {
     const ev = await getDeviceRecord(id);
     if (!ev) continue;
     const ok = await validateRecord(ev, 'device');
+    if (!ok) continue;
+    out.push(JSON.parse(ev.content || '{}'));
+  }
+  return out;
+}
+
+export async function listDhtRecords() {
+  const ids = (await kvGet(DHT_INDEX_KEY)) || [];
+  const out = [];
+  for (const id of (Array.isArray(ids) ? ids : [])) {
+    const parsed = parseDhtIndexId(id);
+    if (!parsed) continue;
+    const ev = await getDhtRecord(parsed.scope, parsed.key);
+    if (!ev) continue;
+    const ok = await validateRecord(ev, 'dht');
     if (!ok) continue;
     out.push(JSON.parse(ev.content || '{}'));
   }
@@ -165,6 +246,16 @@ export async function validateRecord(ev, expectedType) {
   if (expectedType === 'device') {
     if (!payload.devicePk) return false;
     if (payload.devicePk !== ev.pubkey) return false;
+    const roleTag = tags.find(t => Array.isArray(t) && t[0] === 'role');
+    const rolePayload = String(payload.role || '').trim();
+    if (roleTag && rolePayload && roleTag[1] !== rolePayload) return false;
+  }
+
+  if (expectedType === 'dht') {
+    if (!payload.scope || !payload.key) return false;
+    if (!Object.prototype.hasOwnProperty.call(payload, 'value')) return false;
+    const authorPk = String(payload.authorPk || '').trim();
+    if (authorPk && authorPk !== ev.pubkey) return false;
   }
 
   return true;

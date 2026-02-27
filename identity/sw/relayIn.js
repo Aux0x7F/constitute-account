@@ -1,3 +1,4 @@
+import { verifyEvent } from 'https://cdn.jsdelivr.net/npm/nostr-tools@2.7.2/+esm';
 // FILE: identity/sw/relayIn.js
 
 import { nip04Decrypt } from './nostr.js';
@@ -11,12 +12,39 @@ import { blockedAdd, blockedIs, blockedRemove } from './blocklist.js';
 import { kvGet, kvSet } from './idb.js';
 import { directoryUpsert } from './directory.js';
 import { isZoneJoined, joinZone, addSelfToZoneList, publishZonePresence, publishZoneList, publishZoneListRequest, publishZoneMeta, publishZoneMetaRequest, publishZoneProbe, setZoneList, getZoneList, updateZoneName, listZones } from './zone.js';
-import { putIdentityRecord, putDeviceRecord, validateRecord, makeIdentityRecord, makeDeviceRecord } from './swarm/index.js';
+import { putIdentityRecord, putDeviceRecord, putDhtRecord, getDhtRecord, validateRecord, makeIdentityRecord, makeDeviceRecord, makeDhtRecord } from './swarm/index.js';
 import { publishAppEvent } from './relayOut.js';
 
 const REPLAY_WINDOW_SEC = 10 * 60;
 const REPLAY_SKEW_SEC = 2 * 60;
 const REPLAY_CAP = 400;
+
+function createdAtOk(createdAt) {
+  const ts = Number(createdAt || 0);
+  if (!ts) return false;
+  const now = Math.floor(Date.now() / 1000);
+  if (ts < now - REPLAY_WINDOW_SEC) return false;
+  if (ts > now + REPLAY_SKEW_SEC) return false;
+  return true;
+}
+
+function payloadTimeOk(payload) {
+  if (!payload || typeof payload !== 'object') return false;
+  const hasTs = Object.prototype.hasOwnProperty.call(payload, 'ts');
+  if (!hasTs) return true;
+  const ts = Number(payload.ts || 0);
+  if (!Number.isFinite(ts) || ts <= 0) return false;
+  const now = Date.now();
+  if (ts > now + (REPLAY_SKEW_SEC * 1000)) return false;
+
+  const hasTtl = Object.prototype.hasOwnProperty.call(payload, 'ttl');
+  if (!hasTtl) return ts >= now - (REPLAY_WINDOW_SEC * 1000);
+
+  const ttl = Number(payload.ttl || 0);
+  if (!Number.isFinite(ttl) || ttl <= 0) return false;
+  if (now > ts + (ttl * 1000)) return false;
+  return true;
+}
 
 async function replayAccept(identityLabel, ev) {
   const id = String(ev?.id || '').trim();
@@ -72,16 +100,52 @@ export async function handleRelayFrame(sw, raw) {
 
   const tags = Array.isArray(ev.tags) ? ev.tags : [];
   const hasAppTag = tags.some(t => Array.isArray(t) && t[0] === 't' && t[1] === getAppTag());
-  if (!hasAppTag) return;
+  const hasDiscoveryTag = tags.some(t => Array.isArray(t) && t[0] === 't' && t[1] === 'swarm_discovery');
+  if (!hasAppTag && !hasDiscoveryTag) return;
+  if (!verifyEvent(ev)) return;
+  if (!createdAtOk(ev.created_at)) return;
 
   // Drop frames from blocked senders (minimal implicit trust).
   // NOTE: This is separate from payload.devicePk checks below.
   const senderPk = String(ev.pubkey || '').trim();
   if (senderPk && await blockedIs({ pk: senderPk })) return;
 
+  if (Number(ev.kind || 0) === 30078 && hasDiscoveryTag) {
+    const typeTag = tags.find(t => Array.isArray(t) && t[0] === 'type');
+    const recType = String(typeTag?.[1] || '').trim();
+    if (recType === 'identity') {
+      const ok = await validateRecord(ev, 'identity');
+      if (!ok) return;
+      await putIdentityRecord(ev).catch(() => {});
+      log(sw, 'swarm identity record stored');
+      pokeUi(sw);
+      return;
+    }
+    if (recType === 'device') {
+      const ok = await validateRecord(ev, 'device');
+      if (!ok) return;
+      await putDeviceRecord(ev).catch(() => {});
+      log(sw, 'swarm device record stored');
+      pokeUi(sw);
+      return;
+    }
+    if (recType === 'dht') {
+      const ok = await validateRecord(ev, 'dht');
+      if (!ok) return;
+      await putDhtRecord(ev).catch(() => {});
+      log(sw, 'swarm dht record stored');
+      pokeUi(sw);
+      return;
+    }
+    return;
+  }
+
+  if (!hasAppTag) return;
+
   let payload = null;
   try { payload = JSON.parse(ev.content || ''); } catch { return; }
   if (!payload?.type) return;
+  if (!payloadTimeOk(payload)) return;
 
   const dev = await getDevice();
   const ident = await getIdentity();
@@ -139,6 +203,9 @@ export async function handleRelayFrame(sw, raw) {
       lastSeen: Date.now(),
       devicePk: String(payload.devicePk || '').trim(),
       swarm: String(payload.swarm || ''),
+      role: String(payload.role || ''),
+      relays: Array.isArray(payload.relays) ? payload.relays : [],
+      serviceVersion: String(payload.serviceVersion || ''),
     });
     pokeUi(sw);
     return;
@@ -465,7 +532,7 @@ export async function handleRelayFrame(sw, raw) {
     return;
   }
 
-  // --- Swarm discovery records ---
+  // --- Swarm discovery / DHT records ---
   if (payload.type === 'swarm_identity_record' && payload.record) {
     const ok = await validateRecord(payload.record, 'identity');
     if (!ok) { log(sw, 'swarm identity record rejected'); return; }
@@ -482,19 +549,93 @@ export async function handleRelayFrame(sw, raw) {
     pokeUi(sw);
     return;
   }
-  if (payload.type === 'swarm_discovery_request') {
+  if (payload.type === 'swarm_dht_record' && payload.record) {
+    const ok = await validateRecord(payload.record, 'dht');
+    if (!ok) { log(sw, 'swarm dht record rejected'); return; }
+    await putDhtRecord(payload.record).catch(() => {});
+    log(sw, 'swarm dht record stored');
+    pokeUi(sw);
+    return;
+  }
+  if (payload.type === 'swarm_record_request' || payload.type === 'swarm_discovery_request') {
     if (!ident?.linked) return;
-    log(sw, 'swarm discovery request received');
-    if (payload.want?.includes('identity')) {
-      const rec = await makeIdentityRecord().catch(() => null);
-      if (rec) await publishAppEvent(sw, { type: 'swarm_identity_record', record: rec }).catch(() => {});
+    const requestId = String(payload.requestId || '').trim();
+    const want = Array.isArray(payload.want) && payload.want.length
+      ? payload.want.map(String)
+      : (payload.type === 'swarm_record_request' ? ['identity', 'device', 'dht'] : ['identity', 'device']);
+    const wantedIdentityId = String(payload.identityId || '').trim();
+    const wantedDevicePk = String(payload.devicePk || '').trim();
+
+    if (want.includes('identity')) {
+      if (!wantedIdentityId || wantedIdentityId === String(ident.id || '').trim()) {
+        const rec = await makeIdentityRecord().catch(() => null);
+        if (rec) await publishAppEvent(sw, { type: 'swarm_identity_record', requestId, record: rec }).catch(() => {});
+      }
     }
-    if (payload.want?.includes('device')) {
-      const rec = await makeDeviceRecord().catch(() => null);
-      if (rec) await publishAppEvent(sw, { type: 'swarm_device_record', record: rec }).catch(() => {});
+    if (want.includes('device')) {
+      if (!wantedDevicePk || wantedDevicePk === String(dev?.nostr?.pk || '').trim()) {
+        const rec = await makeDeviceRecord().catch(() => null);
+        if (rec) await publishAppEvent(sw, { type: 'swarm_device_record', requestId, record: rec }).catch(() => {});
+      }
+    }
+    if (want.includes('dht')) {
+      const scope = String(payload.scope || payload.dhtScope || '').trim();
+      const key = String(payload.key || payload.dhtKey || '').trim();
+      if (scope && key) {
+        const rec = await getDhtRecord(scope, key).catch(() => null);
+        if (rec) await publishAppEvent(sw, { type: 'swarm_dht_record', requestId, record: rec }).catch(() => {});
+      }
+    }
+    if (requestId) {
+      await publishAppEvent(sw, { type: 'swarm_record_response', requestId, status: 'complete', ts: Date.now() }).catch(() => {});
     }
     return;
   }
+  if (payload.type === 'swarm_dht_get') {
+    const requestId = String(payload.requestId || '').trim();
+    const scope = String(payload.scope || payload.dhtScope || '').trim();
+    const key = String(payload.key || payload.dhtKey || '').trim();
+    if (!scope || !key) return;
+    const rec = await getDhtRecord(scope, key).catch(() => null);
+    if (rec) await publishAppEvent(sw, { type: 'swarm_dht_record', requestId, record: rec }).catch(() => {});
+    if (requestId) {
+      await publishAppEvent(sw, { type: 'swarm_record_response', requestId, status: 'complete', ts: Date.now() }).catch(() => {});
+    }
+    return;
+  }
+  if (payload.type === 'swarm_dht_put') {
+    const requestId = String(payload.requestId || '').trim();
+    const scope = String(payload.scope || payload.dhtScope || '').trim();
+    const key = String(payload.key || payload.dhtKey || '').trim();
+    if (!scope || !key) return;
+    if (!Object.prototype.hasOwnProperty.call(payload, 'value')) return;
+
+    const rec = await makeDhtRecord(scope, key, payload.value, {
+      updatedAt: Number(payload.updatedAt || Date.now()),
+      expiresAt: Number(payload.expiresAt || (Date.now() + 24 * 60 * 60 * 1000)),
+    }).catch(() => null);
+
+    if (rec) {
+      await putDhtRecord(rec).catch(() => {});
+      await publishAppEvent(sw, { type: 'swarm_dht_record', requestId, record: rec }).catch(() => {});
+      pokeUi(sw);
+    }
+
+    if (requestId) {
+      await publishAppEvent(sw, { type: 'swarm_record_response', requestId, status: 'complete', ts: Date.now() }).catch(() => {});
+    }
+    return;
+  }
+  if (payload.type === 'swarm_record_response') {
+    emit(sw, {
+      type: 'swarm_record_response',
+      requestId: String(payload.requestId || '').trim(),
+      status: String(payload.status || ''),
+      ts: Number(payload.ts || Date.now()),
+    });
+    return;
+  }
+
   // --- Swarm signal (WebRTC signaling) ---
   if (payload.type === 'swarm_signal') {
     const to = String(payload.to || '').trim();

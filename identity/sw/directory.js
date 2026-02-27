@@ -28,6 +28,9 @@ export async function directoryUpsert(entry) {
     lastSeen: Number(entry?.lastSeen || Date.now()),
     devicePk,
     swarm: String(entry?.swarm || ''),
+    role: String(entry?.role || ''),
+    relays: Array.isArray(entry?.relays) ? entry.relays.map(String) : [],
+    serviceVersion: String(entry?.serviceVersion || ''),
   });
 
   while (next.length > CAP) next.pop();

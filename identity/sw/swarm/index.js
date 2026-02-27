@@ -2,12 +2,16 @@
 export {
   makeIdentityRecord,
   makeDeviceRecord,
+  makeDhtRecord,
   putIdentityRecord,
   putDeviceRecord,
+  putDhtRecord,
   getIdentityRecord,
   getDeviceRecord,
+  getDhtRecord,
   listIdentityRecords,
   listDeviceRecords,
+  listDhtRecords,
   validateRecord,
 } from './discovery.js';
 
