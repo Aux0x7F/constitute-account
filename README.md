@@ -1,72 +1,61 @@
 # Constitute
 
-Browser-native, decentralized identity and device association system with relay-based signaling and a path to peer-to-peer swarm sync.
+Browser-native identity and discovery client for the Constitution ecosystem.
+`constitute` is the web-side runtime that converges against `constitute-gateway` contracts.
 
 ## Status
 - Prototype: active development
-- Discovery bootstrap achieved (zones + directory)
-- P0: native gateway backbone (constitute-gateway)
-- P2: browser swarm transport (TURN-backed)
-- P3: constitute refactor
+- Discovery bootstrap: implemented (zones + directory)
+- Gateway contract convergence: in progress (app-channel parity + ingest hardening)
+- Browser swarm transport: staged behind gateway-first convergence
 
 ## Key Concepts
 - Identity: cryptographic grouping of devices
-- Device: cryptographic endpoint, optionally WebAuthn-backed
-- Pairing: device association via approval flow
-- Zone: discovery scope joined by a shareable key
-- Directory: local store of discovered devices
+- Device: cryptographic endpoint (software or WebAuthn-backed)
+- Pairing: approval-based device association
+- Zone: discovery scope joined via shared key
+- Directory: local cache of discovered peers
 
-## Features
-- Device identity (software + WebAuthn option)
-- Identity create/join with pairing approval flow
-- Notifications + pending request management
-- Relay transport via SharedWorker
-- Directory of discovered devices (from zone presence)
+## Current Features
+- Device identity lifecycle (software + optional WebAuthn)
+- Identity create/join + pairing approval flow
+- Notifications and pending-request management
+- Relay transport via SharedWorker + Service Worker authority
+- Zone presence/list propagation and directory updates
+- Swarm record cache (identity/device) with signed record validation
+- Canonical app-channel plumbing for `swarm_record_request` and `swarm_dht_get/put`
 
 ## Project Layout
-- app.js: UI + activity routing + SW RPC client
-- identity/client.js: SW RPC client
-- relay.worker.js: WebSocket relay transport (SharedWorker)
-- identity/sw/*: Service Worker identity daemon
-- ARCHITECTURE.md: system architecture and roadmap
+- `app.js`: UI state, routing, and peer presentation
+- `identity/client.js`: window-to-Service Worker RPC bridge
+- `relay.worker.js`: shared relay transport worker
+- `identity/sw/*`: Service Worker daemon and protocol handlers
+- `ARCHITECTURE.md`: architecture and roadmap
 
 ## Architecture
-See `ARCHITECTURE.md` for the full system overview and roadmap.
+See `ARCHITECTURE.md` for system design and convergence direction.
 
 ## Running Locally
-1. Serve the repo at http://localhost:8000 (any static server)
+1. Serve this repo on `http://localhost:8000` (or equivalent static host)
 2. Open in a modern browser with Service Worker support
-3. Ensure HTTPS or localhost for WebAuthn
+3. Use HTTPS or localhost for WebAuthn paths
 
 ## Usage
-- Create an identity or join an existing one
-- Pair additional devices using the pairing flow
-- Settings > Peers manages zones and discovery devices
-- If no identity is linked, the UI redirects to onboarding
-
-## Zones
-- Zones are discovery scopes with a human label
-- Keys are generated at creation and shared via link
-- Zone presence + member lists update the Directory
+- Create or join an identity
+- Pair additional devices from notifications / pairing flow
+- Manage zones and discovered peers in `Settings > Peers`
+- If identity/device prerequisites are missing, UI routes to onboarding
 
 ## Roadmap Snapshot
-- P0: constitute-gateway (native mesh/relay backbone)
-- P2: browser swarm transport (TURN fallback)
-- P3: refactor and modularization
-- Shared encrypted data layers
-- Messaging maturation + double-ratchet encryption
-
-## TODO
-- Improve Peers UX clarity
-- Gateway protocol + auth envelope
-- Constitute-gateway repo scaffold + run docs
-- Shared encrypted data layers
-- Messaging maturation + double-ratchet encryption
+- P0: converge web behavior to frozen gateway protocol contracts
+- P1: validate browser <-> gateway integration paths end-to-end
+- P2: browser swarm transport refinement (TURN as fallback boundary)
+- P3: codebase refactor and modularization
 
 ## Security Notes
-- UI never handles secret keys
-- Service Worker is the cryptographic authority
-- Relay is transport only (no trust assumed)
+- UI does not hold long-term secret material
+- Service Worker is the local cryptographic authority
+- Relay transport is treated as untrusted; envelopes must validate
 
 ## License
 TBD

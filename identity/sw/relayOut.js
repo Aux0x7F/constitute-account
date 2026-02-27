@@ -4,6 +4,7 @@ import { signEventUnsigned } from './nostr.js';
 import { ensureDevice } from './deviceStore.js';
 
 const APP_TAG = 'constitute';
+const DISCOVERY_TAG = 'swarm_discovery';
 const SUB_ID = 'constitute_sub_v2';
 
 function nowSec() { return Math.floor(Date.now() / 1000); }
@@ -19,7 +20,10 @@ export async function relaySend(sw, frameArr) {
 }
 
 export async function subscribeOnRelayOpen(sw, ident, logFn) {
-  const filters = [{ kinds: [1], '#t': [APP_TAG], limit: 200 }];
+  const filters = [
+    { kinds: [1], '#t': [APP_TAG], limit: 400 },
+    { kinds: [30078], '#t': [DISCOVERY_TAG], limit: 400 },
+  ];
   await relaySend(sw, ['REQ', SUB_ID, ...filters]);
   if (logFn) logFn(`sent REQ subscribe`);
 }
