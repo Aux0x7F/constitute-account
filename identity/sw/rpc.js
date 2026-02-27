@@ -41,6 +41,17 @@ function makeSwarmRequestId(prefix = 'req') {
   return `${prefix}-${b64url(randomBytes(8))}`;
 }
 
+function pairingTags(identityLabel, zones = [], toPk = '') {
+  const tags = [['i', String(identityLabel || '').trim()]];
+  for (const z of (Array.isArray(zones) ? zones : [])) {
+    const key = String(z?.key || '').trim();
+    if (key) tags.push(['z', key]);
+  }
+  const peerPk = String(toPk || '').trim();
+  if (peerPk) tags.push(['p', peerPk]);
+  return tags;
+}
+
 export async function handleRpc(sw, method, params, getRelayState, setRelayState) {
   const LIST_MAX_AGE_MS = 3 * 60 * 1000;
   async function startPresenceLoop() {
@@ -495,6 +506,7 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
     await kvSet('device', dev);
     await setPendingJoinIdentityLabel(identityLabel);
 
+    const zones = await listZones({}).catch(() => []);
     await publishAppEvent(sw, {
       type: 'pair_request',
       identity: identityLabel,
@@ -502,7 +514,7 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
       devicePk: dev.nostr.pk,
       deviceDid: dev.did,
       deviceLabel,
-    }, [['i', identityLabel]]);
+    }, pairingTags(identityLabel, zones));
 
     log(sw, `pair_request sent identity=${identityLabel} code=${code}`);
     status(sw, 'pair request sent');
@@ -596,7 +608,10 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
     const r = reqs.find(x => x.id === rid);
     if (!r) throw new Error('request not found');
 
+    const ident = await getIdentity();
     const dev = await ensureDevice();
+
+    const zones = await listZones(ident || {}).catch(() => []);
 
     await publishAppEvent(sw, {
       type: 'pair_reject',
@@ -604,7 +619,7 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
       code: r.code,
       toPk: r.devicePk,
       fromPk: dev.nostr.pk,
-    }, [['i', r.identityLabel], ['p', r.devicePk]]);
+    }, pairingTags(r.identityLabel, zones, r.devicePk));
 
     await publishAppEvent(sw, {
       type: 'pair_resolved',
@@ -613,7 +628,7 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
       code: r.code,
       devicePk: r.devicePk,
       status: 'rejected',
-    }, [['i', r.identityLabel], ['p', r.devicePk]]);
+    }, pairingTags(r.identityLabel, zones, r.devicePk));
 
     await pendingRemove(rid);
     await notifRemove(`n-pair-${rid}`);
@@ -652,6 +667,8 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
 
     const encryptedRoomKey = await nip04Encrypt(dev.nostr.skHex, r.devicePk, payload);
 
+    const zones = await listZones(ident || {}).catch(() => []);
+
     await publishAppEvent(sw, {
       type: 'pair_approve',
       identity: r.identityLabel,
@@ -659,7 +676,7 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
       toPk: r.devicePk,
       fromPk: dev.nostr.pk,
       encryptedRoomKey,
-    }, [['i', r.identityLabel], ['p', r.devicePk]]);
+    }, pairingTags(r.identityLabel, zones, r.devicePk));
 
     await publishAppEvent(sw, {
       type: 'pair_resolved',
@@ -668,7 +685,7 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
       code: r.code,
       devicePk: r.devicePk,
       status: 'approved',
-    }, [['i', r.identityLabel], ['p', r.devicePk]]);
+    }, pairingTags(r.identityLabel, zones, r.devicePk));
 
     await pendingRemove(rid);
     await notifRemove(`n-pair-${rid}`);
