@@ -128,6 +128,7 @@ const SERVICE_APP_REPO_MAP = Object.freeze({
 });
 let appRepoCatalog = [];
 let appEnabledIds = new Set();
+let appLaunchHints = new Map();
 window.__constituteEnabledApps = [];
 
 class SwarmTransport {
@@ -673,6 +674,10 @@ function normalizeRole(value) {
   return String(value || '').trim().toLowerCase();
 }
 
+function repoKey(owner, repo) {
+  return `${String(owner || '').trim().toLowerCase()}/${String(repo || '').trim().toLowerCase()}`;
+}
+
 function findAppIndexByRepo(owner, repo) {
   const o = String(owner || '').trim().toLowerCase();
   const r = String(repo || '').trim().toLowerCase();
@@ -778,9 +783,14 @@ function serviceModuleHints(rec) {
   const parsedRepo = parseServiceRepoHint(uiRepo, uiRef);
   if (!parsedRepo) return null;
 
+  const sessionWsUrl = String(rec?.sessionWsUrl || rec?.session_ws_url || rec?.publicWsUrl || '').trim();
+
   return {
+    owner: parsedRepo.owner,
+    repo: parsedRepo.repo,
     repoUrl: parsedRepo.url,
     manifestUrl: uiManifestUrl,
+    sessionWsUrl,
   };
 }
 
@@ -808,8 +818,15 @@ async function autoEnableAppsForIdentityDeviceRoles(identityDevices, swarmDevice
   }
 
   const repoTargets = [];
+  const launchHints = new Map();
   if (directHints.length > 0) {
-    for (const hint of directHints) repoTargets.push(hint);
+    for (const hint of directHints) {
+      repoTargets.push(hint);
+      const key = repoKey(hint.owner, hint.repo);
+      if (hint.sessionWsUrl && key !== '/') {
+        launchHints.set(key, { ws: hint.sessionWsUrl });
+      }
+    }
   } else {
     const fallbackRepoUrls = new Set();
     for (const role of roles) {
@@ -826,6 +843,10 @@ async function autoEnableAppsForIdentityDeviceRoles(identityDevices, swarmDevice
   }
 
   if (repoTargets.length === 0) return;
+
+  if (launchHints.size > 0) {
+    appLaunchHints = launchHints;
+  }
 
   const dedupe = new Set();
   let changed = false;
@@ -924,12 +945,17 @@ async function appLaunchUrl(app) {
   return `https://cdn.jsdelivr.net/gh/${owner}/${repo}@${ref}/${entry}`;
 }
 
-function appLaunchContextQuery() {
+function appLaunchContextQuery(app) {
   const q = new URLSearchParams();
   const identityId = String(lastIdentity?.id || '').trim();
   const devicePk = String(lastDeviceState?.pk || '').trim();
   if (identityId) q.set('identityId', identityId);
   if (devicePk) q.set('devicePk', devicePk);
+
+  const key = repoKey(app?.owner, app?.repo);
+  const hint = appLaunchHints.get(key);
+  if (hint?.ws) q.set('ws', String(hint.ws));
+
   return q.toString();
 }
 
@@ -978,7 +1004,7 @@ function renderHomeApps() {
       }
       try {
         const target = new URL(base);
-        const ctx = appLaunchContextQuery();
+        const ctx = appLaunchContextQuery(app);
         if (ctx) {
           const combined = target.search ? `${target.search}&${ctx}` : `?${ctx}`;
           target.search = combined;
