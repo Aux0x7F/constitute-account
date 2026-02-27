@@ -60,7 +60,7 @@ const identityLinkedEl = document.getElementById('identityLinked');
 const appRepoInput = document.getElementById('appRepoInput');
 const btnAddAppRepo = document.getElementById('btnAddAppRepo');
 const appRepoStatus = document.getElementById('appRepoStatus');
-const appCapabilityList = document.getElementById('appCapabilityList');
+const appCapabilityList = document.getElementById('appCapabilityList');\nconst homeAppsList = document.getElementById('homeAppsList');
 
 const joinDeviceLabelEl = document.getElementById('joinDeviceLabel');
 
@@ -663,10 +663,10 @@ function publishEnabledApps() {
     entry: String(app.entry || 'index.html'),
     capabilities: Array.isArray(app.capabilities) ? app.capabilities.map(String) : [],
     version: String(app.version || ''),
-    description: String(app.description || ''),
+    description: String(app.description || ''),\n    manifestUrl: String(app.manifestUrl || ''),\n    launchUrl: String(app.launchUrl || ''),
   }));
   window.__constituteEnabledApps = enabled;
-  window.dispatchEvent(new CustomEvent('constitute.apps.updated', { detail: { enabled } }));
+  window.dispatchEvent(new CustomEvent('constitute.apps.updated', { detail: { enabled } }));\n  renderHomeApps();
 }
 
 function normalizeRole(value) {
@@ -682,17 +682,49 @@ function findAppIndexByRepo(owner, repo) {
   );
 }
 
-async function ensureAppRepoEnabledByUrl(url) {
+function findAppIndexByManifestUrl(url) {
+  const target = String(url || '').trim();
+  if (!target) return -1;
+  return appRepoCatalog.findIndex((entry) => String(entry?.manifestUrl || '').trim() === target);
+}
+
+function parseServiceRepoHint(value, repoRef = 'main') {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+
+  if (/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(raw)) {
+    const [owner, repo] = raw.split('/');
+    const ref = String(repoRef || 'main').trim() || 'main';
+    return {
+      owner,
+      repo,
+      ref,
+      url: `https://github.com/${owner}/${repo}/tree/${ref}`,
+    };
+  }
+
+  const parsed = parseGitHubRepoInput(raw);
+  if (!parsed) return null;
+  if (repoRef && parsed.ref === 'main') {
+    parsed.ref = String(repoRef).trim() || parsed.ref;
+    parsed.url = `https://github.com/${parsed.owner}/${parsed.repo}/tree/${parsed.ref}`;
+  }
+  return parsed;
+}
+
+async function ensureAppRepoEnabledByUrl(url, opts = {}) {
   const parsed = parseGitHubRepoInput(url);
   if (!parsed) return false;
 
   const existingIdx = findAppIndexByRepo(parsed.owner, parsed.repo);
+  const manifestUrl = String(opts?.manifestUrl || '').trim();
+
   if (existingIdx >= 0) {
     const existing = appRepoCatalog[existingIdx];
     const existingId = String(existing?.id || `${existing?.owner}/${existing?.repo}`);
     if (existing?.unresolved) {
       try {
-        const manifest = await fetchAppManifest(parsed);
+        const manifest = await fetchAppManifest(parsed, { manifestUrl });
         appRepoCatalog[existingIdx] = manifest;
         appEnabledIds.delete(existingId);
         appEnabledIds.add(String(manifest.id || `${manifest.owner}/${manifest.repo}`));
@@ -701,21 +733,55 @@ async function ensureAppRepoEnabledByUrl(url) {
         return false;
       }
     }
+    let changed = false;
+    if (manifestUrl && String(existing?.manifestUrl || '').trim() !== manifestUrl) {
+      existing.manifestUrl = manifestUrl;
+      changed = true;
+    }
     if (!appEnabledIds.has(existingId)) {
       appEnabledIds.add(existingId);
-      return true;
+      changed = true;
     }
-    return false;
+    return changed;
+  }
+
+  if (manifestUrl) {
+    const byManifestIdx = findAppIndexByManifestUrl(manifestUrl);
+    if (byManifestIdx >= 0) {
+      const existing = appRepoCatalog[byManifestIdx];
+      const existingId = String(existing?.id || `${existing?.owner}/${existing?.repo}`);
+      if (!appEnabledIds.has(existingId)) {
+        appEnabledIds.add(existingId);
+        return true;
+      }
+      return false;
+    }
   }
 
   try {
-    const manifest = await fetchAppManifest(parsed);
+    const manifest = await fetchAppManifest(parsed, { manifestUrl });
     appRepoCatalog.push(manifest);
     appEnabledIds.add(String(manifest.id || `${manifest.owner}/${manifest.repo}`));
     return true;
   } catch {
     return false;
   }
+}
+
+function serviceModuleHints(rec) {
+  const uiRepo = String(rec?.uiRepo || rec?.ui_repo || '').trim();
+  const uiRef = String(rec?.uiRef || rec?.ui_ref || rec?.['ref'] || '').trim() || 'main';
+  const uiManifestUrl = String(rec?.uiManifestUrl || rec?.ui_manifest_url || '').trim();
+
+  if (!uiRepo && !uiManifestUrl) return null;
+
+  const parsedRepo = parseServiceRepoHint(uiRepo, uiRef);
+  if (!parsedRepo) return null;
+
+  return {
+    repoUrl: parsedRepo.url,
+    manifestUrl: uiManifestUrl,
+  };
 }
 
 async function autoEnableAppsForIdentityDeviceRoles(identityDevices, swarmDevices) {
@@ -728,6 +794,7 @@ async function autoEnableAppsForIdentityDeviceRoles(identityDevices, swarmDevice
 
   const roles = new Set();
   const services = new Set();
+  const directHints = [];
   for (const rec of (Array.isArray(swarmDevices) ? swarmDevices : [])) {
     const pk = String(rec?.devicePk || rec?.pk || '').trim();
     if (!identityPks.has(pk)) continue;
@@ -735,24 +802,40 @@ async function autoEnableAppsForIdentityDeviceRoles(identityDevices, swarmDevice
     if (role) roles.add(role);
     const service = normalizeRole(rec?.service || '');
     if (service) services.add(service);
+
+    const hint = serviceModuleHints(rec);
+    if (hint) directHints.push(hint);
   }
 
-  if (roles.size === 0 && services.size === 0) return;
-
-  const repoUrls = new Set();
-  for (const role of roles) {
-    const mapped = ROLE_APP_REPO_MAP[role] || [];
-    for (const u of mapped) repoUrls.add(u);
+  const repoTargets = [];
+  if (directHints.length > 0) {
+    for (const hint of directHints) repoTargets.push(hint);
+  } else {
+    const fallbackRepoUrls = new Set();
+    for (const role of roles) {
+      const mapped = ROLE_APP_REPO_MAP[role] || [];
+      for (const u of mapped) fallbackRepoUrls.add(u);
+    }
+    for (const service of services) {
+      const mapped = SERVICE_APP_REPO_MAP[service] || [];
+      for (const u of mapped) fallbackRepoUrls.add(u);
+    }
+    for (const repoUrl of fallbackRepoUrls) {
+      repoTargets.push({ repoUrl, manifestUrl: '' });
+    }
   }
-  for (const service of services) {
-    const mapped = SERVICE_APP_REPO_MAP[service] || [];
-    for (const u of mapped) repoUrls.add(u);
-  }
-  if (repoUrls.size === 0) return;
 
+  if (repoTargets.length === 0) return;
+
+  const dedupe = new Set();
   let changed = false;
-  for (const repoUrl of repoUrls) {
-    const didChange = await ensureAppRepoEnabledByUrl(repoUrl);
+  for (const target of repoTargets) {
+    const key = `${target.repoUrl}@@${target.manifestUrl || ''}`;
+    if (dedupe.has(key)) continue;
+    dedupe.add(key);
+    const didChange = await ensureAppRepoEnabledByUrl(target.repoUrl, {
+      manifestUrl: target.manifestUrl,
+    });
     changed = changed || didChange;
   }
 
@@ -760,64 +843,10 @@ async function autoEnableAppsForIdentityDeviceRoles(identityDevices, swarmDevice
     saveAppPrefs();
     publishEnabledApps();
     renderAppCatalog();
-    setAppStatus('Auto-enabled app repos for detected device roles.');
+    renderHomeApps();
+    setAppStatus('Auto-enabled app repos from detected service records.');
   }
 }
-
-function parseGitHubRepoInput(raw) {
-  const s = String(raw || '').trim();
-  if (!s) return null;
-
-  if (/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(s)) {
-    const [owner, repo] = s.split('/');
-    return { owner, repo, ref: 'main', url: `https://github.com/${owner}/${repo}` };
-  }
-
-  try {
-    const u = new URL(s);
-    if (u.hostname !== 'github.com') return null;
-    const parts = u.pathname.split('/').filter(Boolean);
-    if (parts.length < 2) return null;
-    const owner = parts[0];
-    const repo = parts[1].replace(/\.git$/i, '');
-    let ref = 'main';
-    if (parts.length >= 4 && parts[2] === 'tree') ref = parts[3];
-    return { owner, repo, ref, url: `https://github.com/${owner}/${repo}` };
-  } catch {
-    return null;
-  }
-}
-
-async function fetchAppManifest(repo) {
-  const refs = [repo.ref || 'main', 'master'];
-  let lastErr = null;
-  for (const ref of refs) {
-    const rawUrl = `https://raw.githubusercontent.com/${repo.owner}/${repo.repo}/${ref}/app.manifest.json`;
-    try {
-      const res = await fetch(rawUrl, { cache: 'no-store' });
-      if (!res.ok) throw new Error(`manifest fetch failed (${res.status})`);
-      const manifest = await res.json();
-      const label = String(manifest?.label || '').trim();
-      if (!label) throw new Error('manifest.label is required');
-      return {
-        id: String(manifest?.id || `${repo.owner}/${repo.repo}`),
-        label,
-        entry: String(manifest?.entry || 'index.html'),
-        capabilities: Array.isArray(manifest?.capabilities) ? manifest.capabilities.map(String) : [],
-        description: String(manifest?.description || ''),
-        version: String(manifest?.version || ''),
-        owner: repo.owner,
-        repo: repo.repo,
-        ref,
-        url: repo.url,
-      };
-    } catch (err) {
-      lastErr = err;
-    }
-  }
-  throw lastErr || new Error('unable to fetch manifest');
-}
-
 function renderAppCatalog() {
   clear(appCapabilityList);
   if (!appCapabilityList) return;
@@ -882,6 +911,90 @@ function renderAppCatalog() {
   }
 }
 
+async function appLaunchUrl(app) {
+  const explicit = String(app?.launchUrl || '').trim();
+  if (explicit && /^https:\/\//.test(explicit)) return explicit;
+
+  const owner = String(app?.owner || '').trim();
+  const repo = String(app?.repo || '').trim();
+  const ref = String(app?.ref || 'main').trim() || 'main';
+  const entry = String(app?.entry || 'index.html').replace(/^\/+/, '');
+  if (!owner || !repo || !entry) return '';
+
+  return `https://cdn.jsdelivr.net/gh/${owner}/${repo}@${ref}/${entry}`;
+}
+
+function appLaunchContextQuery() {
+  const q = new URLSearchParams();
+  const identityId = String(lastIdentity?.id || '').trim();
+  const devicePk = String(lastDeviceState?.pk || '').trim();
+  if (identityId) q.set('identityId', identityId);
+  if (devicePk) q.set('devicePk', devicePk);
+  return q.toString();
+}
+
+function renderHomeApps() {
+  clear(homeAppsList);
+  if (!homeAppsList) return;
+
+  const apps = enabledAppManifests();
+  if (!apps.length) {
+    const d = document.createElement('div');
+    d.className = 'small muted';
+    d.textContent = 'No apps enabled.';
+    homeAppsList.appendChild(d);
+    return;
+  }
+
+  for (const app of apps) {
+    const row = document.createElement('div');
+    row.className = 'item appItem';
+
+    const left = document.createElement('div');
+    left.className = 'appItemLabel';
+
+    const text = document.createElement('div');
+    const title = document.createElement('strong');
+    title.textContent = app.label || app.id || 'App';
+
+    const meta = document.createElement('div');
+    meta.className = 'small muted';
+    const parts = [`${app.owner}/${app.repo}@${app.ref}`];
+    if (app.description) parts.push(app.description);
+    meta.textContent = parts.join(' - ');
+
+    text.appendChild(title);
+    text.appendChild(meta);
+    left.appendChild(text);
+
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.textContent = 'Launch';
+    btn.onclick = () => {
+      const base = appLaunchUrl(app);
+      if (!base) {
+        setAppStatus('No launch URL available for this app.', true);
+        return;
+      }
+      try {
+        const target = new URL(base);
+        const ctx = appLaunchContextQuery();
+        if (ctx) {
+          const combined = target.search ? `${target.search}&${ctx}` : `?${ctx}`;
+          target.search = combined;
+        }
+        window.open(target.toString(), '_blank', 'noopener,noreferrer');
+      } catch {
+        setAppStatus('App launch URL is invalid.', true);
+      }
+    };
+
+    row.appendChild(left);
+    row.appendChild(btn);
+    homeAppsList.appendChild(row);
+  }
+}
+
 async function addAppRepoFromInput() {
   const parsed = parseGitHubRepoInput(appRepoInput?.value);
   if (!parsed) {
@@ -927,7 +1040,7 @@ async function hydrateAppCatalog() {
         entry: String(entry.entry || 'index.html'),
         capabilities: Array.isArray(entry.capabilities) ? entry.capabilities.map(String) : [],
         description: String(entry.description || 'Manifest unavailable'),
-        version: String(entry.version || ''),
+        version: String(entry.version || ''),\n        manifestUrl: String(entry.manifestUrl || ''),\n        launchUrl: String(entry.launchUrl || ''),
         owner: parsed.owner,
         repo: parsed.repo,
         ref: parsed.ref || 'main',
@@ -1805,3 +1918,10 @@ function startSharedRelayPipe(client, relayUrl) {
     }
   }, 10000);
 })();
+
+
+
+
+
+
+
