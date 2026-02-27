@@ -124,6 +124,9 @@ const DEFAULT_APP_REPOS = ['https://github.com/Aux0x7F/constitute-nvr-ui'];
 const ROLE_APP_REPO_MAP = Object.freeze({
   nvr: ['https://github.com/Aux0x7F/constitute-nvr-ui'],
 });
+const SERVICE_APP_REPO_MAP = Object.freeze({
+  nvr: ['https://github.com/Aux0x7F/constitute-nvr-ui'],
+});
 let appRepoCatalog = [];
 let appEnabledIds = new Set();
 window.__constituteEnabledApps = [];
@@ -725,18 +728,25 @@ async function autoEnableAppsForIdentityDeviceRoles(identityDevices, swarmDevice
   if (identityPks.size === 0) return;
 
   const roles = new Set();
+  const services = new Set();
   for (const rec of (Array.isArray(swarmDevices) ? swarmDevices : [])) {
     const pk = String(rec?.devicePk || rec?.pk || '').trim();
     if (!identityPks.has(pk)) continue;
     const role = normalizeRole(rec?.role || rec?.nodeType || rec?.type || '');
     if (role) roles.add(role);
+    const service = normalizeRole(rec?.service || '');
+    if (service) services.add(service);
   }
 
-  if (roles.size === 0) return;
+  if (roles.size === 0 && services.size === 0) return;
 
   const repoUrls = new Set();
   for (const role of roles) {
     const mapped = ROLE_APP_REPO_MAP[role] || [];
+    for (const u of mapped) repoUrls.add(u);
+  }
+  for (const service of services) {
+    const mapped = SERVICE_APP_REPO_MAP[service] || [];
     for (const u of mapped) repoUrls.add(u);
   }
   if (repoUrls.size === 0) return;
