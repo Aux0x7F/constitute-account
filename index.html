@@ -98,6 +98,7 @@
       <button class="tab" data-tab="devices">Devices</button>
       <button class="tab" data-tab="peers">Peers</button>
       <button class="tab" data-tab="pairing">Pairing</button>
+      <button class="tab" data-tab="apps">Apps</button>
       <button class="tab" data-tab="identity">Identity</button>
     </div>
 
@@ -167,9 +168,39 @@
     <div id="tab_pairing" class="tabpane hidden">
       <h2>Pairing</h2>
 
+      <div class="card">
+        <div class="cardTitle">Add Device</div>
+        <div class="small muted">Generate a one-time pairing code on the owner device, then paste it on the joining device during onboarding.</div>
+        <div class="row" style="margin-top:.5rem;">
+          <input id="pairCodeOutput" type="text" readonly placeholder="Generate a code" />
+          <button id="btnGeneratePairCode" type="button">Generate Code</button>
+          <button id="btnCopyPairCode" type="button">Copy</button>
+        </div>
+        <div id="pairCodeStatus" class="small muted" style="margin-top:.5rem;"></div>
+      </div>
+
       <h3>Pending requests</h3>
       <div id="pairingList" class="list"></div>
       <div id="pairingEmpty" class="small muted">No pending pairing requests.</div>
+    </div>
+
+
+    <div id="tab_apps" class="tabpane hidden">
+      <h2>Apps</h2>
+      <div class="card">
+        <div class="cardTitle">Optional Repos</div>
+        <div class="small muted">Add GitHub repos with <code>app.manifest.json</code>. Enabled apps are stored locally as capabilities.</div>
+        <div class="row" style="margin-top:.5rem;">
+          <input id="appRepoInput" type="text" placeholder="https://github.com/owner/repo" />
+          <button id="btnAddAppRepo" type="button">Add Repo</button>
+        </div>
+        <div id="appRepoStatus" class="small muted" style="margin-top:.5rem;"></div>
+      </div>
+
+      <div class="card" style="margin-top:.75rem;">
+        <div class="cardTitle">Capabilities</div>
+        <div id="appCapabilityList" class="list"></div>
+      </div>
     </div>
 
     <div id="tab_identity" class="tabpane hidden">
@@ -231,6 +262,12 @@
       <div class="tabs" style="margin-top:.5rem;">
         <button type="button" class="tab tab-active" data-mode="new">Create</button>
         <button type="button" class="tab" data-mode="existing">Join existing</button>
+      </div>
+
+      <div id="obPairCodeWrap" class="hidden" style="margin-top:.5rem;">
+        <label for="obPairCode">Pairing code (recommended)</label>
+        <input id="obPairCode" type="text" placeholder="Paste code from owner device" />
+        <div class="small muted">If blank, a random code is generated and shown after request.</div>
       </div>
 
       <div class="row" style="margin-top:.75rem;">

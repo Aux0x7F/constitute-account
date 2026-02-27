@@ -32,6 +32,7 @@ const tabPanes = {
   devices: document.getElementById('tab_devices'),
   peers: document.getElementById('tab_peers'),
   pairing: document.getElementById('tab_pairing'),
+  apps: document.getElementById('tab_apps'),
   identity: document.getElementById('tab_identity'),
 };
 
@@ -47,10 +48,20 @@ const blockedList = document.getElementById('blockedList');
 
 const pairingList = document.getElementById('pairingList');
 const pairingEmpty = document.getElementById('pairingEmpty');
+const pairCodeOutput = document.getElementById('pairCodeOutput');
+const btnGeneratePairCode = document.getElementById('btnGeneratePairCode');
+const btnCopyPairCode = document.getElementById('btnCopyPairCode');
+const pairCodeStatus = document.getElementById('pairCodeStatus');
 
 const identityLabelEl = document.getElementById('identityLabel');
 const identityIdEl = document.getElementById('identityId');
 const identityLinkedEl = document.getElementById('identityLinked');
+
+// Optional app repo settings
+const appRepoInput = document.getElementById('appRepoInput');
+const btnAddAppRepo = document.getElementById('btnAddAppRepo');
+const appRepoStatus = document.getElementById('appRepoStatus');
+const appCapabilityList = document.getElementById('appCapabilityList');
 
 const joinDeviceLabelEl = document.getElementById('joinDeviceLabel');
 
@@ -75,6 +86,8 @@ const obStepIdentity = document.getElementById('obStepIdentity');
 const btnObDeviceContinue = document.getElementById('btnObDeviceContinue');
 const obDeviceLabel = document.getElementById('obDeviceLabel');
 const obIdentityLabel = document.getElementById('obIdentityLabel');
+const obPairCodeWrap = document.getElementById('obPairCodeWrap');
+const obPairCode = document.getElementById('obPairCode');
 const btnObIdentityContinue = document.getElementById('btnObIdentityContinue');
 const existingInfo = document.getElementById('existingInfo');
 const obModeTabs = Array.from(obStepIdentity.querySelectorAll('.tab'));
@@ -104,6 +117,16 @@ let pendingZoneNav = false;
 let swarm = null;
 let clientReady = false;
 let swarmBootRequested = false;
+
+const APPS_REPOS_KEY = 'constitute.apps.repos';
+const APPS_ENABLED_KEY = 'constitute.apps.enabled';
+const DEFAULT_APP_REPOS = ['https://github.com/Aux0x7F/constitute-nvr-ui'];
+const ROLE_APP_REPO_MAP = Object.freeze({
+  nvr: ['https://github.com/Aux0x7F/constitute-nvr-ui'],
+});
+let appRepoCatalog = [];
+let appEnabledIds = new Set();
+window.__constituteEnabledApps = [];
 
 class SwarmTransport {
   constructor({ client, onState }) {
@@ -581,6 +604,345 @@ function setSettingsTab(name) {
   for (const [k, el] of Object.entries(tabPanes)) el.classList.toggle('hidden', k !== name);
 }
 
+
+function setAppStatus(msg, error = false) {
+  if (!appRepoStatus) return;
+  appRepoStatus.textContent = String(msg || '');
+  appRepoStatus.classList.toggle('warn', !!error);
+}
+
+function setPairCodeStatus(msg, error = false) {
+  if (!pairCodeStatus) return;
+  pairCodeStatus.textContent = String(msg || '');
+  pairCodeStatus.classList.toggle('warn', !!error);
+}
+
+function loadAppPrefs() {
+  try {
+    const rawRepos = localStorage.getItem(APPS_REPOS_KEY);
+    const parsedRepos = rawRepos ? JSON.parse(rawRepos) : [];
+    if (Array.isArray(parsedRepos)) appRepoCatalog = parsedRepos;
+  } catch {}
+
+  if (!Array.isArray(appRepoCatalog) || appRepoCatalog.length === 0) {
+    appRepoCatalog = DEFAULT_APP_REPOS.map((url) => ({ url }));
+  }
+
+  try {
+    const rawEnabled = localStorage.getItem(APPS_ENABLED_KEY);
+    const arr = rawEnabled ? JSON.parse(rawEnabled) : [];
+    appEnabledIds = new Set(Array.isArray(arr) ? arr.map(String) : []);
+  } catch {
+    appEnabledIds = new Set();
+  }
+}
+
+function saveAppPrefs() {
+  try {
+    localStorage.setItem(APPS_REPOS_KEY, JSON.stringify(appRepoCatalog));
+    localStorage.setItem(APPS_ENABLED_KEY, JSON.stringify(Array.from(appEnabledIds)));
+  } catch {}
+}
+
+function enabledAppManifests() {
+  return appRepoCatalog
+    .filter((app) => !app.unresolved)
+    .filter((app) => appEnabledIds.has(String(app.id || `${app.owner}/${app.repo}`)));
+}
+
+function publishEnabledApps() {
+  const enabled = enabledAppManifests().map((app) => ({
+    id: String(app.id || ''),
+    label: String(app.label || ''),
+    owner: String(app.owner || ''),
+    repo: String(app.repo || ''),
+    ref: String(app.ref || ''),
+    url: String(app.url || ''),
+    entry: String(app.entry || 'index.html'),
+    capabilities: Array.isArray(app.capabilities) ? app.capabilities.map(String) : [],
+    version: String(app.version || ''),
+    description: String(app.description || ''),
+  }));
+  window.__constituteEnabledApps = enabled;
+  window.dispatchEvent(new CustomEvent('constitute.apps.updated', { detail: { enabled } }));
+}
+
+function normalizeRole(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function findAppIndexByRepo(owner, repo) {
+  const o = String(owner || '').trim().toLowerCase();
+  const r = String(repo || '').trim().toLowerCase();
+  return appRepoCatalog.findIndex((entry) =>
+    String(entry?.owner || '').trim().toLowerCase() === o &&
+    String(entry?.repo || '').trim().toLowerCase() === r
+  );
+}
+
+async function ensureAppRepoEnabledByUrl(url) {
+  const parsed = parseGitHubRepoInput(url);
+  if (!parsed) return false;
+
+  const existingIdx = findAppIndexByRepo(parsed.owner, parsed.repo);
+  if (existingIdx >= 0) {
+    const existing = appRepoCatalog[existingIdx];
+    const existingId = String(existing?.id || `${existing?.owner}/${existing?.repo}`);
+    if (existing?.unresolved) {
+      try {
+        const manifest = await fetchAppManifest(parsed);
+        appRepoCatalog[existingIdx] = manifest;
+        appEnabledIds.delete(existingId);
+        appEnabledIds.add(String(manifest.id || `${manifest.owner}/${manifest.repo}`));
+        return true;
+      } catch {
+        return false;
+      }
+    }
+    if (!appEnabledIds.has(existingId)) {
+      appEnabledIds.add(existingId);
+      return true;
+    }
+    return false;
+  }
+
+  try {
+    const manifest = await fetchAppManifest(parsed);
+    appRepoCatalog.push(manifest);
+    appEnabledIds.add(String(manifest.id || `${manifest.owner}/${manifest.repo}`));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function autoEnableAppsForIdentityDeviceRoles(identityDevices, swarmDevices) {
+  const identityPks = new Set(
+    (Array.isArray(identityDevices) ? identityDevices : [])
+      .map((d) => String(d?.pk || d?.devicePk || '').trim())
+      .filter(Boolean)
+  );
+  if (identityPks.size === 0) return;
+
+  const roles = new Set();
+  for (const rec of (Array.isArray(swarmDevices) ? swarmDevices : [])) {
+    const pk = String(rec?.devicePk || rec?.pk || '').trim();
+    if (!identityPks.has(pk)) continue;
+    const role = normalizeRole(rec?.role || rec?.nodeType || rec?.type || '');
+    if (role) roles.add(role);
+  }
+
+  if (roles.size === 0) return;
+
+  const repoUrls = new Set();
+  for (const role of roles) {
+    const mapped = ROLE_APP_REPO_MAP[role] || [];
+    for (const u of mapped) repoUrls.add(u);
+  }
+  if (repoUrls.size === 0) return;
+
+  let changed = false;
+  for (const repoUrl of repoUrls) {
+    const didChange = await ensureAppRepoEnabledByUrl(repoUrl);
+    changed = changed || didChange;
+  }
+
+  if (changed) {
+    saveAppPrefs();
+    publishEnabledApps();
+    renderAppCatalog();
+    setAppStatus('Auto-enabled app repos for detected device roles.');
+  }
+}
+
+function parseGitHubRepoInput(raw) {
+  const s = String(raw || '').trim();
+  if (!s) return null;
+
+  if (/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(s)) {
+    const [owner, repo] = s.split('/');
+    return { owner, repo, ref: 'main', url: `https://github.com/${owner}/${repo}` };
+  }
+
+  try {
+    const u = new URL(s);
+    if (u.hostname !== 'github.com') return null;
+    const parts = u.pathname.split('/').filter(Boolean);
+    if (parts.length < 2) return null;
+    const owner = parts[0];
+    const repo = parts[1].replace(/\.git$/i, '');
+    let ref = 'main';
+    if (parts.length >= 4 && parts[2] === 'tree') ref = parts[3];
+    return { owner, repo, ref, url: `https://github.com/${owner}/${repo}` };
+  } catch {
+    return null;
+  }
+}
+
+async function fetchAppManifest(repo) {
+  const refs = [repo.ref || 'main', 'master'];
+  let lastErr = null;
+  for (const ref of refs) {
+    const rawUrl = `https://raw.githubusercontent.com/${repo.owner}/${repo.repo}/${ref}/app.manifest.json`;
+    try {
+      const res = await fetch(rawUrl, { cache: 'no-store' });
+      if (!res.ok) throw new Error(`manifest fetch failed (${res.status})`);
+      const manifest = await res.json();
+      const label = String(manifest?.label || '').trim();
+      if (!label) throw new Error('manifest.label is required');
+      return {
+        id: String(manifest?.id || `${repo.owner}/${repo.repo}`),
+        label,
+        entry: String(manifest?.entry || 'index.html'),
+        capabilities: Array.isArray(manifest?.capabilities) ? manifest.capabilities.map(String) : [],
+        description: String(manifest?.description || ''),
+        version: String(manifest?.version || ''),
+        owner: repo.owner,
+        repo: repo.repo,
+        ref,
+        url: repo.url,
+      };
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr || new Error('unable to fetch manifest');
+}
+
+function renderAppCatalog() {
+  clear(appCapabilityList);
+  if (!appCapabilityList) return;
+
+  if (!Array.isArray(appRepoCatalog) || appRepoCatalog.length === 0) {
+    const d = document.createElement('div');
+    d.className = 'small muted';
+    d.textContent = 'No app repos configured.';
+    appCapabilityList.appendChild(d);
+    return;
+  }
+
+  for (const app of appRepoCatalog) {
+    const id = String(app.id || `${app.owner}/${app.repo}`);
+    const row = document.createElement('div');
+    row.className = 'item appItem';
+
+    const label = document.createElement('label');
+    label.className = 'appItemLabel';
+
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = appEnabledIds.has(id);
+    cb.disabled = !!app.unresolved;
+    cb.onchange = () => {
+      if (cb.checked) appEnabledIds.add(id);
+      else appEnabledIds.delete(id);
+      saveAppPrefs();
+      publishEnabledApps();
+      setAppStatus(`${app.label} ${cb.checked ? 'enabled' : 'disabled'}.`);
+    };
+
+    const text = document.createElement('div');
+    const title = document.createElement('strong');
+    title.textContent = app.unresolved ? `${app.label} (manifest unavailable)` : app.label;
+    const meta = document.createElement('div');
+    meta.className = 'small muted';
+    const parts = [`${app.owner}/${app.repo}@${app.ref}`];
+    if (app.description) parts.push(app.description);
+    meta.textContent = parts.join(' - ');
+    text.appendChild(title);
+    text.appendChild(meta);
+
+    label.appendChild(cb);
+    label.appendChild(text);
+
+    const btnRemove = document.createElement('button');
+    btnRemove.type = 'button';
+    btnRemove.textContent = 'Remove';
+    btnRemove.onclick = () => {
+      appRepoCatalog = appRepoCatalog.filter((x) => String(x.id || `${x.owner}/${x.repo}`) !== id);
+      appEnabledIds.delete(id);
+      saveAppPrefs();
+      publishEnabledApps();
+      renderAppCatalog();
+      setAppStatus(`Removed ${app.label}.`);
+    };
+
+    row.appendChild(label);
+    row.appendChild(btnRemove);
+    appCapabilityList.appendChild(row);
+  }
+}
+
+async function addAppRepoFromInput() {
+  const parsed = parseGitHubRepoInput(appRepoInput?.value);
+  if (!parsed) {
+    setAppStatus('Paste a valid GitHub repo URL (or owner/repo).', true);
+    return;
+  }
+
+  setAppStatus('Fetching app manifest…');
+  try {
+    const manifest = await fetchAppManifest(parsed);
+    const id = String(manifest.id || `${manifest.owner}/${manifest.repo}`);
+    const existingIdx = appRepoCatalog.findIndex((x) => String(x.id || `${x.owner}/${x.repo}`) === id);
+    if (existingIdx >= 0) appRepoCatalog[existingIdx] = manifest;
+    else appRepoCatalog.push(manifest);
+    appEnabledIds.add(id);
+    saveAppPrefs();
+    publishEnabledApps();
+    renderAppCatalog();
+    if (appRepoInput) appRepoInput.value = '';
+    setAppStatus(`Added ${manifest.label}.`);
+  } catch (err) {
+    setAppStatus(`Failed to fetch manifest: ${String(err?.message || err)}`, true);
+  }
+}
+
+async function hydrateAppCatalog() {
+  loadAppPrefs();
+  const hydrated = [];
+  for (const entry of appRepoCatalog) {
+    const parsed = entry.owner && entry.repo
+      ? { owner: entry.owner, repo: entry.repo, ref: entry.ref || 'main', url: entry.url || `https://github.com/${entry.owner}/${entry.repo}` }
+      : parseGitHubRepoInput(entry.url || '');
+    if (!parsed) continue;
+    try {
+      const manifest = await fetchAppManifest(parsed);
+      hydrated.push(manifest);
+      if (!appEnabledIds.has(String(manifest.id))) appEnabledIds.add(String(manifest.id));
+    } catch {
+      const unresolvedId = String(entry.id || `${parsed.owner}/${parsed.repo}`);
+      hydrated.push({
+        id: unresolvedId,
+        label: String(entry.label || parsed.repo),
+        entry: String(entry.entry || 'index.html'),
+        capabilities: Array.isArray(entry.capabilities) ? entry.capabilities.map(String) : [],
+        description: String(entry.description || 'Manifest unavailable'),
+        version: String(entry.version || ''),
+        owner: parsed.owner,
+        repo: parsed.repo,
+        ref: parsed.ref || 'main',
+        url: parsed.url,
+        unresolved: true,
+      });
+      appEnabledIds.delete(unresolvedId);
+    }
+  }
+  appRepoCatalog = hydrated;
+  saveAppPrefs();
+  publishEnabledApps();
+  renderAppCatalog();
+  const okCount = hydrated.filter((x) => !x.unresolved).length;
+  const badCount = hydrated.length - okCount;
+  if (hydrated.length === 0) {
+    setAppStatus('No app manifests loaded.', true);
+  } else if (badCount > 0) {
+    setAppStatus(`${okCount} loaded, ${badCount} unavailable.`, true);
+  } else {
+    setAppStatus(`${okCount} app manifest(s) loaded.`);
+  }
+}
+
 function clear(el) {
   if (!el) return;
   while (el.firstChild) el.removeChild(el.firstChild);
@@ -992,6 +1354,7 @@ async function refreshAll() {
   renderPairRequests(reqs || [], ident?.devices || []);
   renderNotifications(notifs || []);
   ensureOnboardingState(ident);
+  await autoEnableAppsForIdentityDeviceRoles(ident?.devices || [], swarmDevices || []).catch(() => {});
   if (swarm && ident?.linked) {
     swarm.setLocalPk(st.pk || '');
     swarm.setPeers(swarmDevices || []);
@@ -1141,6 +1504,48 @@ function wireUi() {
   // settings tabs
   for (const b of tabButtons) b.addEventListener('click', () => setSettingsTab(b.dataset.tab));
 
+  if (btnGeneratePairCode) {
+    btnGeneratePairCode.onclick = async () => {
+      try {
+        const ident = await client.call('identity.get', {}, { timeoutMs: 20000 });
+        if (!ident?.linked) {
+          setPairCodeStatus('Link an identity before generating a code.', true);
+          return;
+        }
+        const res = await client.call('identity.newPairCode', {}, { timeoutMs: 20000 });
+        if (pairCodeOutput) pairCodeOutput.value = String(res?.code || '');
+        setPairCodeStatus('Code generated. Share it with the joining device.');
+      } catch (e) {
+        setPairCodeStatus(`Failed to generate code: ${String(e?.message || e)}`, true);
+      }
+    };
+  }
+
+  if (btnCopyPairCode) {
+    btnCopyPairCode.onclick = async () => {
+      const code = String(pairCodeOutput?.value || '').trim();
+      if (!code) return;
+      try {
+        await navigator.clipboard.writeText(code);
+        setPairCodeStatus('Code copied.');
+      } catch {
+        setPairCodeStatus('Could not copy code.', true);
+      }
+    };
+  }
+
+  if (btnAddAppRepo) {
+    btnAddAppRepo.onclick = () => addAppRepoFromInput().catch((e) => console.error(e));
+  }
+  if (appRepoInput) {
+    appRepoInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        addAppRepoFromInput().catch((err) => console.error(err));
+      }
+    });
+  }
+
   btnSaveProfile.onclick = async () => {
     try {
       const label = profileName.value.trim();
@@ -1194,6 +1599,7 @@ function wireUi() {
       t.classList.add('tab-active');
       mode = t.dataset.mode === 'existing' ? 'existing' : 'new';
       existingInfo.classList.toggle('hidden', true);
+      if (obPairCodeWrap) obPairCodeWrap.classList.toggle('hidden', mode !== 'existing');
     };
   });
 
@@ -1250,10 +1656,18 @@ function wireUi() {
       existingInfo.textContent = 'Requesting pairing…';
 
       const myDevicePk = lastDeviceState?.pk || null;
+      const code = String(obPairCode?.value || '').trim();
 
-      const res = await client.call('identity.requestPair', { identityLabel: ilabel, deviceLabel: dlabel }, { timeoutMs: 20000 });
+      const res = await client.call('identity.requestPair', {
+        identityLabel: ilabel,
+        deviceLabel: dlabel,
+        code: code || undefined,
+      }, { timeoutMs: 20000 });
 
-      existingInfo.textContent = `Waiting for approval… Share code ${res?.code || ''} with the owner.`;
+      const usedCode = String(res?.code || code || '').trim();
+      existingInfo.textContent = usedCode
+        ? `Waiting for approval… Share code ${usedCode} with the owner.`
+        : 'Waiting for approval…';
       const ok = await waitForPairAcceptance({ identityLabel: ilabel, myDevicePk, timeoutMs: 90000 });
 
         if (ok) {
@@ -1359,6 +1773,7 @@ function startSharedRelayPipe(client, relayUrl) {
   }
 
   wireUi();
+  await hydrateAppCatalog();
   _pushConnLog('init');
 
   // Default radio selection: webauthn if supported
