@@ -30,6 +30,7 @@ const tabButtons = Array.from(viewSettings.querySelectorAll('.tab'));
 const tabPanes = {
   profile: document.getElementById('tab_profile'),
   devices: document.getElementById('tab_devices'),
+  appliances: document.getElementById('tab_appliances'),
   peers: document.getElementById('tab_peers'),
   pairing: document.getElementById('tab_pairing'),
   apps: document.getElementById('tab_apps'),
@@ -60,7 +61,14 @@ const identityLinkedEl = document.getElementById('identityLinked');
 const appRepoInput = document.getElementById('appRepoInput');
 const btnAddAppRepo = document.getElementById('btnAddAppRepo');
 const appRepoStatus = document.getElementById('appRepoStatus');
-const appCapabilityList = document.getElementById('appCapabilityList');\nconst homeAppsList = document.getElementById('homeAppsList');
+const appCapabilityList = document.getElementById('appCapabilityList');
+const homeAppsList = document.getElementById('homeAppsList');
+
+const gatewayInstallPlatform = document.getElementById('gatewayInstallPlatform');
+const btnGatewayInstallCopy = document.getElementById('btnGatewayInstallCopy');
+const btnGatewayInstallOpen = document.getElementById('btnGatewayInstallOpen');
+const gatewayInstallStatus = document.getElementById('gatewayInstallStatus');
+const applianceList = document.getElementById('applianceList');
 
 const joinDeviceLabelEl = document.getElementById('joinDeviceLabel');
 
@@ -130,6 +138,26 @@ let appRepoCatalog = [];
 let appEnabledIds = new Set();
 let appLaunchHints = new Map();
 window.__constituteEnabledApps = [];
+
+const GATEWAY_INSTALLERS = Object.freeze({
+  linux: {
+    command: "curl -fsSL https://raw.githubusercontent.com/Aux0x7F/constitute-gateway/main/scripts/linux/install-latest.sh | bash",
+    scriptUrl: "https://raw.githubusercontent.com/Aux0x7F/constitute-gateway/main/scripts/linux/install-latest.sh",
+  },
+  windows: {
+    command: "powershell -NoProfile -ExecutionPolicy Bypass -Command \"irm https://raw.githubusercontent.com/Aux0x7F/constitute-gateway/main/scripts/windows/install-latest.ps1 | iex\"",
+    scriptUrl: "https://raw.githubusercontent.com/Aux0x7F/constitute-gateway/main/scripts/windows/install-latest.ps1",
+  },
+});
+
+const NVR_INSTALLERS = Object.freeze({
+  linux: {
+    command: "curl -fsSL https://raw.githubusercontent.com/Aux0x7F/constitute-nvr/main/scripts/linux/install-wizard.sh | bash",
+    scriptUrl: "https://raw.githubusercontent.com/Aux0x7F/constitute-nvr/main/scripts/linux/install-wizard.sh",
+  },
+});
+
+let lastSwarmDevices = [];
 
 class SwarmTransport {
   constructor({ client, onState }) {
@@ -620,6 +648,226 @@ function setPairCodeStatus(msg, error = false) {
   pairCodeStatus.classList.toggle('warn', !!error);
 }
 
+function setGatewayInstallStatus(msg, error = false) {
+  if (!gatewayInstallStatus) return;
+  gatewayInstallStatus.textContent = String(msg || '');
+  gatewayInstallStatus.classList.toggle('warn', !!error);
+}
+
+function selectedGatewayInstallPlatform() {
+  const raw = String(gatewayInstallPlatform?.value || 'linux').trim().toLowerCase();
+  return raw === 'windows' ? 'windows' : 'linux';
+}
+
+function currentGatewayInstaller() {
+  return GATEWAY_INSTALLERS[selectedGatewayInstallPlatform()] || GATEWAY_INSTALLERS.linux;
+}
+
+function currentNvrInstaller() {
+  return NVR_INSTALLERS.linux;
+}
+
+function updateGatewayInstallHint() {
+  const installer = currentGatewayInstaller();
+  setGatewayInstallStatus(installer?.command || 'No installer configured.', !installer);
+}
+
+function isGatewayRecord(rec) {
+  const role = normalizeRole(rec?.role || rec?.nodeType || rec?.type || '');
+  const service = normalizeRole(rec?.service || '');
+  return role === 'gateway' || service === 'gateway';
+}
+
+function isNvrRecord(rec) {
+  const role = normalizeRole(rec?.role || rec?.nodeType || rec?.type || '');
+  const service = normalizeRole(rec?.service || '');
+  return role === 'nvr' || service === 'nvr';
+}
+
+function ownedPkSet(identityDevices) {
+  return new Set(
+    (Array.isArray(identityDevices) ? identityDevices : [])
+      .map((d) => String(d?.pk || d?.devicePk || '').trim())
+      .filter(Boolean)
+  );
+}
+
+function summarizeAppliance(rec, owned) {
+  const pk = String(rec?.devicePk || rec?.pk || '').trim();
+  const label = String(rec?.deviceLabel || rec?.label || '').trim();
+  const role = normalizeRole(rec?.role || rec?.nodeType || rec?.type || '') || 'unknown';
+  const service = normalizeRole(rec?.service || '') || 'none';
+  const version = String(rec?.serviceVersion || rec?.service_version || '').trim();
+  const updatedAt = Number(rec?.updatedAt || rec?.updated_at || rec?.ts || rec?.lastSeen || 0);
+  return {
+    pk,
+    title: label || `${role}:${pk.slice(0, 12)}`,
+    role,
+    service,
+    version,
+    updatedAt,
+    owned,
+  };
+}
+
+async function ensureNvrAppEnabledFromRecord(record) {
+  const hint = serviceModuleHints(record) || {
+    owner: 'Aux0x7F',
+    repo: 'constitute-nvr-ui',
+    repoUrl: 'https://github.com/Aux0x7F/constitute-nvr-ui',
+    manifestUrl: '',
+    sessionWsUrl: String(record?.sessionWsUrl || record?.session_ws_url || record?.publicWsUrl || '').trim(),
+    allowUnsignedHelloMvp: Boolean(record?.allowUnsignedHelloMvp || record?.allow_unsigned_hello_mvp || false),
+  };
+
+  const changed = await ensureAppRepoEnabledByUrl(hint.repoUrl, {
+    manifestUrl: hint.manifestUrl,
+  });
+
+  if (hint.sessionWsUrl || hint.allowUnsignedHelloMvp) {
+    const key = repoKey(hint.owner, hint.repo);
+    const launchHint = {};
+    if (hint.sessionWsUrl) launchHint.ws = hint.sessionWsUrl;
+    if (hint.allowUnsignedHelloMvp) launchHint.insecure = true;
+    appLaunchHints.set(key, launchHint);
+  }
+
+  if (changed) {
+    saveAppPrefs();
+    publishEnabledApps();
+    renderAppCatalog();
+  }
+
+  return appRepoCatalog.find((entry) =>
+    String(entry?.owner || '').toLowerCase() === String(hint.owner || '').toLowerCase() &&
+    String(entry?.repo || '').toLowerCase() === String(hint.repo || '').toLowerCase()
+  ) || null;
+}
+
+function launchAppWindow(app) {
+  const base = appLaunchUrl(app);
+  if (!base) {
+    setAppStatus('No launch URL available for this app.', true);
+    return;
+  }
+  try {
+    const target = new URL(base);
+    const ctx = appLaunchContextQuery(app);
+    if (ctx) {
+      const combined = target.search ? `${target.search}&${ctx}` : `?${ctx}`;
+      target.search = combined;
+    }
+    window.open(target.toString(), '_blank', 'noopener,noreferrer');
+  } catch {
+    setAppStatus('App launch URL is invalid.', true);
+  }
+}
+
+async function launchNvrControlPanel(record) {
+  try {
+    const app = await ensureNvrAppEnabledFromRecord(record);
+    if (!app) {
+      setGatewayInstallStatus('NVR UI manifest unavailable for this device.', true);
+      return;
+    }
+    launchAppWindow(app);
+  } catch (err) {
+    setGatewayInstallStatus(`NVR control panel failed: ${String(err?.message || err)}`, true);
+  }
+}
+
+function renderApplianceList(identityDevices, swarmDevices) {
+  if (!applianceList) return;
+  clear(applianceList);
+
+  const owned = ownedPkSet(identityDevices);
+  const recs = [];
+  const seen = new Set();
+  for (const rec of (Array.isArray(swarmDevices) ? swarmDevices : [])) {
+    const pk = String(rec?.devicePk || rec?.pk || '').trim();
+    if (!pk || seen.has(pk)) continue;
+    if (!(isGatewayRecord(rec) || isNvrRecord(rec))) continue;
+    seen.add(pk);
+    recs.push(rec);
+  }
+
+  if (recs.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'item';
+    empty.textContent = 'No gateway or NVR appliances discovered yet.';
+    applianceList.appendChild(empty);
+    return;
+  }
+
+  recs.sort((a, b) => {
+    const aa = summarizeAppliance(a, owned.has(String(a?.devicePk || a?.pk || '').trim()));
+    const bb = summarizeAppliance(b, owned.has(String(b?.devicePk || b?.pk || '').trim()));
+    return Number(bb.updatedAt || 0) - Number(aa.updatedAt || 0);
+  });
+
+  for (const rec of recs) {
+    const info = summarizeAppliance(rec, owned.has(String(rec?.devicePk || rec?.pk || '').trim()));
+
+    const item = document.createElement('div');
+    item.className = 'item';
+
+    const meta = document.createElement('div');
+    const last = info.updatedAt ? new Date(info.updatedAt).toLocaleString() : 'n/a';
+    const suffix = info.version ? ` (${info.version})` : '';
+    meta.innerHTML = `
+      <div class="itemTitle">${escapeHtml(info.title)}</div>
+      <div class="itemMeta">pk ${escapeHtml(info.pk.slice(0, 16))}…</div>
+      <div class="itemMeta">role ${escapeHtml(info.role)} • service ${escapeHtml(info.service)}${escapeHtml(suffix)}</div>
+      <div class="itemMeta">${info.owned ? 'owned by this identity' : 'discovered in zone'} • updated ${escapeHtml(last)}</div>
+    `;
+
+    const actions = document.createElement('div');
+    actions.className = 'itemActions';
+
+    if (isGatewayRecord(rec)) {
+      const pair = document.createElement('button');
+      pair.type = 'button';
+      pair.textContent = 'Pair Existing Gateway';
+      pair.onclick = () => {
+        showActivity('settings');
+        setSettingsTab('pairing');
+        setPairCodeStatus('Enter pairing code shown by the gateway installer.');
+      };
+      actions.appendChild(pair);
+
+      const installNvr = document.createElement('button');
+      installNvr.type = 'button';
+      installNvr.textContent = 'Copy NVR Install';
+      installNvr.onclick = async () => {
+        const installer = currentNvrInstaller();
+        try {
+          await navigator.clipboard.writeText(installer.command);
+          setGatewayInstallStatus('Copied NVR install command.', false);
+        } catch {
+          setGatewayInstallStatus('Could not copy NVR install command.', true);
+        }
+      };
+      actions.appendChild(installNvr);
+    }
+
+    if (isNvrRecord(rec)) {
+      const open = document.createElement('button');
+      open.type = 'button';
+      open.textContent = 'Open Security Cameras';
+      open.onclick = () => {
+        launchNvrControlPanel(rec).catch((err) => {
+          setGatewayInstallStatus(`NVR launch failed: ${String(err?.message || err)}`, true);
+        });
+      };
+      actions.appendChild(open);
+    }
+
+    item.appendChild(meta);
+    item.appendChild(actions);
+    applianceList.appendChild(item);
+  }
+}
+
 function loadAppPrefs() {
   try {
     const rawRepos = localStorage.getItem(APPS_REPOS_KEY);
@@ -664,10 +912,13 @@ function publishEnabledApps() {
     entry: String(app.entry || 'index.html'),
     capabilities: Array.isArray(app.capabilities) ? app.capabilities.map(String) : [],
     version: String(app.version || ''),
-    description: String(app.description || ''),\n    manifestUrl: String(app.manifestUrl || ''),\n    launchUrl: String(app.launchUrl || ''),
+    description: String(app.description || ''),
+    manifestUrl: String(app.manifestUrl || ''),
+    launchUrl: String(app.launchUrl || ''),
   }));
   window.__constituteEnabledApps = enabled;
-  window.dispatchEvent(new CustomEvent('constitute.apps.updated', { detail: { enabled } }));\n  renderHomeApps();
+  window.dispatchEvent(new CustomEvent('constitute.apps.updated', { detail: { enabled } }));
+  renderHomeApps();
 }
 
 function normalizeRole(value) {
@@ -784,6 +1035,9 @@ function serviceModuleHints(rec) {
   if (!parsedRepo) return null;
 
   const sessionWsUrl = String(rec?.sessionWsUrl || rec?.session_ws_url || rec?.publicWsUrl || '').trim();
+  const allowUnsignedHelloMvp = Boolean(
+    rec?.allowUnsignedHelloMvp || rec?.allow_unsigned_hello_mvp || false
+  );
 
   return {
     owner: parsedRepo.owner,
@@ -791,6 +1045,7 @@ function serviceModuleHints(rec) {
     repoUrl: parsedRepo.url,
     manifestUrl: uiManifestUrl,
     sessionWsUrl,
+    allowUnsignedHelloMvp,
   };
 }
 
@@ -823,8 +1078,13 @@ async function autoEnableAppsForIdentityDeviceRoles(identityDevices, swarmDevice
     for (const hint of directHints) {
       repoTargets.push(hint);
       const key = repoKey(hint.owner, hint.repo);
-      if (hint.sessionWsUrl && key !== '/') {
-        launchHints.set(key, { ws: hint.sessionWsUrl });
+      if (key !== '/') {
+        const launchHint = {};
+        if (hint.sessionWsUrl) launchHint.ws = hint.sessionWsUrl;
+        if (hint.allowUnsignedHelloMvp) launchHint.insecure = true;
+        if (Object.keys(launchHint).length > 0) {
+          launchHints.set(key, launchHint);
+        }
       }
     }
   } else {
@@ -932,7 +1192,7 @@ function renderAppCatalog() {
   }
 }
 
-async function appLaunchUrl(app) {
+function appLaunchUrl(app) {
   const explicit = String(app?.launchUrl || '').trim();
   if (explicit && /^https:\/\//.test(explicit)) return explicit;
 
@@ -955,6 +1215,8 @@ function appLaunchContextQuery(app) {
   const key = repoKey(app?.owner, app?.repo);
   const hint = appLaunchHints.get(key);
   if (hint?.ws) q.set('ws', String(hint.ws));
+  if (hint?.insecure) q.set('insecure', '1');
+  q.set('autoconnect', '1');
 
   return q.toString();
 }
@@ -997,22 +1259,7 @@ function renderHomeApps() {
     btn.type = 'button';
     btn.textContent = 'Launch';
     btn.onclick = () => {
-      const base = appLaunchUrl(app);
-      if (!base) {
-        setAppStatus('No launch URL available for this app.', true);
-        return;
-      }
-      try {
-        const target = new URL(base);
-        const ctx = appLaunchContextQuery(app);
-        if (ctx) {
-          const combined = target.search ? `${target.search}&${ctx}` : `?${ctx}`;
-          target.search = combined;
-        }
-        window.open(target.toString(), '_blank', 'noopener,noreferrer');
-      } catch {
-        setAppStatus('App launch URL is invalid.', true);
-      }
+      launchAppWindow(app);
     };
 
     row.appendChild(left);
@@ -1066,7 +1313,9 @@ async function hydrateAppCatalog() {
         entry: String(entry.entry || 'index.html'),
         capabilities: Array.isArray(entry.capabilities) ? entry.capabilities.map(String) : [],
         description: String(entry.description || 'Manifest unavailable'),
-        version: String(entry.version || ''),\n        manifestUrl: String(entry.manifestUrl || ''),\n        launchUrl: String(entry.launchUrl || ''),
+        version: String(entry.version || ''),
+        manifestUrl: String(entry.manifestUrl || ''),
+        launchUrl: String(entry.launchUrl || ''),
         owner: parsed.owner,
         repo: parsed.repo,
         ref: parsed.ref || 'main',
@@ -1472,6 +1721,7 @@ async function refreshAll() {
   lastIdentity = ident;
   lastDirectory = directory || [];
   lastZones = zones || [];
+  lastSwarmDevices = swarmDevices || [];
 
   // If we only have a key, try to resolve the human name via peers.
   for (const z of (lastZones || [])) {
@@ -1502,6 +1752,7 @@ async function refreshAll() {
   renderBlockedList(blocked || []);
   renderZones(lastZones);
   renderPeers(lastDirectory);
+  renderApplianceList(ident?.devices || [], lastSwarmDevices);
   renderPairRequests(reqs || [], ident?.devices || []);
   renderNotifications(notifs || []);
   ensureOnboardingState(ident);
@@ -1681,6 +1932,38 @@ function wireUi() {
         addAppRepoFromInput().catch((err) => console.error(err));
       }
     });
+  }
+
+  if (gatewayInstallPlatform) {
+    gatewayInstallPlatform.addEventListener('change', updateGatewayInstallHint);
+    updateGatewayInstallHint();
+  }
+
+  if (btnGatewayInstallCopy) {
+    btnGatewayInstallCopy.onclick = async () => {
+      const installer = currentGatewayInstaller();
+      if (!installer) {
+        setGatewayInstallStatus('No install command available for this platform.', true);
+        return;
+      }
+      try {
+        await navigator.clipboard.writeText(installer.command);
+        setGatewayInstallStatus('Copied gateway install command to clipboard.');
+      } catch {
+        setGatewayInstallStatus('Could not copy install command.', true);
+      }
+    };
+  }
+
+  if (btnGatewayInstallOpen) {
+    btnGatewayInstallOpen.onclick = () => {
+      const installer = currentGatewayInstaller();
+      if (!installer?.scriptUrl) {
+        setGatewayInstallStatus('No script URL configured for this platform.', true);
+        return;
+      }
+      window.open(installer.scriptUrl, '_blank', 'noopener,noreferrer');
+    };
   }
 
   btnSaveProfile.onclick = async () => {
@@ -1944,6 +2227,7 @@ function startSharedRelayPipe(client, relayUrl) {
     }
   }, 10000);
 })();
+
 
 
 

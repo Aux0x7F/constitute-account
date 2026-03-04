@@ -90,12 +90,17 @@
         <div class="v" id="identityLinkedSummary"></div>
       </div>
     </div>
+    <div class="card">
+      <div class="cardTitle">Apps</div>
+      <div id="homeAppsList" class="list"></div>
+    </div>
   </section>
 
   <section id="viewSettings" class="activity hidden">
     <div class="tabs">
       <button class="tab" data-tab="profile">Profile</button>
       <button class="tab" data-tab="devices">Devices</button>
+      <button class="tab" data-tab="appliances">Appliances</button>
       <button class="tab" data-tab="peers">Peers</button>
       <button class="tab" data-tab="pairing">Pairing</button>
       <button class="tab" data-tab="apps">Apps</button>
@@ -138,6 +143,30 @@
       <div id="blockedList" class="list"></div>
     </div>
 
+    <div id="tab_appliances" class="tabpane hidden">
+      <h2>Appliances</h2>
+
+      <div class="card">
+        <div class="cardTitle">Add Gateway</div>
+        <div class="small muted">Existing: use pairing flow in <strong>Settings → Pairing</strong>, then approve on your owner device.</div>
+        <div class="small muted" style="margin-top:.35rem;">Install: choose platform and copy/open installer script.</div>
+        <div class="row" style="margin-top:.6rem;">
+          <select id="gatewayInstallPlatform">
+            <option value="linux">Linux (systemd)</option>
+            <option value="windows">Windows (service)</option>
+          </select>
+          <button id="btnGatewayInstallCopy" type="button">Copy Install Command</button>
+          <button id="btnGatewayInstallOpen" type="button">Open Script</button>
+        </div>
+        <div id="gatewayInstallStatus" class="small muted" style="margin-top:.5rem;"></div>
+      </div>
+
+      <div class="card">
+        <div class="cardTitle">Connected Appliances</div>
+        <div id="applianceList" class="list"></div>
+      </div>
+    </div>
+
     <div id="tab_peers" class="tabpane hidden">
       <h2>Peers</h2>
       <div class="card">
@@ -162,6 +191,11 @@
       </div>
 
       <div id="zonesList" class="list"></div>
+
+      <div class="card">
+        <div class="cardTitle">Zone Devices <span id="peersCount" class="small muted"></span></div>
+        <div id="peersList" class="list"></div>
+      </div>
     </div>
 
 

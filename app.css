@@ -87,7 +87,7 @@ a{color:inherit}
 
 .row{display:flex; gap:0.5rem; align-items:center; margin-top:0.6rem}
 
-input,textarea{
+input,textarea,select{
   width:100%;
   border:1px solid rgba(255,255,255,0.14);
   background:rgba(0,0,0,0.20);
@@ -311,3 +311,5 @@ button:disabled{opacity:0.5; cursor:not-allowed}
 }
 .choiceTitle{font-weight:800}
 .choiceSub{font-size:.85rem; color:var(--muted); margin-top:.15rem}
+
+.row.wrap{flex-wrap:wrap}

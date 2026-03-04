@@ -23,7 +23,10 @@ Browser-native identity and discovery client for the Constitution ecosystem.
 - Relay transport via SharedWorker + Service Worker authority
 - Zone presence/list propagation and directory updates
 - Swarm record cache (identity/device) with signed record validation
-- Canonical app-channel plumbing for `swarm_record_request` and `swarm_dht_get/put`\n- Manifest-driven app auto-enable from service records (`uiRepo` / `uiRef` / `uiManifestUrl`)\n- Home app launcher cards for enabled capabilities
+- Canonical app-channel plumbing for `swarm_record_request` and `swarm_dht_get/put`
+- Manifest-driven app auto-enable from service records (`uiRepo` / `uiRef` / `uiManifestUrl`)
+- Home app launcher cards for enabled capabilities
+- Appliances tab for gateway/NVR device inventory and control-panel launch wiring
 
 ## Project Layout
 - `app.js`: UI state, routing, and peer presentation
@@ -43,7 +46,9 @@ See `ARCHITECTURE.md` for system design and convergence direction.
 ## Usage
 - Create or join an identity
 - Pair additional devices from notifications / pairing flow
-- Manage zones and discovered peers in `Settings > Peers`\n- Manage optional app repos in `Settings > Apps` and launch enabled apps from Home
+- Manage zones and discovered peers in `Settings > Peers`
+- Use `Settings > Appliances` to install/pair gateways and open NVR control panel surfaces
+- Manage optional app repos in `Settings > Apps` and launch enabled apps from Home
 - If identity/device prerequisites are missing, UI routes to onboarding
 
 ## Roadmap Snapshot
