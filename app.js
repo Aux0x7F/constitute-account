@@ -173,7 +173,7 @@ const OPERATOR_PLATFORM = detectOperatorPlatform();
 const GATEWAY_INSTALLERS = Object.freeze({
   'linux-image': Object.freeze({
     windows: {
-      commandBase: 'powershell -NoProfile -ExecutionPolicy Bypass -Command "$sb=[ScriptBlock]::Create((irm https://raw.githubusercontent.com/Aux0x7F/constitute-gateway/main/scripts/windows/prepare-auto-update-image.ps1 -UseBasicParsing).Content); & $sb @args"',
+      commandBase: "powershell -NoProfile -ExecutionPolicy Bypass -Command '$sb=[ScriptBlock]::Create((irm https://raw.githubusercontent.com/Aux0x7F/constitute-gateway/main/scripts/windows/prepare-auto-update-image.ps1 -UseBasicParsing).Content); & $sb @args'",
       scriptUrl: 'https://raw.githubusercontent.com/Aux0x7F/constitute-gateway/main/scripts/windows/prepare-auto-update-image.ps1',
       downloadName: 'constitute-gateway-linux-image.ps1',
       note: 'Linux image target supports gateway-hosted services (including NVR).',
@@ -193,7 +193,7 @@ const GATEWAY_INSTALLERS = Object.freeze({
   }),
   'windows-service': Object.freeze({
     windows: {
-      commandBase: 'powershell -NoProfile -ExecutionPolicy Bypass -Command "$sb=[ScriptBlock]::Create((irm https://raw.githubusercontent.com/Aux0x7F/constitute-gateway/main/scripts/windows/install-latest.ps1 -UseBasicParsing).Content); & $sb @args"',
+      commandBase: "powershell -NoProfile -ExecutionPolicy Bypass -Command '$sb=[ScriptBlock]::Create((irm https://raw.githubusercontent.com/Aux0x7F/constitute-gateway/main/scripts/windows/install-latest.ps1 -UseBasicParsing).Content); & $sb @args'",
       scriptUrl: 'https://raw.githubusercontent.com/Aux0x7F/constitute-gateway/main/scripts/windows/install-latest.ps1',
       downloadName: 'constitute-gateway-windows-service.ps1',
       note: 'Windows service target does not support gateway-hosted NVR service installation.',
@@ -207,6 +207,30 @@ const NVR_INSTALLERS = Object.freeze({
     scriptUrl: "https://raw.githubusercontent.com/Aux0x7F/constitute-nvr/main/scripts/linux/install-latest.sh",
   },
 });
+
+const GATEWAY_OPERATOR_UTILITY = Object.freeze({
+  windows: Object.freeze({
+    asset: 'constitute-operator-windows.zip',
+    hint: 'Extract the zip and run constitute-operator.exe.',
+  }),
+  linux: Object.freeze({
+    asset: 'constitute-operator-linux-amd64.tar.gz',
+    hint: 'Extract the tarball and run constitute-operator.',
+  }),
+});
+
+function currentGatewayUtilityDownloadInfo() {
+  const byPlatform = GATEWAY_OPERATOR_UTILITY[OPERATOR_PLATFORM] || null;
+  if (!byPlatform) return null;
+  const asset = String(byPlatform.asset || '').trim();
+  if (!asset) return null;
+  return {
+    platform: OPERATOR_PLATFORM,
+    asset,
+    url: `https://github.com/Aux0x7F/constitute-gateway/releases/latest/download/${asset}`,
+    hint: String(byPlatform.hint || '').trim(),
+  };
+}
 
 let lastSwarmDevices = [];
 const pendingGatewayServiceInstalls = new Map();
@@ -933,10 +957,11 @@ async function prepareGatewayInstallContext() {
       publicWsUrl: 'ws://127.0.0.1:8456/session',
     });
 
-    command = `${command}
-
-# After gateway first boot (run on the gateway host)
-${nvrCommand}`;
+    const postBootNotes = [
+      '# After gateway first boot, run this on the gateway host (Linux shell):',
+      `# ${nvrCommand}`,
+    ];
+    command = `${command}\n\n${postBootNotes.join('\n')}`;
     enrollment = {
       ...(enrollment || {}),
       nvr: nvrEnrollment,
@@ -1115,59 +1140,25 @@ async function requestRemoteNvrInstall(record) {
 
 
 function updateGatewayInstallHint() {
-  const target = selectedGatewayInstallTarget();
-  const targetInfo = currentGatewayTargetInfo();
-  const installer = currentGatewayInstaller();
-
   if (gatewayInstallDetectedPlatform) {
     gatewayInstallDetectedPlatform.textContent = `Detected operator platform: ${operatorPlatformLabel()}.`;
   }
 
-  const supportsServices = targetInfo.supportsServices;
-  if (gatewayInstallIncludeNvr) {
-    gatewayInstallIncludeNvr.disabled = !supportsServices;
-    if (!supportsServices) gatewayInstallIncludeNvr.checked = false;
-  }
-
-  const devEligible = target === 'linux-image';
-  if (gatewayInstallDevSource) {
-    gatewayInstallDevSource.disabled = !devEligible;
-    if (!devEligible) gatewayInstallDevSource.checked = false;
-  }
-  if (gatewayInstallDevBranchRow) {
-    gatewayInstallDevBranchRow.classList.toggle('hidden', !gatewayInstallUsesDevSource());
-  }
-
-  if (!installer) {
-    setGatewayInstallHint(
-      `No ${targetInfo.label} installer script is available for ${operatorPlatformLabel()} operators.`,
-      true,
-    );
+  const info = currentGatewayUtilityDownloadInfo();
+  if (!info) {
+    setGatewayInstallHint(`Installer utility is not available for ${operatorPlatformLabel()} operators yet.`, true);
     setGatewayInstallCommandPreview('');
-    setGatewayInstallStatus('');
     return;
   }
 
-  const supportNote = supportsServices
-    ? 'Target supports gateway-hosted services (including NVR).'
-    : 'Target does not support gateway-hosted NVR services.';
+  const hintParts = [
+    'Utility defaults to releases/latest.',
+    'Enable dev source mode only for local development loops.',
+    info.hint,
+  ].filter(Boolean);
 
-  const includeNote = gatewayInstallIncludesNvr()
-    ? 'NVR install+pair bootstrap will be appended.'
-    : 'Enable NVR bootstrap if you want first-boot NVR install wiring.';
-
-  const devNote = gatewayInstallUsesDevSource()
-    ? `Development source image enabled (branch: ${gatewayInstallDevBranchValue()}).`
-    : 'Release image mode (updates from releases/latest).';
-
-  const installerNote = installer.note ? `${installer.note} ` : '';
-  setGatewayInstallHint(`${installerNote}${supportNote} ${includeNote} ${devNote}`.trim());
-
-  let preview = installer.commandBase;
-  if (gatewayInstallUsesDevSource()) {
-    preview = `${preview} --dev-source --dev-branch ${shellSingleQuote(gatewayInstallDevBranchValue())} --dev-poll`;
-  }
-  setGatewayInstallCommandPreview(preview);
+  setGatewayInstallHint(hintParts.join(' '));
+  setGatewayInstallCommandPreview(info.url);
 }
 
 function isGatewayRecord(rec) {
@@ -2483,43 +2474,27 @@ function wireUi() {
     });
   }
 
-  if (gatewayInstallPlatform) {
-    gatewayInstallPlatform.value = preferredGatewayInstallTarget();
-    gatewayInstallPlatform.addEventListener('change', updateGatewayInstallHint);
-  }
-  if (gatewayInstallIncludeNvr) {
-    gatewayInstallIncludeNvr.addEventListener('change', updateGatewayInstallHint);
-  }
-  if (gatewayInstallDevSource) {
-    gatewayInstallDevSource.addEventListener('change', updateGatewayInstallHint);
-  }
-  if (gatewayInstallDevBranch) {
-    gatewayInstallDevBranch.addEventListener('input', updateGatewayInstallHint);
-  }
   updateGatewayInstallHint();
-
-  if (btnGatewayInstallCopy) {
-    btnGatewayInstallCopy.onclick = async () => {
-      try {
-        const prepared = await prepareGatewayInstallContext();
-        await navigator.clipboard.writeText(prepared.command);
-        const suffix = prepared.note ? ` ${prepared.note}` : '';
-        setGatewayInstallStatus(`Copied ${prepared.targetInfo.label} command.${suffix}`);
-      } catch (err) {
-        setGatewayInstallStatus(`Could not prepare install command: ${String(err?.message || err)}`, true);
-      }
-    };
-  }
 
   if (btnGatewayInstallOpen) {
     btnGatewayInstallOpen.onclick = async () => {
       try {
-        const prepared = await prepareGatewayInstallContext();
-        await downloadGatewayInstallerScript(prepared);
-        const suffix = prepared.note ? ` ${prepared.note}` : '';
-        setGatewayInstallStatus(`Downloaded generated installer script for ${prepared.targetInfo.label}.${suffix}`);
+        const info = currentGatewayUtilityDownloadInfo();
+        if (!info) {
+          throw new Error(`installer utility is unavailable for ${operatorPlatformLabel()} operators`);
+        }
+
+        const a = document.createElement('a');
+        a.href = info.url;
+        a.rel = 'noopener noreferrer';
+        a.target = '_blank';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+
+        setGatewayInstallStatus(`Downloading ${info.asset} from latest releases.`);
       } catch (err) {
-        setGatewayInstallStatus(`Script download failed: ${String(err?.message || err)}`, true);
+        setGatewayInstallStatus(`Utility download failed: ${String(err?.message || err)}`, true);
       }
     };
   }
