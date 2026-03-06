@@ -151,10 +151,20 @@
         <div class="small muted">Existing: use pairing flow in <strong>Settings → Pairing</strong>, then approve on your owner device.</div>
         <div class="small muted" style="margin-top:.35rem;">Install: choose gateway target, then copy or download the installer helper for your current operator platform.</div>
         <div class="small muted">Only Linux image gateways support additional services (for example NVR) in this iteration.</div>
-        <label class="small" style="display:block;margin-top:.5rem;">
-          <input id="gatewayInstallIncludeNvr" type="checkbox" />
-          Include NVR service install + pairing bootstrap for Linux target
-        </label>
+        <div class="gatewayInstallOptions">
+          <label class="toggleRow">
+            <input id="gatewayInstallIncludeNvr" type="checkbox" />
+            <span>Include NVR service install + pairing bootstrap for Linux target</span>
+          </label>
+          <label class="toggleRow">
+            <input id="gatewayInstallDevSource" type="checkbox" />
+            <span>Use development source build (dev image)</span>
+          </label>
+          <div id="gatewayInstallDevBranchRow" class="row compact">
+            <label for="gatewayInstallDevBranch" class="small muted">Dev branch</label>
+            <input id="gatewayInstallDevBranch" type="text" value="main" placeholder="main" />
+          </div>
+        </div>
         <div class="row" style="margin-top:.6rem;">
           <select id="gatewayInstallPlatform">
             <option value="linux-image">Linux Image (FCOS metal)</option>
@@ -164,6 +174,8 @@
           <button id="btnGatewayInstallOpen" type="button">Download Script</button>
         </div>
         <div id="gatewayInstallDetectedPlatform" class="small muted" style="margin-top:.5rem;"></div>
+        <div id="gatewayInstallHint" class="small muted" style="margin-top:.25rem;"></div>
+        <pre id="gatewayInstallCommandPreview" class="commandPreview"></pre>
         <div id="gatewayInstallStatus" class="small muted" style="margin-top:.35rem;"></div>
       </div>
 
