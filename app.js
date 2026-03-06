@@ -9,6 +9,8 @@ const connLog = document.getElementById('connLog');
 const connPopover = document.getElementById('connPopover');
 const popRelay = document.getElementById('popRelay');
 const popDaemon = document.getElementById('popDaemon');
+const popSwarm = document.getElementById('popSwarm');
+const popSwarmCache = document.getElementById('popSwarmCache');
 
 const btnMenu = document.getElementById('btnMenu');
 const drawer = document.getElementById('drawer');
@@ -28,8 +30,10 @@ const tabButtons = Array.from(viewSettings.querySelectorAll('.tab'));
 const tabPanes = {
   profile: document.getElementById('tab_profile'),
   devices: document.getElementById('tab_devices'),
+  appliances: document.getElementById('tab_appliances'),
   peers: document.getElementById('tab_peers'),
   pairing: document.getElementById('tab_pairing'),
+  apps: document.getElementById('tab_apps'),
   identity: document.getElementById('tab_identity'),
 };
 
@@ -45,10 +49,28 @@ const blockedList = document.getElementById('blockedList');
 
 const pairingList = document.getElementById('pairingList');
 const pairingEmpty = document.getElementById('pairingEmpty');
+const pairCodeInput = document.getElementById('pairCodeInput');
+const btnClaimPairCode = document.getElementById('btnClaimPairCode');
+const pairCodeStatus = document.getElementById('pairCodeStatus');
 
 const identityLabelEl = document.getElementById('identityLabel');
 const identityIdEl = document.getElementById('identityId');
 const identityLinkedEl = document.getElementById('identityLinked');
+
+// Optional app repo settings
+const appRepoInput = document.getElementById('appRepoInput');
+const btnAddAppRepo = document.getElementById('btnAddAppRepo');
+const appRepoStatus = document.getElementById('appRepoStatus');
+const appCapabilityList = document.getElementById('appCapabilityList');
+const homeAppsList = document.getElementById('homeAppsList');
+
+const gatewayInstallPlatform = document.getElementById('gatewayInstallPlatform');
+const gatewayInstallIncludeNvr = document.getElementById('gatewayInstallIncludeNvr');
+const btnGatewayInstallCopy = document.getElementById('btnGatewayInstallCopy');
+const btnGatewayInstallOpen = document.getElementById('btnGatewayInstallOpen');
+const gatewayInstallStatus = document.getElementById('gatewayInstallStatus');
+const gatewayInstallDetectedPlatform = document.getElementById('gatewayInstallDetectedPlatform');
+const applianceList = document.getElementById('applianceList');
 
 const joinDeviceLabelEl = document.getElementById('joinDeviceLabel');
 
@@ -73,6 +95,8 @@ const obStepIdentity = document.getElementById('obStepIdentity');
 const btnObDeviceContinue = document.getElementById('btnObDeviceContinue');
 const obDeviceLabel = document.getElementById('obDeviceLabel');
 const obIdentityLabel = document.getElementById('obIdentityLabel');
+const obPairCodeWrap = document.getElementById('obPairCodeWrap');
+const obPairCode = document.getElementById('obPairCode');
 const btnObIdentityContinue = document.getElementById('btnObIdentityContinue');
 const existingInfo = document.getElementById('existingInfo');
 const obModeTabs = Array.from(obStepIdentity.querySelectorAll('.tab'));
@@ -81,8 +105,15 @@ const btnSecWebAuthn = document.getElementById('btnSecWebAuthn');
 const btnSecSkip = document.getElementById('btnSecSkip');
 const obDeviceStatus = document.getElementById('obDeviceStatus');
 
+const SWARM_ICE_SERVERS = [
+  { urls: 'stun:stun.l.google.com:19302' },
+  // TODO: Add TURN here for NATs that block P2P.
+  // { urls: 'turn:turn.example.com:3478', username: 'user', credential: 'pass' },
+];
+
 let relayState = 'offline';
 let daemonState = 'unknown';
+let swarmState = 'offline';
 let connDerived = 'offline';
 const connStateLog = []; // newest first
 
@@ -92,29 +123,452 @@ let lastDirectory = [];
 let lastZones = [];
 let activeZoneKey = '';
 let pendingZoneNav = false;
+let swarm = null;
+let clientReady = false;
+let swarmBootRequested = false;
+
+const APPS_REPOS_KEY = 'constitute.apps.repos';
+const APPS_ENABLED_KEY = 'constitute.apps.enabled';
+const DEFAULT_APP_REPOS = ['https://github.com/Aux0x7F/constitute-nvr-ui'];
+const ROLE_APP_REPO_MAP = Object.freeze({
+  nvr: ['https://github.com/Aux0x7F/constitute-nvr-ui'],
+});
+const SERVICE_APP_REPO_MAP = Object.freeze({
+  nvr: ['https://github.com/Aux0x7F/constitute-nvr-ui'],
+});
+let appRepoCatalog = [];
+let appEnabledIds = new Set();
+let appLaunchHints = new Map();
+window.__constituteEnabledApps = [];
+
+const GATEWAY_INSTALL_TARGETS = Object.freeze({
+  'linux-image': {
+    label: 'Linux image (FCOS metal)',
+    supportsServices: true,
+  },
+  'windows-service': {
+    label: 'Windows service',
+    supportsServices: false,
+  },
+});
+
+function detectOperatorPlatform() {
+  const uaDataPlatform = String(navigator?.userAgentData?.platform || '').toLowerCase();
+  const platform = String(navigator?.platform || '').toLowerCase();
+  const ua = String(navigator?.userAgent || '').toLowerCase();
+  const sample = `${uaDataPlatform} ${platform} ${ua}`;
+  if (sample.includes('win')) return 'windows';
+  if (sample.includes('mac')) return 'mac';
+  if (sample.includes('linux') || sample.includes('x11')) return 'linux';
+  return 'unknown';
+}
+
+const OPERATOR_PLATFORM = detectOperatorPlatform();
+
+const GATEWAY_INSTALLERS = Object.freeze({
+  'linux-image': Object.freeze({
+    windows: {
+      commandBase: 'powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/Aux0x7F/constitute-gateway/main/scripts/windows/prepare-auto-update-image.ps1 | iex"',
+      scriptUrl: 'https://raw.githubusercontent.com/Aux0x7F/constitute-gateway/main/scripts/windows/prepare-auto-update-image.ps1',
+      downloadName: 'constitute-gateway-linux-image.ps1',
+      note: 'Linux image target supports gateway-hosted services (including NVR).',
+    },
+    linux: {
+      commandBase: 'curl -fsSL https://raw.githubusercontent.com/Aux0x7F/constitute-gateway/main/scripts/fcos/prepare-auto-update-image.sh | bash',
+      scriptUrl: 'https://raw.githubusercontent.com/Aux0x7F/constitute-gateway/main/scripts/fcos/prepare-auto-update-image.sh',
+      downloadName: 'constitute-gateway-linux-image.sh',
+      note: 'Linux image target supports gateway-hosted services (including NVR).',
+    },
+    mac: {
+      commandBase: 'curl -fsSL https://raw.githubusercontent.com/Aux0x7F/constitute-gateway/main/scripts/fcos/prepare-auto-update-image.sh | bash',
+      scriptUrl: 'https://raw.githubusercontent.com/Aux0x7F/constitute-gateway/main/scripts/fcos/prepare-auto-update-image.sh',
+      downloadName: 'constitute-gateway-linux-image.sh',
+      note: 'Linux image target supports gateway-hosted services (including NVR).',
+    },
+  }),
+  'windows-service': Object.freeze({
+    windows: {
+      commandBase: 'powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/Aux0x7F/constitute-gateway/main/scripts/windows/install-latest.ps1 | iex"',
+      scriptUrl: 'https://raw.githubusercontent.com/Aux0x7F/constitute-gateway/main/scripts/windows/install-latest.ps1',
+      downloadName: 'constitute-gateway-windows-service.ps1',
+      note: 'Windows service target does not support gateway-hosted NVR service installation.',
+    },
+  }),
+});
+
+const NVR_INSTALLERS = Object.freeze({
+  linux: {
+    commandBase: "curl -fsSL https://raw.githubusercontent.com/Aux0x7F/constitute-nvr/main/scripts/linux/install-latest.sh | bash -s --",
+    scriptUrl: "https://raw.githubusercontent.com/Aux0x7F/constitute-nvr/main/scripts/linux/install-latest.sh",
+  },
+});
+
+let lastSwarmDevices = [];
+const pendingGatewayServiceInstalls = new Map();
+
+class SwarmTransport {
+  constructor({ client, onState }) {
+    this.client = client;
+    this.onState = onState || (() => {});
+    this.localPk = '';
+    this.peers = new Map(); // pk -> RTCPeerConnection
+    this.channels = new Map(); // pk -> RTCDataChannel
+    this.connecting = new Set();
+    this.backoff = new Map(); // pk -> nextAt
+    this.maxPeers = 6;
+    this.lastKnown = [];
+    this.lastPeerKey = '';
+    this.success = new Map(); // pk -> lastOkMs
+    this.identityCache = [];
+    this.deviceCache = [];
+    this.identityCacheTs = 0;
+    this.deviceCacheTs = 0;
+    this.swarmSeen = new Map(); // pk -> lastSeenMs
+    this.cacheTtlMs = 24 * 60 * 60 * 1000;
+  }
+
+  setLocalPk(pk) {
+    this.localPk = String(pk || '').trim();
+  }
+
+  async setPeers(list) {
+    if (typeof RTCPeerConnection === 'undefined') {
+      this.onState('error');
+      return;
+    }
+    const peers = this._selectPeers(list);
+    const key = peers.slice().sort().join(',');
+    if (key === this.lastPeerKey) {
+      this._updateState();
+      return;
+    }
+    this.lastPeerKey = key;
+    console.log('[swarm] peers selected', peers);
+    this.lastKnown = peers;
+    this._persistLastKnown(peers);
+    for (const pk of peers) {
+      if (!this.peers.has(pk) && !this.connecting.has(pk) && this._canDial(pk)) {
+        this.connecting.add(pk);
+        console.log('[swarm] dialing', pk);
+        this._connectTo(pk).catch(() => {});
+      }
+    }
+    this._updateState();
+  }
+
+  _updateState() {
+    const openCount = Array.from(this.channels.values()).filter(c => c && c.readyState === 'open').length;
+    if (openCount > 0) this.onState('open');
+    else if (this.connecting.size > 0) this.onState('connecting');
+    else this.onState('offline');
+  }
+
+  async _connectTo(pk) {
+    const pc = new RTCPeerConnection({ iceServers: SWARM_ICE_SERVERS });
+    this.peers.set(pk, pc);
+
+    pc.onicecandidate = (e) => {
+      if (!e.candidate) return;
+      console.log('[swarm] ice', pk);
+      this._sendSignal(pk, 'ice', e.candidate).catch(() => {});
+    };
+
+    pc.onconnectionstatechange = () => {
+      if (pc.connectionState === 'failed' || pc.connectionState === 'closed' || pc.connectionState === 'disconnected') {
+        this._cleanup(pk);
+      }
+      this._updateState();
+    };
+
+    const dc = pc.createDataChannel('swarm');
+    this._attachChannel(pk, dc);
+
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    console.log('[swarm] offer', pk);
+    await this._sendSignal(pk, 'offer', offer);
+  }
+
+  async _acceptFrom(pk, offer) {
+    let pc = this.peers.get(pk);
+    if (!pc) {
+      pc = new RTCPeerConnection({ iceServers: SWARM_ICE_SERVERS });
+      this.peers.set(pk, pc);
+      pc.onicecandidate = (e) => {
+        if (!e.candidate) return;
+        this._sendSignal(pk, 'ice', e.candidate).catch(() => {});
+      };
+      pc.onconnectionstatechange = () => {
+        if (pc.connectionState === 'failed' || pc.connectionState === 'closed' || pc.connectionState === 'disconnected') {
+          this._cleanup(pk);
+        }
+        this._updateState();
+      };
+      pc.ondatachannel = (e) => this._attachChannel(pk, e.channel);
+    }
+    await pc.setRemoteDescription(new RTCSessionDescription(offer));
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+    console.log('[swarm] answer', pk);
+    await this._sendSignal(pk, 'answer', answer);
+  }
+
+  async _handleAnswer(pk, answer) {
+    const pc = this.peers.get(pk);
+    if (!pc) return;
+    await pc.setRemoteDescription(new RTCSessionDescription(answer));
+  }
+
+  async _handleIce(pk, cand) {
+    const pc = this.peers.get(pk);
+    if (!pc) return;
+    try { await pc.addIceCandidate(new RTCIceCandidate(cand)); } catch {}
+  }
+
+  _attachChannel(pk, dc) {
+    this.channels.set(pk, dc);
+    dc.onopen = async () => {
+      this.connecting.delete(pk);
+      this.backoff.delete(pk);
+      this._recordSuccess(pk);
+      this._markSeen(pk);
+      console.log('[swarm] channel open', pk);
+      await this._sendRecords(dc);
+      this._updateState();
+    };
+    dc.onclose = () => {
+      this._cleanup(pk);
+      this._updateState();
+    };
+    dc.onmessage = (e) => this._onChannelMessage(pk, e.data);
+  }
+
+  async _sendRecords(dc) {
+    const irec = await this.client.call('swarm.identity.record', {}, { timeoutMs: 20000 }).catch(() => null);
+    const drec = await this.client.call('swarm.device.record', {}, { timeoutMs: 20000 }).catch(() => null);
+    dc.send(JSON.stringify({ type: 'swarm_records', identityRecord: irec, deviceRecord: drec }));
+  }
+
+  async _onChannelMessage(pk, data) {
+    let msg;
+    try { msg = JSON.parse(String(data || '')); } catch { return; }
+    this._markSeen(pk);
+    console.log('[swarm] msg', pk, msg?.type || 'unknown');
+    if (msg.type === 'swarm_records') {
+      if (msg.identityRecord) await this.client.call('swarm.identity.put', { record: msg.identityRecord }, { timeoutMs: 20000 }).catch(() => {});
+      if (msg.deviceRecord) await this.client.call('swarm.device.put', { record: msg.deviceRecord }, { timeoutMs: 20000 }).catch(() => {});
+      return;
+    }
+    if (msg.type === 'swarm_request') {
+      await this._sendRecords(this.channels.get(pk));
+      return;
+    }
+  }
+
+  async _sendSignal(toPk, signalType, data) {
+    return await this.client.call('swarm.signal.send', { toPk, signalType, data }, { timeoutMs: 20000 });
+  }
+
+  async onSignal(evt) {
+    const from = String(evt?.from || '').trim();
+    if (!from || from === this.localPk) return;
+    const t = evt?.signalType;
+    console.log('[swarm] signal', t, from);
+    if (t === 'offer') return await this._acceptFrom(from, evt.data);
+    if (t === 'answer') return await this._handleAnswer(from, evt.data);
+    if (t === 'ice') return await this._handleIce(from, evt.data);
+  }
+
+  _cleanup(pk) {
+    this.connecting.delete(pk);
+    this._backoff(pk);
+    const ch = this.channels.get(pk);
+    if (ch) try { ch.close(); } catch {}
+    this.channels.delete(pk);
+    const pc = this.peers.get(pk);
+    if (pc) try { pc.close(); } catch {}
+    this.peers.delete(pk);
+  }
+
+  _selectPeers(list) {
+    const arr = (Array.isArray(list) ? list : [])
+      .map(r => String(r?.devicePk || '').trim())
+      .filter(Boolean)
+      .filter(pk => pk !== this.localPk);
+    if (arr.length <= this.maxPeers) return arr;
+    const scored = arr.map(pk => ({
+      pk,
+      score: this.success.get(pk) || 0,
+    }));
+    scored.sort((a, b) => b.score - a.score);
+    const top = scored.slice(0, Math.min(this.maxPeers, Math.max(2, Math.floor(this.maxPeers / 2)))).map(x => x.pk);
+    const rest = scored.slice(top.length).map(x => x.pk);
+    const shuffled = rest.sort(() => Math.random() - 0.5);
+    const pick = top.concat(shuffled.slice(0, this.maxPeers - top.length));
+    return pick;
+  }
+
+  _backoff(pk) {
+    const now = Date.now();
+    const next = now + 30_000 + Math.floor(Math.random() * 20_000);
+    this.backoff.set(pk, next);
+  }
+
+  _canDial(pk) {
+    const nextAt = this.backoff.get(pk) || 0;
+    return Date.now() >= nextAt;
+  }
+
+  _persistLastKnown(peers) {
+    try { localStorage.setItem('swarm.lastPeers', JSON.stringify(peers)); } catch {}
+  }
+
+  _recordSuccess(pk) {
+    this.success.set(pk, Date.now());
+    this._persistSuccess();
+  }
+
+  _persistSuccess() {
+    try {
+      const arr = Array.from(this.success.entries());
+      localStorage.setItem('swarm.peerSuccess', JSON.stringify(arr));
+    } catch {}
+  }
+
+  loadSuccess() {
+    try {
+      const raw = localStorage.getItem('swarm.peerSuccess');
+      const arr = JSON.parse(raw || '[]');
+      if (Array.isArray(arr)) {
+        this.success = new Map(arr.filter(x => Array.isArray(x) && x.length === 2));
+      }
+    } catch {}
+  }
+
+  cacheIdentityRecords(list) {
+    const arr = Array.isArray(list) ? list : [];
+    this.identityCache = arr;
+    this.identityCacheTs = Date.now();
+    try {
+      localStorage.setItem('swarm.identityCache', JSON.stringify({ ts: this.identityCacheTs, records: arr }));
+    } catch {}
+  }
+
+  loadIdentityCache() {
+    try {
+      const raw = localStorage.getItem('swarm.identityCache');
+      const obj = JSON.parse(raw || '{}');
+      const arr = Array.isArray(obj?.records) ? obj.records : [];
+      const ts = Number(obj?.ts || 0);
+      if (ts && Date.now() - ts < this.cacheTtlMs) {
+        this.identityCache = arr;
+        this.identityCacheTs = ts;
+      }
+    } catch {}
+    return this.identityCache;
+  }
+
+  cacheDeviceRecords(list) {
+    const arr = Array.isArray(list) ? list : [];
+    this.deviceCache = arr;
+    this.deviceCacheTs = Date.now();
+    try {
+      localStorage.setItem('swarm.deviceCache', JSON.stringify({ ts: this.deviceCacheTs, records: arr }));
+    } catch {}
+  }
+
+  loadDeviceCache() {
+    try {
+      const raw = localStorage.getItem('swarm.deviceCache');
+      const obj = JSON.parse(raw || '{}');
+      const arr = Array.isArray(obj?.records) ? obj.records : [];
+      const ts = Number(obj?.ts || 0);
+      if (ts && Date.now() - ts < this.cacheTtlMs) {
+        this.deviceCache = arr;
+        this.deviceCacheTs = ts;
+      }
+    } catch {}
+    return this.deviceCache;
+  }
+
+  loadLastKnown() {
+    try {
+      const raw = localStorage.getItem('swarm.lastPeers');
+      const arr = JSON.parse(raw || '[]');
+      if (Array.isArray(arr)) this.lastKnown = arr;
+    } catch {}
+    return this.lastKnown;
+  }
+
+  getFallbackPeers() {
+    const preferred = this.lastKnown && this.lastKnown.length > 0
+      ? this.lastKnown
+      : (this.deviceCache || []).map(d => String(d?.devicePk || '').trim()).filter(Boolean);
+    return preferred;
+  }
+
+  _markSeen(pk) {
+    const k = String(pk || '').trim();
+    if (!k) return;
+    this.swarmSeen.set(k, Date.now());
+  }
+
+  getSwarmSeen(pk) {
+    return this.swarmSeen.get(pk) || 0;
+  }
+
+  getCacheAges() {
+    return {
+      identity: this.identityCacheTs ? Date.now() - this.identityCacheTs : 0,
+      device: this.deviceCacheTs ? Date.now() - this.deviceCacheTs : 0,
+    };
+  }
+}
 
 function _deriveConnState() {
   const r = relayState;
   const d = daemonState;
+  const s = swarmState;
 
   if (d !== 'online') {
-    if (r === 'open') return 'degraded';
     if (r === 'connecting') return 'connecting';
     return 'disconnected';
   }
 
-  if (r === 'open') return 'connected';
-  if (r === 'connecting') return 'connecting';
+  if (r === 'open' && s === 'open') return 'connected';
+  if (r === 'open' && (s === 'offline' || s === 'error' || s === 'disabled')) return 'degraded';
+  if (s === 'open' && (r === 'offline' || r === 'error' || r === 'closed')) return 'swarm-only';
+  if (r === 'connecting' || s === 'connecting') return 'connecting';
   if (r === 'error' || r === 'closed') return 'error';
   return 'disconnected';
 }
 
+function _deriveConnLabel() {
+  const r = relayState;
+  const d = daemonState;
+  const s = swarmState;
+
+  if (d !== 'online') {
+    if (r === 'connecting') return 'Connecting to nostr...';
+    return 'Disconnected';
+  }
+
+  if (r === 'connecting') return 'Connecting to nostr...';
+  if (r === 'open' && s === 'connecting') return 'Connecting to swarm...';
+  if (r === 'open' && s === 'open') return 'Fully connected';
+  if (r === 'open' && (s === 'offline' || s === 'error' || s === 'disabled')) return 'Partially connected';
+  if (s === 'open' && (r === 'offline' || r === 'error' || r === 'closed')) return 'Swarm only';
+  if (r === 'error' || r === 'closed') return 'Disconnected';
+  return 'Disconnected';
+}
+
 function _pushConnLog(reason = '') {
   const state = _deriveConnState();
+  const label = _deriveConnLabel();
+  connStateText.textContent = label;
   if (state === connDerived && connStateLog.length > 0) return;
 
   connDerived = state;
-  connStateText.textContent = state;
 
   connStateLog.unshift({ ts: Date.now(), state, reason: String(reason || '') });
   while (connStateLog.length > 25) connStateLog.pop();
@@ -143,19 +597,46 @@ function setRelayState(s, reason = '') {
   relayState = String(s || 'offline');
   popRelay.textContent = relayState;
 
-  connDot.classList.remove('conn-off', 'conn-open', 'conn-err', 'conn-conn');
-  if (relayState === 'open') connDot.classList.add('conn-open');
-  else if (relayState === 'connecting') connDot.classList.add('conn-conn');
-  else if (relayState === 'error' || relayState === 'closed') connDot.classList.add('conn-err');
-  else connDot.classList.add('conn-off');
-
+  _setConnDot();
   _pushConnLog(reason);
+}
+
+function formatAge(ms) {
+  if (!ms || ms < 0) return 'n/a';
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 48) return `${h}h`;
+  const d = Math.floor(h / 24);
+  return `${d}d`;
 }
 
 function setDaemonState(s, reason = '') {
   daemonState = String(s || 'unknown');
   popDaemon.textContent = daemonState;
   _pushConnLog(reason);
+}
+
+function setSwarmState(s, reason = '') {
+  swarmState = String(s || 'offline');
+  if (popSwarm) popSwarm.textContent = swarmState;
+  if (popSwarmCache && swarm) {
+    const ages = swarm.getCacheAges();
+    const oldest = Math.max(ages.identity || 0, ages.device || 0);
+    popSwarmCache.textContent = oldest ? `${formatAge(oldest)} old` : 'n/a';
+  }
+  _setConnDot();
+  _pushConnLog(reason);
+}
+
+function _setConnDot() {
+  connDot.classList.remove('conn-off', 'conn-open', 'conn-err', 'conn-conn');
+  if (relayState === 'open' || swarmState === 'open') connDot.classList.add('conn-open');
+  else if (relayState === 'connecting' || swarmState === 'connecting') connDot.classList.add('conn-conn');
+  else if (relayState === 'error' || relayState === 'closed') connDot.classList.add('conn-err');
+  else connDot.classList.add('conn-off');
 }
 
 function showConnPopover() { connPopover.classList.remove('hidden'); }
@@ -199,6 +680,1133 @@ function showActivity(name) {
 function setSettingsTab(name) {
   for (const b of tabButtons) b.classList.toggle('active', b.dataset.tab === name);
   for (const [k, el] of Object.entries(tabPanes)) el.classList.toggle('hidden', k !== name);
+}
+
+
+function setAppStatus(msg, error = false) {
+  if (!appRepoStatus) return;
+  appRepoStatus.textContent = String(msg || '');
+  appRepoStatus.classList.toggle('warn', !!error);
+}
+
+function setPairCodeStatus(msg, error = false) {
+  if (!pairCodeStatus) return;
+  pairCodeStatus.textContent = String(msg || '');
+  pairCodeStatus.classList.toggle('warn', !!error);
+}
+
+function setGatewayInstallStatus(msg, error = false) {
+  if (!gatewayInstallStatus) return;
+  gatewayInstallStatus.textContent = String(msg || '');
+  gatewayInstallStatus.classList.toggle('warn', !!error);
+}
+
+function summarizeInstallDetail(detail) {
+  const raw = String(detail || '').trim();
+  if (!raw) return '';
+  return raw.length > 240 ? `${raw.slice(0, 240)}...` : raw;
+}
+
+function handleGatewayServiceInstallStatusEvent(evt) {
+  const requestId = String(evt?.requestId || '').trim();
+  const status = String(evt?.status || '').trim().toLowerCase();
+  const gatewayPk = String(evt?.gatewayPk || '').trim();
+  const reason = String(evt?.reason || '').trim();
+  const detail = summarizeInstallDetail(evt?.detail || '');
+
+  const meta = pendingGatewayServiceInstalls.get(requestId) || null;
+  const target = meta?.gatewayPk || gatewayPk || 'gateway';
+
+  const base = `NVR install ${status || 'update'} for ${target.slice(0, 12)}...`;
+  const reasonPart = reason ? ` (${reason})` : '';
+  const detailPart = detail ? ` — ${detail}` : '';
+
+  const isError = status === 'failed' || status === 'rejected';
+  setGatewayInstallStatus(`${base}${reasonPart}${detailPart}`, isError);
+
+  if (status === 'complete' || status === 'failed' || status === 'rejected') {
+    if (requestId) pendingGatewayServiceInstalls.delete(requestId);
+  }
+
+  if (status === 'complete') {
+    refreshAll().catch(() => {});
+  }
+}
+
+function operatorPlatformLabel() {
+  if (OPERATOR_PLATFORM === 'windows') return 'Windows';
+  if (OPERATOR_PLATFORM === 'linux') return 'Linux';
+  if (OPERATOR_PLATFORM === 'mac') return 'macOS';
+  return 'Unknown';
+}
+
+function selectedGatewayInstallTarget() {
+  const raw = String(gatewayInstallPlatform?.value || 'linux-image').trim().toLowerCase();
+  return raw === 'windows-service' ? 'windows-service' : 'linux-image';
+}
+
+function preferredGatewayInstallTarget() {
+  return 'linux-image';
+}
+
+function currentGatewayTargetInfo() {
+  return GATEWAY_INSTALL_TARGETS[selectedGatewayInstallTarget()] || GATEWAY_INSTALL_TARGETS['linux-image'];
+}
+
+function targetSupportsServices(target = selectedGatewayInstallTarget()) {
+  return Boolean(GATEWAY_INSTALL_TARGETS[target]?.supportsServices);
+}
+
+function currentGatewayInstaller() {
+  const target = selectedGatewayInstallTarget();
+  const byTarget = GATEWAY_INSTALLERS[target];
+  if (!byTarget) return null;
+  return byTarget[OPERATOR_PLATFORM] || null;
+}
+
+function currentNvrInstaller() {
+  return NVR_INSTALLERS.linux;
+}
+
+function gatewayInstallIncludesNvr() {
+  return Boolean(gatewayInstallIncludeNvr?.checked);
+}
+
+function shellSingleQuote(value) {
+  const v = String(value ?? '');
+  return `'${v.replace(/'/g, `'"'"'`)}'`;
+}
+
+function collectAuthorizedIdentityDevicePks() {
+  const authorized = new Set();
+  const ownPk = String(lastDeviceState?.pk || '').trim();
+  if (ownPk) authorized.add(ownPk);
+  const identityDevices = Array.isArray(lastIdentity?.devices) ? lastIdentity.devices : [];
+  for (const d of identityDevices) {
+    const pk = String(d?.pk || d?.devicePk || '').trim();
+    if (pk) authorized.add(pk);
+  }
+  return Array.from(authorized.values());
+}
+
+async function prepareInstallEnrollment(target) {
+  const identityLabel = String(lastIdentity?.label || '').trim();
+  if (!identityLabel) throw new Error('link an identity before preparing install enrollment');
+
+  const enrollment = await client.call('pairing.prepareInstall', {
+    autoApprove: true,
+    ttlMs: 6 * 60 * 1000,
+    target: String(target || 'gateway'),
+  }, { timeoutMs: 20000 });
+
+  const pairCode = String(enrollment?.code || '').trim();
+  const pairCodeHash = String(enrollment?.codeHash || '').trim();
+  const pairIdentity = String(enrollment?.identityLabel || identityLabel).trim();
+  if (!pairIdentity || !pairCode || !pairCodeHash) {
+    throw new Error('invalid install enrollment payload');
+  }
+
+  return {
+    identityLabel: pairIdentity,
+    code: pairCode,
+    codeHash: pairCodeHash,
+    expiresAt: Number(enrollment?.expiresAt || 0),
+  };
+}
+
+function buildNvrInstallCommand({ identityId, enrollment, zoneKeys = [], swarmPeers = [], publicWsUrl = '' }) {
+  const installer = currentNvrInstaller();
+  if (!installer?.commandBase) throw new Error('no nvr installer configured');
+
+  const parts = [
+    installer.commandBase,
+    '--non-interactive',
+    '--identity-id', shellSingleQuote(identityId),
+    '--allow-unsigned-hello-mvp',
+    '--pair-identity', shellSingleQuote(enrollment.identityLabel),
+    '--pair-code', shellSingleQuote(enrollment.code),
+    '--pair-code-hash', shellSingleQuote(enrollment.codeHash),
+    '--enable-reolink-autoprovision',
+  ];
+
+  const ws = String(publicWsUrl || '').trim();
+  if (ws) {
+    parts.push('--public-ws-url', shellSingleQuote(ws));
+  }
+
+  for (const peer of swarmPeers) {
+    const v = String(peer || '').trim();
+    if (v) parts.push('--swarm-peer', shellSingleQuote(v));
+  }
+
+  for (const zone of zoneKeys) {
+    const v = String(zone || '').trim();
+    if (v) parts.push('--zone-key', shellSingleQuote(v));
+  }
+
+  for (const pk of collectAuthorizedIdentityDevicePks()) {
+    parts.push('--authorized-device-pk', shellSingleQuote(pk));
+  }
+
+  return parts.join(' ');
+}
+
+async function prepareGatewayInstallContext() {
+  const target = selectedGatewayInstallTarget();
+  const targetInfo = currentGatewayTargetInfo();
+  const installer = currentGatewayInstaller();
+  if (!installer) {
+    throw new Error(`Target ${targetInfo.label} is not supported from ${operatorPlatformLabel()} operators`);
+  }
+
+  const noteParts = [];
+  if (installer.note) noteParts.push(String(installer.note));
+
+  let command = installer.commandBase;
+  let enrollment = null;
+
+  const identityId = String(lastIdentity?.id || '').trim();
+  const hasIdentity = Boolean(identityId && String(lastIdentity?.label || '').trim());
+
+  if (target === 'linux-image' && hasIdentity) {
+    const gwEnrollment = await prepareInstallEnrollment('gateway');
+    command = `${command} --pair-identity ${shellSingleQuote(gwEnrollment.identityLabel)} --pair-code ${shellSingleQuote(gwEnrollment.code)} --pair-code-hash ${shellSingleQuote(gwEnrollment.codeHash)}`;
+    enrollment = { gateway: gwEnrollment };
+    noteParts.push('Gateway auto-pair enrollment embedded.');
+  } else if (target === 'linux-image' && !hasIdentity) {
+    noteParts.push('Link an identity to embed gateway auto-pair enrollment.');
+  }
+
+  if (gatewayInstallIncludesNvr()) {
+    if (!targetInfo.supportsServices || target !== 'linux-image') {
+      throw new Error('NVR bootstrap is only available for Linux image target');
+    }
+    if (!hasIdentity) {
+      throw new Error('link an identity before including NVR bootstrap');
+    }
+
+    const zoneKeys = installZoneKeys();
+    if (zoneKeys.length === 0) {
+      throw new Error('join a zone before including NVR bootstrap');
+    }
+
+    const nvrEnrollment = await prepareInstallEnrollment('nvr');
+    const nvrCommand = buildNvrInstallCommand({
+      identityId,
+      enrollment: nvrEnrollment,
+      zoneKeys,
+      swarmPeers: ['127.0.0.1:4040'],
+      publicWsUrl: 'ws://127.0.0.1:8456/session',
+    });
+
+    command = `${command}
+
+# After gateway first boot (run on the gateway host)
+${nvrCommand}`;
+    enrollment = {
+      ...(enrollment || {}),
+      nvr: nvrEnrollment,
+    };
+    noteParts.push('NVR install + pairing bootstrap appended (post-boot host command).');
+  }
+
+  return {
+    target,
+    targetInfo,
+    installer,
+    command,
+    enrollment,
+    note: noteParts.join(' '),
+  };
+}
+
+
+async function downloadGatewayInstallerScript(installer) {
+  const scriptUrl = String(installer?.scriptUrl || '').trim();
+  if (!scriptUrl) throw new Error('missing script URL');
+
+  const res = await fetch(scriptUrl, { cache: 'no-store' });
+  if (!res.ok) {
+    throw new Error(`script download failed: HTTP ${res.status}`);
+  }
+
+  const content = await res.text();
+  const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+  const blobUrl = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = blobUrl;
+  a.download = String(installer?.downloadName || 'constitute-gateway-install-script.txt');
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+}
+
+function parseUdpPeer(endpoint) {
+  const raw = String(endpoint || '').trim();
+  if (!raw) return '';
+  let candidate = raw;
+  if (candidate.startsWith('udp://')) {
+    candidate = candidate.slice('udp://'.length);
+  }
+  if (!candidate.includes(':')) return '';
+  return candidate;
+}
+
+function gatewaySwarmPeerForRecord(record) {
+  const pk = String(record?.devicePk || record?.pk || '').trim();
+  if (!pk) return '';
+  const directory = Array.isArray(lastDirectory) ? lastDirectory : [];
+  const hit = directory.find((entry) => String(entry?.devicePk || '').trim() === pk);
+  if (!hit) return '';
+  return parseUdpPeer(hit?.swarm || '');
+}
+
+function installZoneKeys() {
+  const preferred = String(activeZoneKey || '').trim();
+  const zones = Array.isArray(lastZones) ? lastZones : [];
+  const keys = [];
+  if (preferred) keys.push(preferred);
+  for (const zone of zones) {
+    const key = String(zone?.key || '').trim();
+    if (key && !keys.includes(key)) keys.push(key);
+  }
+  return keys;
+}
+
+async function prepareNvrInstallContext(record) {
+  const installer = currentNvrInstaller();
+  if (!installer?.commandBase) throw new Error('no nvr installer configured');
+
+  const identityId = String(lastIdentity?.id || '').trim();
+  if (!identityId || !String(lastIdentity?.label || '').trim()) {
+    throw new Error('link an identity before installing NVR');
+  }
+
+  const gatewayHostPlatform = normalizeRole(record?.hostPlatform || record?.host_platform || record?.platform || '');
+  if (gatewayHostPlatform && gatewayHostPlatform !== 'linux' && gatewayHostPlatform !== 'fcos') {
+    throw new Error('selected gateway host platform does not support NVR service installation');
+  }
+
+  const gatewayPeer = gatewaySwarmPeerForRecord(record);
+  if (!gatewayPeer) throw new Error('gateway endpoint not discovered yet (wait for zone presence)');
+
+  const zones = installZoneKeys();
+  if (zones.length === 0) throw new Error('join a zone before installing NVR');
+
+  const enrollment = await prepareInstallEnrollment('nvr');
+
+  const gatewayHost = gatewayPeer.split(':')[0];
+  const defaultWs = gatewayHost ? `ws://${gatewayHost}:8456/session` : 'ws://127.0.0.1:8456/session';
+  const swarmPeers = [gatewayPeer, '127.0.0.1:4040'].filter((v, i, arr) => v && arr.indexOf(v) === i);
+
+  const command = buildNvrInstallCommand({
+    identityId,
+    enrollment,
+    zoneKeys: zones,
+    swarmPeers,
+    publicWsUrl: defaultWs,
+  });
+
+  return {
+    installer,
+    command,
+    enrollment,
+    gatewayPeer,
+    zones,
+  };
+}
+
+
+async function requestRemoteNvrInstall(record) {
+  const gatewayPk = String(record?.devicePk || record?.pk || '').trim();
+  if (!gatewayPk) throw new Error('gateway device pk missing');
+
+  const prepared = await prepareNvrInstallContext(record);
+  const identityId = String(lastIdentity?.id || '').trim();
+  if (!identityId) throw new Error('identity is not linked');
+
+  const gatewayHost = String(prepared.gatewayPeer || '').split(':')[0] || '';
+  const publicWsUrl = gatewayHost ? `ws://${gatewayHost}:8456/session` : 'ws://127.0.0.1:8456/session';
+
+  const payload = {
+    gatewayDevicePk: gatewayPk,
+    service: 'nvr',
+    action: 'install',
+    identityId,
+    pairIdentity: prepared.enrollment.identityLabel,
+    pairCode: prepared.enrollment.code,
+    pairCodeHash: prepared.enrollment.codeHash,
+    zone: String(prepared.zones?.[0] || ''),
+    zoneKeys: prepared.zones,
+    authorizedDevicePks: collectAuthorizedIdentityDevicePks(),
+    swarmPeers: [prepared.gatewayPeer, '127.0.0.1:4040'].filter((v, i, arr) => v && arr.indexOf(v) === i),
+    publicWsUrl,
+    allowUnsignedHelloMvp: true,
+    reolinkAutoprovision: true,
+    timeoutSecs: 900,
+  };
+
+  const response = await client.call('gateway.service.install', payload, { timeoutMs: 20000 });
+  const requestId = String(response?.requestId || '').trim();
+  if (requestId) {
+    pendingGatewayServiceInstalls.set(requestId, {
+      gatewayPk,
+      requestedAt: Date.now(),
+    });
+  }
+
+  return {
+    requestId,
+    enrollment: prepared.enrollment,
+  };
+}
+
+
+function updateGatewayInstallHint() {
+  const targetInfo = currentGatewayTargetInfo();
+  const installer = currentGatewayInstaller();
+
+  if (gatewayInstallDetectedPlatform) {
+    gatewayInstallDetectedPlatform.textContent = `Detected operator platform: ${operatorPlatformLabel()}.`;
+  }
+
+  if (gatewayInstallIncludeNvr) {
+    gatewayInstallIncludeNvr.disabled = !targetInfo.supportsServices;
+    if (!targetInfo.supportsServices) {
+      gatewayInstallIncludeNvr.checked = false;
+    }
+  }
+
+  if (!installer) {
+    setGatewayInstallStatus(
+      `No ${targetInfo.label} installer script is available for ${operatorPlatformLabel()} operators.`,
+      true,
+    );
+    return;
+  }
+
+  const supportNote = targetInfo.supportsServices
+    ? 'Target supports gateway-hosted services (including NVR).'
+    : 'Target does not support gateway-hosted NVR services.';
+  const includeNote = gatewayInstallIncludesNvr()
+    ? 'NVR install+pair bootstrap will be appended.'
+    : 'Enable the checkbox to append NVR install+pair bootstrap.';
+  const installerNote = installer.note ? `${installer.note} ` : '';
+  setGatewayInstallStatus(`${installer.commandBase} -- ${installerNote}${supportNote} ${includeNote}`);
+}
+
+function isGatewayRecord(rec) {
+  const role = normalizeRole(rec?.role || rec?.nodeType || rec?.type || '');
+  const service = normalizeRole(rec?.service || '');
+  return role === 'gateway' || service === 'gateway';
+}
+
+function isNvrRecord(rec) {
+  const role = normalizeRole(rec?.role || rec?.nodeType || rec?.type || '');
+  const service = normalizeRole(rec?.service || '');
+  return role === 'nvr' || service === 'nvr';
+}
+
+function ownedPkSet(identityDevices) {
+  return new Set(
+    (Array.isArray(identityDevices) ? identityDevices : [])
+      .map((d) => String(d?.pk || d?.devicePk || '').trim())
+      .filter(Boolean)
+  );
+}
+
+function summarizeAppliance(rec, owned) {
+  const pk = String(rec?.devicePk || rec?.pk || '').trim();
+  const label = String(rec?.deviceLabel || rec?.label || '').trim();
+  const role = normalizeRole(rec?.role || rec?.nodeType || rec?.type || '') || 'unknown';
+  const service = normalizeRole(rec?.service || '') || 'none';
+  const version = String(rec?.serviceVersion || rec?.service_version || '').trim();
+  const hostPlatform = normalizeRole(rec?.hostPlatform || rec?.host_platform || rec?.platform || '');
+  const releaseChannel = String(rec?.releaseChannel || rec?.release_channel || '').trim();
+  const releaseTrack = String(rec?.releaseTrack || rec?.release_track || '').trim();
+  const releaseBranch = String(rec?.releaseBranch || rec?.release_branch || '').trim();
+  const updatedAt = Number(rec?.updatedAt || rec?.updated_at || rec?.ts || rec?.lastSeen || 0);
+  return {
+    pk,
+    title: label || `${role}:${pk.slice(0, 12)}`,
+    role,
+    service,
+    version,
+    hostPlatform,
+    releaseChannel,
+    releaseTrack,
+    releaseBranch,
+    updatedAt,
+    owned,
+  };
+}
+
+function formatReleaseMeta(channel, track, branch) {
+  const ch = String(channel || '').trim();
+  const tr = String(track || '').trim();
+  const br = String(branch || '').trim();
+  if (!ch && !tr && !br) return '';
+  const left = [ch, tr].filter(Boolean).join('/');
+  return br ? `${left || 'release'} @ ${br}` : (left || 'release');
+}
+
+async function ensureNvrAppEnabledFromRecord(record) {
+  const hint = serviceModuleHints(record) || {
+    owner: 'Aux0x7F',
+    repo: 'constitute-nvr-ui',
+    repoUrl: 'https://github.com/Aux0x7F/constitute-nvr-ui',
+    manifestUrl: '',
+    sessionWsUrl: String(record?.sessionWsUrl || record?.session_ws_url || record?.publicWsUrl || '').trim(),
+    allowUnsignedHelloMvp: Boolean(record?.allowUnsignedHelloMvp || record?.allow_unsigned_hello_mvp || false),
+  };
+
+  const changed = await ensureAppRepoEnabledByUrl(hint.repoUrl, {
+    manifestUrl: hint.manifestUrl,
+  });
+
+  if (hint.sessionWsUrl || hint.allowUnsignedHelloMvp) {
+    const key = repoKey(hint.owner, hint.repo);
+    const launchHint = {};
+    if (hint.sessionWsUrl) launchHint.ws = hint.sessionWsUrl;
+    if (hint.allowUnsignedHelloMvp) launchHint.insecure = true;
+    appLaunchHints.set(key, launchHint);
+  }
+
+  if (changed) {
+    saveAppPrefs();
+    publishEnabledApps();
+    renderAppCatalog();
+  }
+
+  return appRepoCatalog.find((entry) =>
+    String(entry?.owner || '').toLowerCase() === String(hint.owner || '').toLowerCase() &&
+    String(entry?.repo || '').toLowerCase() === String(hint.repo || '').toLowerCase()
+  ) || null;
+}
+
+function launchAppWindow(app) {
+  const base = appLaunchUrl(app);
+  if (!base) {
+    setAppStatus('No launch URL available for this app.', true);
+    return;
+  }
+  try {
+    const target = new URL(base);
+    const ctx = appLaunchContextQuery(app);
+    if (ctx) {
+      const combined = target.search ? `${target.search}&${ctx}` : `?${ctx}`;
+      target.search = combined;
+    }
+    window.open(target.toString(), '_blank', 'noopener,noreferrer');
+  } catch {
+    setAppStatus('App launch URL is invalid.', true);
+  }
+}
+
+async function launchNvrControlPanel(record) {
+  try {
+    const app = await ensureNvrAppEnabledFromRecord(record);
+    if (!app) {
+      setGatewayInstallStatus('NVR UI manifest unavailable for this device.', true);
+      return;
+    }
+    launchAppWindow(app);
+  } catch (err) {
+    setGatewayInstallStatus(`NVR control panel failed: ${String(err?.message || err)}`, true);
+  }
+}
+
+function renderApplianceList(identityDevices, swarmDevices) {
+  if (!applianceList) return;
+  clear(applianceList);
+
+  const owned = ownedPkSet(identityDevices);
+  const recs = [];
+  const seen = new Set();
+  for (const rec of (Array.isArray(swarmDevices) ? swarmDevices : [])) {
+    const pk = String(rec?.devicePk || rec?.pk || '').trim();
+    if (!pk || seen.has(pk)) continue;
+    if (!(isGatewayRecord(rec) || isNvrRecord(rec))) continue;
+    seen.add(pk);
+    recs.push(rec);
+  }
+
+  if (recs.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'item';
+    empty.textContent = 'No gateway or NVR appliances discovered yet.';
+    applianceList.appendChild(empty);
+    return;
+  }
+
+  recs.sort((a, b) => {
+    const aa = summarizeAppliance(a, owned.has(String(a?.devicePk || a?.pk || '').trim()));
+    const bb = summarizeAppliance(b, owned.has(String(b?.devicePk || b?.pk || '').trim()));
+    return Number(bb.updatedAt || 0) - Number(aa.updatedAt || 0);
+  });
+
+  for (const rec of recs) {
+    const info = summarizeAppliance(rec, owned.has(String(rec?.devicePk || rec?.pk || '').trim()));
+
+    const item = document.createElement('div');
+    item.className = 'item';
+
+    const meta = document.createElement('div');
+    const last = info.updatedAt ? new Date(info.updatedAt).toLocaleString() : 'n/a';
+    const suffix = info.version ? ` (${info.version})` : '';
+    const host = info.hostPlatform ? ` • host ${info.hostPlatform}` : '';
+    const releaseMeta = formatReleaseMeta(info.releaseChannel, info.releaseTrack, info.releaseBranch);
+    const releaseLine = releaseMeta ? `<div class="itemMeta">release ${escapeHtml(releaseMeta)}</div>` : '';
+    meta.innerHTML = `
+      <div class="itemTitle">${escapeHtml(info.title)}</div>
+      <div class="itemMeta">pk ${escapeHtml(info.pk.slice(0, 16))}…</div>
+      <div class="itemMeta">role ${escapeHtml(info.role)} • service ${escapeHtml(info.service)}${escapeHtml(suffix)}${escapeHtml(host)}</div>
+      ${releaseLine}
+      <div class="itemMeta">${info.owned ? 'owned by this identity' : 'discovered in zone'} • updated ${escapeHtml(last)}</div>
+    `;
+
+    const actions = document.createElement('div');
+    actions.className = 'itemActions';
+
+    if (isGatewayRecord(rec)) {
+      const pair = document.createElement('button');
+      pair.type = 'button';
+      pair.textContent = 'Pair Existing Gateway';
+      pair.onclick = () => {
+        showActivity('settings');
+        setSettingsTab('pairing');
+        setPairCodeStatus('Enter pairing code shown by the gateway installer.');
+      };
+      actions.appendChild(pair);
+
+      const gatewaySupportsServices = info.hostPlatform
+        ? (info.hostPlatform === 'linux' || info.hostPlatform === 'fcos')
+        : true;
+      if (gatewaySupportsServices) {
+        const installNvr = document.createElement('button');
+        installNvr.type = 'button';
+        installNvr.textContent = 'Install NVR Service';
+        installNvr.onclick = async () => {
+          try {
+            setGatewayInstallStatus('Submitting NVR install request to gateway...');
+            const submitted = await requestRemoteNvrInstall(rec);
+            const until = submitted?.enrollment?.expiresAt
+              ? new Date(submitted.enrollment.expiresAt).toLocaleTimeString()
+              : '';
+            if (submitted?.requestId) {
+              setGatewayInstallStatus(
+                until
+                  ? `NVR install requested (request ${submitted.requestId.slice(0, 12)}...). Pair claim armed until ${until}.`
+                  : `NVR install requested (request ${submitted.requestId.slice(0, 12)}...).`,
+                false,
+              );
+            } else {
+              setGatewayInstallStatus('NVR install request submitted.', false);
+            }
+          } catch (err) {
+            setGatewayInstallStatus(`Could not submit NVR install request: ${String(err?.message || err)}`, true);
+          }
+        };
+        actions.appendChild(installNvr);
+      } else {
+        const unsupported = document.createElement('button');
+        unsupported.type = 'button';
+        unsupported.disabled = true;
+        unsupported.textContent = 'NVR Unsupported';
+        unsupported.title = 'Gateway-hosted services are currently supported on Linux image hosts only.';
+        actions.appendChild(unsupported);
+      }
+    }
+
+    if (isNvrRecord(rec)) {
+      const open = document.createElement('button');
+      open.type = 'button';
+      open.textContent = 'Open Security Cameras';
+      open.onclick = () => {
+        launchNvrControlPanel(rec).catch((err) => {
+          setGatewayInstallStatus(`NVR launch failed: ${String(err?.message || err)}`, true);
+        });
+      };
+      actions.appendChild(open);
+    }
+
+    item.appendChild(meta);
+    item.appendChild(actions);
+    applianceList.appendChild(item);
+  }
+}
+
+function loadAppPrefs() {
+  try {
+    const rawRepos = localStorage.getItem(APPS_REPOS_KEY);
+    const parsedRepos = rawRepos ? JSON.parse(rawRepos) : [];
+    if (Array.isArray(parsedRepos)) appRepoCatalog = parsedRepos;
+  } catch {}
+
+  if (!Array.isArray(appRepoCatalog) || appRepoCatalog.length === 0) {
+    appRepoCatalog = DEFAULT_APP_REPOS.map((url) => ({ url }));
+  }
+
+  try {
+    const rawEnabled = localStorage.getItem(APPS_ENABLED_KEY);
+    const arr = rawEnabled ? JSON.parse(rawEnabled) : [];
+    appEnabledIds = new Set(Array.isArray(arr) ? arr.map(String) : []);
+  } catch {
+    appEnabledIds = new Set();
+  }
+}
+
+function saveAppPrefs() {
+  try {
+    localStorage.setItem(APPS_REPOS_KEY, JSON.stringify(appRepoCatalog));
+    localStorage.setItem(APPS_ENABLED_KEY, JSON.stringify(Array.from(appEnabledIds)));
+  } catch {}
+}
+
+function enabledAppManifests() {
+  return appRepoCatalog
+    .filter((app) => !app.unresolved)
+    .filter((app) => appEnabledIds.has(String(app.id || `${app.owner}/${app.repo}`)));
+}
+
+function publishEnabledApps() {
+  const enabled = enabledAppManifests().map((app) => ({
+    id: String(app.id || ''),
+    label: String(app.label || ''),
+    owner: String(app.owner || ''),
+    repo: String(app.repo || ''),
+    ref: String(app.ref || ''),
+    url: String(app.url || ''),
+    entry: String(app.entry || 'index.html'),
+    capabilities: Array.isArray(app.capabilities) ? app.capabilities.map(String) : [],
+    version: String(app.version || ''),
+    description: String(app.description || ''),
+    manifestUrl: String(app.manifestUrl || ''),
+    launchUrl: String(app.launchUrl || ''),
+  }));
+  window.__constituteEnabledApps = enabled;
+  window.dispatchEvent(new CustomEvent('constitute.apps.updated', { detail: { enabled } }));
+  renderHomeApps();
+}
+
+function normalizeRole(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function repoKey(owner, repo) {
+  return `${String(owner || '').trim().toLowerCase()}/${String(repo || '').trim().toLowerCase()}`;
+}
+
+function findAppIndexByRepo(owner, repo) {
+  const o = String(owner || '').trim().toLowerCase();
+  const r = String(repo || '').trim().toLowerCase();
+  return appRepoCatalog.findIndex((entry) =>
+    String(entry?.owner || '').trim().toLowerCase() === o &&
+    String(entry?.repo || '').trim().toLowerCase() === r
+  );
+}
+
+function findAppIndexByManifestUrl(url) {
+  const target = String(url || '').trim();
+  if (!target) return -1;
+  return appRepoCatalog.findIndex((entry) => String(entry?.manifestUrl || '').trim() === target);
+}
+
+function parseServiceRepoHint(value, repoRef = 'main') {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+
+  if (/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(raw)) {
+    const [owner, repo] = raw.split('/');
+    const ref = String(repoRef || 'main').trim() || 'main';
+    return {
+      owner,
+      repo,
+      ref,
+      url: `https://github.com/${owner}/${repo}/tree/${ref}`,
+    };
+  }
+
+  const parsed = parseGitHubRepoInput(raw);
+  if (!parsed) return null;
+  if (repoRef && parsed.ref === 'main') {
+    parsed.ref = String(repoRef).trim() || parsed.ref;
+    parsed.url = `https://github.com/${parsed.owner}/${parsed.repo}/tree/${parsed.ref}`;
+  }
+  return parsed;
+}
+
+async function ensureAppRepoEnabledByUrl(url, opts = {}) {
+  const parsed = parseGitHubRepoInput(url);
+  if (!parsed) return false;
+
+  const existingIdx = findAppIndexByRepo(parsed.owner, parsed.repo);
+  const manifestUrl = String(opts?.manifestUrl || '').trim();
+
+  if (existingIdx >= 0) {
+    const existing = appRepoCatalog[existingIdx];
+    const existingId = String(existing?.id || `${existing?.owner}/${existing?.repo}`);
+    if (existing?.unresolved) {
+      try {
+        const manifest = await fetchAppManifest(parsed, { manifestUrl });
+        appRepoCatalog[existingIdx] = manifest;
+        appEnabledIds.delete(existingId);
+        appEnabledIds.add(String(manifest.id || `${manifest.owner}/${manifest.repo}`));
+        return true;
+      } catch {
+        return false;
+      }
+    }
+    let changed = false;
+    if (manifestUrl && String(existing?.manifestUrl || '').trim() !== manifestUrl) {
+      existing.manifestUrl = manifestUrl;
+      changed = true;
+    }
+    if (!appEnabledIds.has(existingId)) {
+      appEnabledIds.add(existingId);
+      changed = true;
+    }
+    return changed;
+  }
+
+  if (manifestUrl) {
+    const byManifestIdx = findAppIndexByManifestUrl(manifestUrl);
+    if (byManifestIdx >= 0) {
+      const existing = appRepoCatalog[byManifestIdx];
+      const existingId = String(existing?.id || `${existing?.owner}/${existing?.repo}`);
+      if (!appEnabledIds.has(existingId)) {
+        appEnabledIds.add(existingId);
+        return true;
+      }
+      return false;
+    }
+  }
+
+  try {
+    const manifest = await fetchAppManifest(parsed, { manifestUrl });
+    appRepoCatalog.push(manifest);
+    appEnabledIds.add(String(manifest.id || `${manifest.owner}/${manifest.repo}`));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function serviceModuleHints(rec) {
+  const uiRepo = String(rec?.uiRepo || rec?.ui_repo || '').trim();
+  const uiRef = String(rec?.uiRef || rec?.ui_ref || rec?.['ref'] || '').trim() || 'main';
+  const uiManifestUrl = String(rec?.uiManifestUrl || rec?.ui_manifest_url || '').trim();
+
+  if (!uiRepo && !uiManifestUrl) return null;
+
+  const parsedRepo = parseServiceRepoHint(uiRepo, uiRef);
+  if (!parsedRepo) return null;
+
+  const sessionWsUrl = String(rec?.sessionWsUrl || rec?.session_ws_url || rec?.publicWsUrl || '').trim();
+  const allowUnsignedHelloMvp = Boolean(
+    rec?.allowUnsignedHelloMvp || rec?.allow_unsigned_hello_mvp || false
+  );
+
+  return {
+    owner: parsedRepo.owner,
+    repo: parsedRepo.repo,
+    repoUrl: parsedRepo.url,
+    manifestUrl: uiManifestUrl,
+    sessionWsUrl,
+    allowUnsignedHelloMvp,
+  };
+}
+
+async function autoEnableAppsForIdentityDeviceRoles(identityDevices, swarmDevices) {
+  const identityPks = new Set(
+    (Array.isArray(identityDevices) ? identityDevices : [])
+      .map((d) => String(d?.pk || d?.devicePk || '').trim())
+      .filter(Boolean)
+  );
+  if (identityPks.size === 0) return;
+
+  const roles = new Set();
+  const services = new Set();
+  const directHints = [];
+  for (const rec of (Array.isArray(swarmDevices) ? swarmDevices : [])) {
+    const pk = String(rec?.devicePk || rec?.pk || '').trim();
+    if (!identityPks.has(pk)) continue;
+    const role = normalizeRole(rec?.role || rec?.nodeType || rec?.type || '');
+    if (role) roles.add(role);
+    const service = normalizeRole(rec?.service || '');
+    if (service) services.add(service);
+
+    const hint = serviceModuleHints(rec);
+    if (hint) directHints.push(hint);
+  }
+
+  const repoTargets = [];
+  const launchHints = new Map();
+  if (directHints.length > 0) {
+    for (const hint of directHints) {
+      repoTargets.push(hint);
+      const key = repoKey(hint.owner, hint.repo);
+      if (key !== '/') {
+        const launchHint = {};
+        if (hint.sessionWsUrl) launchHint.ws = hint.sessionWsUrl;
+        if (hint.allowUnsignedHelloMvp) launchHint.insecure = true;
+        if (Object.keys(launchHint).length > 0) {
+          launchHints.set(key, launchHint);
+        }
+      }
+    }
+  } else {
+    const fallbackRepoUrls = new Set();
+    for (const role of roles) {
+      const mapped = ROLE_APP_REPO_MAP[role] || [];
+      for (const u of mapped) fallbackRepoUrls.add(u);
+    }
+    for (const service of services) {
+      const mapped = SERVICE_APP_REPO_MAP[service] || [];
+      for (const u of mapped) fallbackRepoUrls.add(u);
+    }
+    for (const repoUrl of fallbackRepoUrls) {
+      repoTargets.push({ repoUrl, manifestUrl: '' });
+    }
+  }
+
+  if (repoTargets.length === 0) return;
+
+  if (launchHints.size > 0) {
+    appLaunchHints = launchHints;
+  }
+
+  const dedupe = new Set();
+  let changed = false;
+  for (const target of repoTargets) {
+    const key = `${target.repoUrl}@@${target.manifestUrl || ''}`;
+    if (dedupe.has(key)) continue;
+    dedupe.add(key);
+    const didChange = await ensureAppRepoEnabledByUrl(target.repoUrl, {
+      manifestUrl: target.manifestUrl,
+    });
+    changed = changed || didChange;
+  }
+
+  if (changed) {
+    saveAppPrefs();
+    publishEnabledApps();
+    renderAppCatalog();
+    renderHomeApps();
+    setAppStatus('Auto-enabled app repos from detected service records.');
+  }
+}
+function renderAppCatalog() {
+  clear(appCapabilityList);
+  if (!appCapabilityList) return;
+
+  if (!Array.isArray(appRepoCatalog) || appRepoCatalog.length === 0) {
+    const d = document.createElement('div');
+    d.className = 'small muted';
+    d.textContent = 'No app repos configured.';
+    appCapabilityList.appendChild(d);
+    return;
+  }
+
+  for (const app of appRepoCatalog) {
+    const id = String(app.id || `${app.owner}/${app.repo}`);
+    const row = document.createElement('div');
+    row.className = 'item appItem';
+
+    const label = document.createElement('label');
+    label.className = 'appItemLabel';
+
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = appEnabledIds.has(id);
+    cb.disabled = !!app.unresolved;
+    cb.onchange = () => {
+      if (cb.checked) appEnabledIds.add(id);
+      else appEnabledIds.delete(id);
+      saveAppPrefs();
+      publishEnabledApps();
+      setAppStatus(`${app.label} ${cb.checked ? 'enabled' : 'disabled'}.`);
+    };
+
+    const text = document.createElement('div');
+    const title = document.createElement('strong');
+    title.textContent = app.unresolved ? `${app.label} (manifest unavailable)` : app.label;
+    const meta = document.createElement('div');
+    meta.className = 'small muted';
+    const parts = [`${app.owner}/${app.repo}@${app.ref}`];
+    if (app.description) parts.push(app.description);
+    meta.textContent = parts.join(' - ');
+    text.appendChild(title);
+    text.appendChild(meta);
+
+    label.appendChild(cb);
+    label.appendChild(text);
+
+    const btnRemove = document.createElement('button');
+    btnRemove.type = 'button';
+    btnRemove.textContent = 'Remove';
+    btnRemove.onclick = () => {
+      appRepoCatalog = appRepoCatalog.filter((x) => String(x.id || `${x.owner}/${x.repo}`) !== id);
+      appEnabledIds.delete(id);
+      saveAppPrefs();
+      publishEnabledApps();
+      renderAppCatalog();
+      setAppStatus(`Removed ${app.label}.`);
+    };
+
+    row.appendChild(label);
+    row.appendChild(btnRemove);
+    appCapabilityList.appendChild(row);
+  }
+}
+
+function appLaunchUrl(app) {
+  const explicit = String(app?.launchUrl || '').trim();
+  if (explicit && /^https:\/\//.test(explicit)) return explicit;
+
+  const owner = String(app?.owner || '').trim();
+  const repo = String(app?.repo || '').trim();
+  const ref = String(app?.ref || 'main').trim() || 'main';
+  const entry = String(app?.entry || 'index.html').replace(/^\/+/, '');
+  if (!owner || !repo || !entry) return '';
+
+  return `https://cdn.jsdelivr.net/gh/${owner}/${repo}@${ref}/${entry}`;
+}
+
+function appLaunchContextQuery(app) {
+  const q = new URLSearchParams();
+  const identityId = String(lastIdentity?.id || '').trim();
+  const devicePk = String(lastDeviceState?.pk || '').trim();
+  if (identityId) q.set('identityId', identityId);
+  if (devicePk) q.set('devicePk', devicePk);
+
+  const key = repoKey(app?.owner, app?.repo);
+  const hint = appLaunchHints.get(key);
+  if (hint?.ws) q.set('ws', String(hint.ws));
+  if (hint?.insecure) q.set('insecure', '1');
+  q.set('autoconnect', '1');
+
+  return q.toString();
+}
+
+function renderHomeApps() {
+  clear(homeAppsList);
+  if (!homeAppsList) return;
+
+  const apps = enabledAppManifests();
+  if (!apps.length) {
+    const d = document.createElement('div');
+    d.className = 'small muted';
+    d.textContent = 'No apps enabled.';
+    homeAppsList.appendChild(d);
+    return;
+  }
+
+  for (const app of apps) {
+    const row = document.createElement('div');
+    row.className = 'item appItem';
+
+    const left = document.createElement('div');
+    left.className = 'appItemLabel';
+
+    const text = document.createElement('div');
+    const title = document.createElement('strong');
+    title.textContent = app.label || app.id || 'App';
+
+    const meta = document.createElement('div');
+    meta.className = 'small muted';
+    const parts = [`${app.owner}/${app.repo}@${app.ref}`];
+    if (app.description) parts.push(app.description);
+    meta.textContent = parts.join(' - ');
+
+    text.appendChild(title);
+    text.appendChild(meta);
+    left.appendChild(text);
+
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.textContent = 'Launch';
+    btn.onclick = () => {
+      launchAppWindow(app);
+    };
+
+    row.appendChild(left);
+    row.appendChild(btn);
+    homeAppsList.appendChild(row);
+  }
+}
+
+async function addAppRepoFromInput() {
+  const parsed = parseGitHubRepoInput(appRepoInput?.value);
+  if (!parsed) {
+    setAppStatus('Paste a valid GitHub repo URL (or owner/repo).', true);
+    return;
+  }
+
+  setAppStatus('Fetching app manifest…');
+  try {
+    const manifest = await fetchAppManifest(parsed);
+    const id = String(manifest.id || `${manifest.owner}/${manifest.repo}`);
+    const existingIdx = appRepoCatalog.findIndex((x) => String(x.id || `${x.owner}/${x.repo}`) === id);
+    if (existingIdx >= 0) appRepoCatalog[existingIdx] = manifest;
+    else appRepoCatalog.push(manifest);
+    appEnabledIds.add(id);
+    saveAppPrefs();
+    publishEnabledApps();
+    renderAppCatalog();
+    if (appRepoInput) appRepoInput.value = '';
+    setAppStatus(`Added ${manifest.label}.`);
+  } catch (err) {
+    setAppStatus(`Failed to fetch manifest: ${String(err?.message || err)}`, true);
+  }
+}
+
+async function hydrateAppCatalog() {
+  loadAppPrefs();
+  const hydrated = [];
+  for (const entry of appRepoCatalog) {
+    const parsed = entry.owner && entry.repo
+      ? { owner: entry.owner, repo: entry.repo, ref: entry.ref || 'main', url: entry.url || `https://github.com/${entry.owner}/${entry.repo}` }
+      : parseGitHubRepoInput(entry.url || '');
+    if (!parsed) continue;
+    try {
+      const manifest = await fetchAppManifest(parsed);
+      hydrated.push(manifest);
+      if (!appEnabledIds.has(String(manifest.id))) appEnabledIds.add(String(manifest.id));
+    } catch {
+      const unresolvedId = String(entry.id || `${parsed.owner}/${parsed.repo}`);
+      hydrated.push({
+        id: unresolvedId,
+        label: String(entry.label || parsed.repo),
+        entry: String(entry.entry || 'index.html'),
+        capabilities: Array.isArray(entry.capabilities) ? entry.capabilities.map(String) : [],
+        description: String(entry.description || 'Manifest unavailable'),
+        version: String(entry.version || ''),
+        manifestUrl: String(entry.manifestUrl || ''),
+        launchUrl: String(entry.launchUrl || ''),
+        owner: parsed.owner,
+        repo: parsed.repo,
+        ref: parsed.ref || 'main',
+        url: parsed.url,
+        unresolved: true,
+      });
+      appEnabledIds.delete(unresolvedId);
+    }
+  }
+  appRepoCatalog = hydrated;
+  saveAppPrefs();
+  publishEnabledApps();
+  renderAppCatalog();
+  const okCount = hydrated.filter((x) => !x.unresolved).length;
+  const badCount = hydrated.length - okCount;
+  if (hydrated.length === 0) {
+    setAppStatus('No app manifests loaded.', true);
+  } else if (badCount > 0) {
+    setAppStatus(`${okCount} loaded, ${badCount} unavailable.`, true);
+  } else {
+    setAppStatus(`${okCount} app manifest(s) loaded.`);
+  }
 }
 
 function clear(el) {
@@ -288,9 +1896,12 @@ function renderPairRequests(reqs, identityDevices) {
     top.className = 'itemTop';
 
     const left = document.createElement('div');
+    const codeMeta = r.code
+      ? `code ${r.code}`
+      : (r.codeHash ? `code# ${String(r.codeHash).slice(0, 12)}…` : 'code n/a');
     left.innerHTML = `
       <div class="itemTitle">${escapeHtml(r.identityLabel || '(no identity label)')}</div>
-      <div class="itemMeta">Device: ${escapeHtml(r.deviceLabel || '(no label)')} • pk ${escapeHtml((r.devicePk || '').slice(0, 12))}… • code ${escapeHtml(r.code || '')}</div>
+      <div class="itemMeta">Device: ${escapeHtml(r.deviceLabel || '(no label)')} • pk ${escapeHtml((r.devicePk || '').slice(0, 12))}… • ${escapeHtml(codeMeta)}</div>
     `;
 
     const actions = document.createElement('div');
@@ -462,9 +2073,24 @@ function renderZones(list) {
       for (const e of zoneMembers) {
         const row = document.createElement('div');
         row.className = 'item';
+        const nostrSeen = Number(e.lastSeen || 0);
+        const swarmSeen = swarm ? swarm.getSwarmSeen(e.devicePk) : 0;
+        const sources = [
+          nostrSeen ? 'nostr' : '',
+          swarmSeen ? 'swarm' : '',
+        ].filter(Boolean).join(' + ') || 'unknown';
+        const role = String(e.role || '').trim();
+        const serviceVersion = String(e.serviceVersion || '').trim();
+        const roleLine = serviceVersion ? `${role || 'unknown'} (${serviceVersion})` : (role || 'unknown');
+        const releaseMeta = formatReleaseMeta(e.releaseChannel, e.releaseTrack, e.releaseBranch);
+        const releaseLine = releaseMeta ? `<div class="itemMeta">Release: ${escapeHtml(releaseMeta)}</div>` : '';
         row.innerHTML = `
           <div class="itemTitle">${escapeHtml(e.devicePk || '')}</div>
-          <div class="itemMeta">Last seen ${new Date(e.lastSeen || Date.now()).toLocaleString()}</div>
+          <div class="itemMeta">Source: ${escapeHtml(sources)}</div>
+          <div class="itemMeta">Role: ${escapeHtml(roleLine)}</div>
+          ${releaseLine}
+          <div class="itemMeta">Nostr seen ${nostrSeen ? new Date(nostrSeen).toLocaleString() : 'n/a'}</div>
+          <div class="itemMeta">Swarm seen ${swarmSeen ? new Date(swarmSeen).toLocaleString() : 'n/a'}</div>
         `;
         listEl.appendChild(row);
       }
@@ -506,9 +2132,24 @@ function renderPeers(list) {
   for (const e of deviceEntries) {
     const item = document.createElement('div');
     item.className = 'item';
+    const nostrSeen = Number(e.lastSeen || 0);
+    const swarmSeen = swarm ? swarm.getSwarmSeen(e.devicePk) : 0;
+    const sources = [
+      nostrSeen ? 'nostr' : '',
+      swarmSeen ? 'swarm' : '',
+    ].filter(Boolean).join(' + ') || 'unknown';
+    const role = String(e.role || '').trim();
+    const serviceVersion = String(e.serviceVersion || '').trim();
+    const roleLine = serviceVersion ? `${role || 'unknown'} (${serviceVersion})` : (role || 'unknown');
+    const releaseMeta = formatReleaseMeta(e.releaseChannel, e.releaseTrack, e.releaseBranch);
+    const releaseLine = releaseMeta ? `<div class="itemMeta">Release: ${escapeHtml(releaseMeta)}</div>` : '';
     item.innerHTML = `
       <div class="itemTitle">${escapeHtml(e.devicePk || '')}</div>
-      <div class="itemMeta">Last seen ${new Date(e.lastSeen || Date.now()).toLocaleString()}</div>
+      <div class="itemMeta">Source: ${escapeHtml(sources)}</div>
+      <div class="itemMeta">Role: ${escapeHtml(roleLine)}</div>
+      ${releaseLine}
+      <div class="itemMeta">Nostr seen ${nostrSeen ? new Date(nostrSeen).toLocaleString() : 'n/a'}</div>
+      <div class="itemMeta">Swarm seen ${swarmSeen ? new Date(swarmSeen).toLocaleString() : 'n/a'}</div>
     `;
     peersList.appendChild(item);
   }
@@ -546,6 +2187,8 @@ async function refreshAll() {
   const blocked = await client.call('blocked.list', {}, { timeoutMs: 20000 });
   const directory = await client.call('directory.list', {}, { timeoutMs: 20000 });
   const zones = await client.call('zones.list', {}, { timeoutMs: 20000 });
+  const swarmDevices = await client.call('swarm.device.list', {}, { timeoutMs: 20000 }).catch(() => []);
+  const swarmIdentities = await client.call('swarm.identity.list', {}, { timeoutMs: 20000 }).catch(() => []);
   const notifs = await client.call('notifications.list', {}, { timeoutMs: 20000 });
   const myLabel = await client.call('device.getLabel', {}, { timeoutMs: 20000 });
 
@@ -553,6 +2196,7 @@ async function refreshAll() {
   lastIdentity = ident;
   lastDirectory = directory || [];
   lastZones = zones || [];
+  lastSwarmDevices = swarmDevices || [];
 
   // If we only have a key, try to resolve the human name via peers.
   for (const z of (lastZones || [])) {
@@ -583,9 +2227,25 @@ async function refreshAll() {
   renderBlockedList(blocked || []);
   renderZones(lastZones);
   renderPeers(lastDirectory);
+  renderApplianceList(ident?.devices || [], lastSwarmDevices);
   renderPairRequests(reqs || [], ident?.devices || []);
   renderNotifications(notifs || []);
   ensureOnboardingState(ident);
+  await autoEnableAppsForIdentityDeviceRoles(ident?.devices || [], swarmDevices || []).catch(() => {});
+  if (swarm && ident?.linked) {
+    swarm.setLocalPk(st.pk || '');
+    swarm.setPeers(swarmDevices || []);
+    swarm.cacheIdentityRecords(swarmIdentities || []);
+    swarm.cacheDeviceRecords(swarmDevices || []);
+    if (!swarmBootRequested) {
+      swarmBootRequested = true;
+      client.call('swarm.record.request', { want: ['identity', 'device'] }, { timeoutMs: 20000 })
+        .catch(() => client.call('swarm.discovery.request', {}, { timeoutMs: 20000 }))
+        .catch(() => {});
+    }
+  } else {
+    setSwarmState('disabled');
+  }
 
   return { st, ident };
 }
@@ -721,6 +2381,72 @@ function wireUi() {
   // settings tabs
   for (const b of tabButtons) b.addEventListener('click', () => setSettingsTab(b.dataset.tab));
 
+  if (btnClaimPairCode) {
+    btnClaimPairCode.onclick = async () => {
+      const code = String(pairCodeInput?.value || '').trim();
+      if (!code) {
+        setPairCodeStatus('Enter a code from the new device.', true);
+        return;
+      }
+      try {
+        await client.call('pairing.claimCode', { code }, { timeoutMs: 20000 });
+        setPairCodeStatus('Claim sent. Wait for the pairing request, then approve it below.');
+      } catch (e) {
+        setPairCodeStatus(`Claim failed: ${String(e?.message || e)}`, true);
+      }
+    };
+  }
+
+  if (btnAddAppRepo) {
+    btnAddAppRepo.onclick = () => addAppRepoFromInput().catch((e) => console.error(e));
+  }
+  if (appRepoInput) {
+    appRepoInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        addAppRepoFromInput().catch((err) => console.error(err));
+      }
+    });
+  }
+
+  if (gatewayInstallPlatform) {
+    gatewayInstallPlatform.value = preferredGatewayInstallTarget();
+    gatewayInstallPlatform.addEventListener('change', updateGatewayInstallHint);
+  }
+  if (gatewayInstallIncludeNvr) {
+    gatewayInstallIncludeNvr.addEventListener('change', updateGatewayInstallHint);
+  }
+  updateGatewayInstallHint();
+
+  if (btnGatewayInstallCopy) {
+    btnGatewayInstallCopy.onclick = async () => {
+      try {
+        const prepared = await prepareGatewayInstallContext();
+        await navigator.clipboard.writeText(prepared.command);
+        const suffix = prepared.note ? ` ${prepared.note}` : '';
+        setGatewayInstallStatus(`Copied ${prepared.targetInfo.label} command.${suffix}`);
+      } catch (err) {
+        setGatewayInstallStatus(`Could not prepare install command: ${String(err?.message || err)}`, true);
+      }
+    };
+  }
+
+  if (btnGatewayInstallOpen) {
+    btnGatewayInstallOpen.onclick = async () => {
+      try {
+        const installer = currentGatewayInstaller();
+        if (!installer?.scriptUrl) {
+          setGatewayInstallStatus('No installer script URL configured for this target/operator combination.', true);
+          return;
+        }
+        await downloadGatewayInstallerScript(installer);
+        setGatewayInstallStatus(`Downloaded ${installer.downloadName || 'installer script'} for ${operatorPlatformLabel()} operator use.`);
+      } catch (err) {
+        setGatewayInstallStatus(`Script download failed: ${String(err?.message || err)}`, true);
+      }
+    };
+  }
+
   btnSaveProfile.onclick = async () => {
     try {
       const label = profileName.value.trim();
@@ -774,6 +2500,7 @@ function wireUi() {
       t.classList.add('tab-active');
       mode = t.dataset.mode === 'existing' ? 'existing' : 'new';
       existingInfo.classList.toggle('hidden', true);
+      if (obPairCodeWrap) obPairCodeWrap.classList.toggle('hidden', mode !== 'existing');
     };
   });
 
@@ -830,10 +2557,18 @@ function wireUi() {
       existingInfo.textContent = 'Requesting pairing…';
 
       const myDevicePk = lastDeviceState?.pk || null;
+      const code = String(obPairCode?.value || '').trim();
 
-      const res = await client.call('identity.requestPair', { identityLabel: ilabel, deviceLabel: dlabel }, { timeoutMs: 20000 });
+      const res = await client.call('identity.requestPair', {
+        identityLabel: ilabel,
+        deviceLabel: dlabel,
+        code: code || undefined,
+      }, { timeoutMs: 20000 });
 
-      existingInfo.textContent = `Waiting for approval… Share code ${res?.code || ''} with the owner.`;
+      const usedCode = String(res?.code || code || '').trim();
+      existingInfo.textContent = usedCode
+        ? `Pairing code: ${usedCode}. Ask the owner to enter this in Settings > Pairing > Add Device, then approve.`
+        : 'Waiting for owner claim and approval…';
       const ok = await waitForPairAcceptance({ identityLabel: ilabel, myDevicePk, timeoutMs: 90000 });
 
         if (ok) {
@@ -861,16 +2596,21 @@ function startSharedRelayPipe(client, relayUrl) {
     const msg = ev.data || {};
     if (msg.type === 'relay.status') {
       setRelayState(msg.state, msg.reason || '');
-      client.call('relay.status', {
-        state: msg.state,
-        url: msg.url || '',
-        code: msg.code ?? null,
-        reason: msg.reason ?? ''
-      }, { timeoutMs: 20000 }).catch(() => {});
+      if (clientReady) {
+        client.call('relay.status', {
+          state: msg.state,
+          url: msg.url || '',
+          code: msg.code ?? null,
+          reason: msg.reason ?? ''
+        }, { timeoutMs: 20000 }).catch((e) => console.error('relay.status rpc failed', e));
+      }
       return;
     }
     if (msg.type === 'relay.rx' && typeof msg.data === 'string') {
-      client.call('relay.rx', { data: msg.data, url: msg.url || '' }, { timeoutMs: 20000 }).catch(() => {});
+      if (clientReady) {
+        client.call('relay.rx', { data: msg.data, url: msg.url || '' }, { timeoutMs: 20000 })
+          .catch((e) => console.error('relay.rx rpc failed', e));
+      }
       return;
     }
   };
@@ -887,6 +2627,10 @@ function startSharedRelayPipe(client, relayUrl) {
 }
 
 (async function main() {
+  // Default to onboarding until SW state is confirmed.
+  showActivity('onboarding');
+  setOnboardStep(1);
+
   client = new IdentityClient({
     onEvent: (evt) => {
       if (evt?.type === 'log') {
@@ -904,25 +2648,66 @@ function startSharedRelayPipe(client, relayUrl) {
         }
         console.log('[sw]', msg);
       }
+      if (evt?.type === 'swarm_signal') {
+        if (swarm) swarm.onSignal(evt).catch(() => {});
+      }
+      if (evt?.type === 'gateway_service_install_status') {
+        handleGatewayServiceInstallStatusEvent(evt);
+      }
       if (evt?.type === 'notify') refreshAll().catch(() => {});
     }
   });
 
-  startSharedRelayPipe(client, 'wss://relay.snort.social');
   await client.ready().catch((e) => console.error(e));
+  clientReady = client.isServiceWorkerAvailable();
+  if (clientReady) {
+    startSharedRelayPipe(client, 'wss://relay.snort.social');
+  } else {
+    setDaemonState('offline', 'sw unavailable');
+  }
+
+  swarm = new SwarmTransport({ client, onState: (s) => setSwarmState(s) });
+  swarm.loadSuccess();
+  swarm.loadIdentityCache();
+  swarm.loadDeviceCache();
+  swarm.loadLastKnown();
+  const fallbackPeers = swarm.getFallbackPeers();
+  if (fallbackPeers && fallbackPeers.length > 0) {
+    swarm.setPeers(fallbackPeers.map(pk => ({ devicePk: pk })));
+  }
 
   wireUi();
+  await hydrateAppCatalog();
   _pushConnLog('init');
 
   // Default radio selection: webauthn if supported
   setSecurityChoice('webauthn');
 
-  await refreshAll();
-  const linked = await ensureOnboardingFlow();
-  if (linked) {
-    setSettingsTab('profile');
-    await postIdentityLinkedFlow();
-  } else {
-    await applyUrlParams();
+  try {
+    await refreshAll();
+    const linked = await ensureOnboardingFlow();
+    if (linked) {
+      setSettingsTab('profile');
+      await postIdentityLinkedFlow();
+    } else {
+      await applyUrlParams();
+    }
+  } catch (e) {
+    console.error('refreshAll failed', e);
+    setDaemonState('offline', 'rpc failed');
+    showActivity('onboarding');
+    setOnboardStep(1);
   }
+
+  // Health check: if SW drops, fall back to onboarding.
+  setInterval(async () => {
+    try {
+      await client.call('device.getState', {}, { timeoutMs: 5000 });
+      setDaemonState('online', 'rpc ok');
+    } catch {
+      setDaemonState('offline', 'rpc fail');
+      showActivity('onboarding');
+      setOnboardStep(1);
+    }
+  }, 10000);
 })();

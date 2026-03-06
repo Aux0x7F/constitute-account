@@ -88,11 +88,14 @@ Service Worker (Identity Daemon)
 - Window only transports frames, never secrets
 
 ### Planned
-- Swarm / Peer-to-Peer Transport
-  - WebRTC mesh or DHT
-  - Relay becomes optional bootstrap
+- Gateway Backbone (native)
+  - QUIC/UDP mesh
+  - Relay/bridge mode for browsers
+  - Federated/volunteer relays (no single owner)
+- Browser Swarm Transport
+  - WebRTC + TURN fallback
+  - Relay used only for bootstrap/signaling
   - Encrypted room state synchronization
-  - Device discovery via distributed lookup
 
 ## Discovery + Directory
 
@@ -162,9 +165,9 @@ Used for:
 - Clean up Peers UX
 
 ### Mid Term
-- Swarm/DHT bootstrap integration (primary transport)
-- Peer-to-peer synchronization
-- Replace relay dependency for most state
+- P0: constitute-gateway repo (native backbone)
+- P2: browser swarm transport (TURN-backed)
+- P3: codebase refactor + module boundaries
 - Shared encrypted data layers
 - Messaging maturation + double-ratchet encryption
 
@@ -183,3 +186,19 @@ Used for:
 - Progressive decentralization
 - Minimal implicit trust
 - Deterministic lifecycle resolution
+
+## Gateway Convergence (Active)
+Web convergence is currently targeting `constitute-gateway/docs/PROTOCOL.md` as contract source.
+
+Current alignment slice:
+- canonical app-channel request envelope support (`swarm_record_request` + legacy alias compatibility)
+- DHT request plumbing (`swarm_dht_get`, `swarm_dht_put`) and local DHT record handling
+- relay ingest hardening (signature verification + timestamp/TTL window checks before mutation)
+- discovery/presence role metadata parity (`role`, `serviceVersion`)
+- service-advertised app module hints (`uiRepo`, `uiRef`, optional `uiManifestUrl`) consumed before static role maps
+
+Exit criteria for this slice:
+- web emits and consumes gateway canonical envelopes without regressions
+- invalid/expired relay envelopes are ignored consistently
+- docs reflect current parity state and known remaining gaps
+

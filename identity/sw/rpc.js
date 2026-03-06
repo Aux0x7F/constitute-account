@@ -14,12 +14,103 @@ import { handleRelayFrame } from './relayIn.js';
 import { blockedList, blockedRemove } from './blocklist.js';
 import { directoryList } from './directory.js';
 import { listZones, addZone, joinZone, publishZonePresence, publishZoneProbe, publishZoneList, publishZoneListRequest, publishZoneMeta, publishZoneMetaRequest, addSelfToZoneList, getZoneList, getZoneName, getPendingZoneKey, setPendingZoneKey, clearPendingZoneKey } from './zone.js';
+import {
+  makeIdentityRecord,
+  makeDeviceRecord,
+  makeDhtRecord,
+  putIdentityRecord,
+  putDeviceRecord,
+  putDhtRecord,
+  resolveIdentityById,
+  resolveDeviceByPk,
+  resolveIdentityForDevice,
+  getDhtRecord,
+  listIdentityRecords,
+  listDeviceRecords,
+  listDhtRecords,
+} from './swarm/index.js';
 
 let presenceTimer = null;
+let swarmPublishTimer = null;
 
 function makePairCode() {
   return (Math.floor(Math.random() * 900000) + 100000).toString();
 }
+
+function makeSwarmRequestId(prefix = 'req') {
+  return `${prefix}-${b64url(randomBytes(8))}`;
+}
+
+function pairingTags(identityLabel, zones = [], toPk = '') {
+  const tags = [['i', String(identityLabel || '').trim()]];
+  for (const z of (Array.isArray(zones) ? zones : [])) {
+    const key = String(z?.key || '').trim();
+    if (key) tags.push(['z', key]);
+  }
+  const peerPk = String(toPk || '').trim();
+  if (peerPk) tags.push(['p', peerPk]);
+  return tags;
+}
+
+const PAIR_OFFER_KEY = 'pairOffer';
+const PAIR_CLAIM_ACTIVE_KEY = 'pairClaimActive';
+const PAIR_OFFER_TTL_MS = 10 * 60 * 1000;
+const PAIR_CLAIM_TTL_MS = 2 * 60 * 1000;
+const PAIR_CLAIM_MAX_TTL_MS = 10 * 60 * 1000;
+
+async function pairCodeHash(identityLabel, code) {
+  return await sha256B64Url(`${String(identityLabel || '').trim()}|${String(code || '').trim()}`);
+}
+
+
+function clampPairClaimTtl(ttlMs) {
+  const raw = Number(ttlMs || PAIR_CLAIM_TTL_MS);
+  if (!Number.isFinite(raw)) return PAIR_CLAIM_TTL_MS;
+  return Math.max(30 * 1000, Math.min(raw, PAIR_CLAIM_MAX_TTL_MS));
+}
+
+async function activatePairClaim(sw, ident, code, options = {}) {
+  const autoApprove = !!options.autoApprove;
+  const publishClaim = options.publishClaim !== false;
+  const ttlMs = clampPairClaimTtl(options.ttlMs);
+  const now = Date.now();
+
+  const dev = await ensureDevice();
+  const codeHash = await pairCodeHash(ident.label, code);
+  const claimId = makeSwarmRequestId('claim');
+
+  await kvSet(PAIR_CLAIM_ACTIVE_KEY, {
+    identityLabel: ident.label,
+    codeHash,
+    claimId,
+    autoApprove,
+    createdAt: now,
+    expiresAt: now + ttlMs,
+  });
+
+  if (publishClaim) {
+    const zones = await listZones(ident || {}).catch(() => []);
+    await publishAppEvent(sw, {
+      type: 'pair_claim',
+      identity: ident.label,
+      codeHash,
+      claimId,
+      fromPk: dev.nostr.pk,
+      ts: now,
+      ttl: 120,
+    }, pairingTags(ident.label, zones));
+  }
+
+  return {
+    code,
+    codeHash,
+    claimId,
+    identityLabel: ident.label,
+    autoApprove,
+    expiresAt: now + ttlMs,
+  };
+}
+
 
 export async function handleRpc(sw, method, params, getRelayState, setRelayState) {
   const LIST_MAX_AGE_MS = 3 * 60 * 1000;
@@ -38,6 +129,22 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
         }
       }
     }, 90 * 1000);
+  }
+
+  async function startSwarmPublishLoop() {
+    if (swarmPublishTimer) return;
+    const SWARM_PUB_MS = 60 * 1000;
+    const publish = async () => {
+      const ident = await getIdentity();
+      if (!ident?.linked) return;
+      const irec = await makeIdentityRecord().catch(() => null);
+      const drec = await makeDeviceRecord().catch(() => null);
+      if (irec) await publishAppEvent(sw, { type: 'swarm_identity_record', record: irec }).catch(() => {});
+      if (drec) await publishAppEvent(sw, { type: 'swarm_device_record', record: drec }).catch(() => {});
+      log(sw, 'swarm discovery published');
+    };
+    await publish();
+    swarmPublishTimer = setInterval(publish, SWARM_PUB_MS);
   }
   // --- device state ---
   if (method === 'device.getState') {
@@ -219,6 +326,221 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
     return await directoryList();
   }
 
+  // --- swarm discovery (local cache, signed records) ---
+  if (method === 'swarm.identity.record') {
+    return await makeIdentityRecord();
+  }
+  if (method === 'swarm.device.record') {
+    return await makeDeviceRecord();
+  }
+  if (method === 'swarm.identity.put') {
+    return await putIdentityRecord(params?.record || null);
+  }
+  if (method === 'swarm.device.put') {
+    return await putDeviceRecord(params?.record || null);
+  }
+  if (method === 'swarm.identity.get') {
+    const id = String(params?.identityId || '').trim();
+    if (!id) throw new Error('missing identityId');
+    return await resolveIdentityById(id);
+  }
+  if (method === 'swarm.identity.list') {
+    return await listIdentityRecords();
+  }
+  if (method === 'swarm.device.get') {
+    const pk = String(params?.devicePk || '').trim();
+    if (!pk) throw new Error('missing devicePk');
+    return await resolveDeviceByPk(pk);
+  }
+  if (method === 'swarm.device.list') {
+    return await listDeviceRecords();
+  }
+  if (method === 'swarm.identity.forDevice') {
+    const pk = String(params?.devicePk || '').trim();
+    if (!pk) throw new Error('missing devicePk');
+    return await resolveIdentityForDevice(pk);
+  }
+  if (method === 'swarm.discovery.publish') {
+    const ident = await getIdentity();
+    if (!ident?.linked) throw new Error('no linked identity');
+    const irec = await makeIdentityRecord().catch(() => null);
+    const drec = await makeDeviceRecord().catch(() => null);
+    if (irec) await publishAppEvent(sw, { type: 'swarm_identity_record', record: irec }).catch(() => {});
+    if (drec) await publishAppEvent(sw, { type: 'swarm_device_record', record: drec }).catch(() => {});
+    return { ok: true };
+  }
+  if (method === 'swarm.record.request' || method === 'swarm.discovery.request') {
+    const requestId = String(params?.requestId || '').trim() || makeSwarmRequestId('record');
+    const want = Array.isArray(params?.want) && params.want.length
+      ? params.want.map(String)
+      : ['identity', 'device'];
+    const payload = {
+      type: 'swarm_record_request',
+      requestId,
+      want,
+      identityId: String(params?.identityId || '').trim(),
+      devicePk: String(params?.devicePk || '').trim(),
+      zone: String(params?.zone || '').trim(),
+      timeoutMs: Number(params?.timeoutMs || 0) || undefined,
+      ts: Date.now(),
+      ttl: 120,
+    };
+    await publishAppEvent(sw, payload).catch(() => {});
+
+    // Legacy compatibility while both contracts are in flight.
+    if (method === 'swarm.discovery.request') {
+      await publishAppEvent(sw, { ...payload, type: 'swarm_discovery_request' }).catch(() => {});
+    }
+    return { ok: true, requestId };
+  }
+  if (method === 'swarm.dht.put') {
+    const scope = String(params?.scope || params?.dhtScope || '').trim();
+    const key = String(params?.key || params?.dhtKey || '').trim();
+    if (!scope || !key) throw new Error('missing scope or key');
+    if (!Object.prototype.hasOwnProperty.call(params || {}, 'value')) throw new Error('missing value');
+    const requestId = String(params?.requestId || '').trim() || makeSwarmRequestId('dht-put');
+    await publishAppEvent(sw, {
+      type: 'swarm_dht_put',
+      requestId,
+      scope,
+      key,
+      value: params?.value,
+      zone: String(params?.zone || '').trim(),
+      updatedAt: Number(params?.updatedAt || Date.now()),
+      expiresAt: Number(params?.expiresAt || (Date.now() + 24 * 60 * 60 * 1000)),
+      ts: Date.now(),
+      ttl: 120,
+    }).catch(() => {});
+    return { ok: true, requestId };
+  }
+  if (method === 'swarm.dht.get') {
+    const scope = String(params?.scope || params?.dhtScope || '').trim();
+    const key = String(params?.key || params?.dhtKey || '').trim();
+    if (!scope || !key) throw new Error('missing scope or key');
+    const requestId = String(params?.requestId || '').trim() || makeSwarmRequestId('dht-get');
+    await publishAppEvent(sw, {
+      type: 'swarm_dht_get',
+      requestId,
+      scope,
+      key,
+      zone: String(params?.zone || '').trim(),
+      timeoutMs: Number(params?.timeoutMs || 0) || undefined,
+      ts: Date.now(),
+      ttl: 120,
+    }).catch(() => {});
+    return { ok: true, requestId };
+  }
+  if (method === 'swarm.dht.record') {
+    const scope = String(params?.scope || params?.dhtScope || '').trim();
+    const key = String(params?.key || params?.dhtKey || '').trim();
+    if (!scope || !key) throw new Error('missing scope or key');
+    if (!Object.prototype.hasOwnProperty.call(params || {}, 'value')) throw new Error('missing value');
+    return await makeDhtRecord(scope, key, params?.value, {
+      updatedAt: Number(params?.updatedAt || Date.now()),
+      expiresAt: Number(params?.expiresAt || (Date.now() + 24 * 60 * 60 * 1000)),
+    });
+  }
+  if (method === 'swarm.dht.putLocal') {
+    return await putDhtRecord(params?.record || null);
+  }
+  if (method === 'swarm.dht.getLocal') {
+    const scope = String(params?.scope || params?.dhtScope || '').trim();
+    const key = String(params?.key || params?.dhtKey || '').trim();
+    if (!scope || !key) throw new Error('missing scope or key');
+    const ev = await getDhtRecord(scope, key);
+    if (!ev) return null;
+    return JSON.parse(ev.content || '{}');
+  }
+  if (method === 'swarm.dht.listLocal') {
+    return await listDhtRecords();
+  }
+  if (method === 'swarm.signal.send') {
+    const toPk = String(params?.toPk || '').trim();
+    const signalType = String(params?.signalType || '').trim();
+    const data = params?.data ?? null;
+    const from = await ensureDevice();
+    if (!toPk || !signalType) throw new Error('missing toPk or signalType');
+    await publishAppEvent(sw, {
+      type: 'swarm_signal',
+      to: toPk,
+      from: from.nostr.pk,
+      signalType,
+      data,
+      ts: Date.now(),
+    }, [['p', toPk]]);
+    return { ok: true };
+  }
+
+  if (method === 'gateway.service.install') {
+    const ident = await getIdentity();
+    if (!ident?.linked || !ident?.id || !ident?.label) throw new Error('no linked identity');
+
+    const targetGatewayPk = String(params?.gatewayDevicePk || params?.toDevicePk || '').trim();
+    if (!targetGatewayPk) throw new Error('missing gatewayDevicePk');
+
+    const requestId = String(params?.requestId || '').trim() || makeSwarmRequestId('gw-svc');
+    const service = String(params?.service || 'nvr').trim().toLowerCase() || 'nvr';
+    const action = String(params?.action || 'install').trim().toLowerCase() || 'install';
+    if (service !== 'nvr' || action !== 'install') throw new Error('only nvr install is supported');
+
+    const explicitZones = Array.isArray(params?.zoneKeys)
+      ? params.zoneKeys.map((z) => String(z || '').trim()).filter(Boolean)
+      : [];
+    const explicitZone = String(params?.zone || '').trim();
+
+    const zones = await listZones(ident || {}).catch(() => []);
+    const fallbackZones = zones.map((z) => String(z?.key || '').trim()).filter(Boolean);
+
+    const zoneKeys = [];
+    for (const z of [...explicitZones, explicitZone, ...fallbackZones]) {
+      if (!z || zoneKeys.includes(z)) continue;
+      zoneKeys.push(z);
+    }
+
+    const authorizedDevicePks = Array.isArray(params?.authorizedDevicePks)
+      ? params.authorizedDevicePks.map((v) => String(v || '').trim()).filter(Boolean)
+      : [];
+    const swarmPeers = Array.isArray(params?.swarmPeers)
+      ? params.swarmPeers.map((v) => String(v || '').trim()).filter(Boolean)
+      : [];
+
+    const payload = {
+      type: 'gateway_service_install_request',
+      requestId,
+      toDevicePk: targetGatewayPk,
+      service,
+      action,
+      identityId: String(ident.id || '').trim(),
+      pairIdentity: String(params?.pairIdentity || '').trim(),
+      pairCode: String(params?.pairCode || '').trim(),
+      pairCodeHash: String(params?.pairCodeHash || '').trim(),
+      zone: zoneKeys[0] || '',
+      zoneKeys,
+      authorizedDevicePks,
+      swarmPeers,
+      publicWsUrl: String(params?.publicWsUrl || '').trim(),
+      allowUnsignedHelloMvp: params?.allowUnsignedHelloMvp !== false,
+      reolinkAutoprovision: params?.reolinkAutoprovision !== false,
+      reolinkUsername: String(params?.reolinkUsername || '').trim(),
+      reolinkPassword: String(params?.reolinkPassword || '').trim(),
+      reolinkDesiredPassword: String(params?.reolinkDesiredPassword || '').trim(),
+      reolinkGeneratePassword: !!params?.reolinkGeneratePassword,
+      reolinkHintIp: String(params?.reolinkHintIp || '').trim(),
+      storageRoot: String(params?.storageRoot || '').trim(),
+      timeoutSecs: Number(params?.timeoutSecs || 0) || undefined,
+      ts: Date.now(),
+      ttl: 300,
+    };
+
+    if (!payload.pairIdentity || !payload.pairCode || !payload.pairCodeHash) {
+      throw new Error('missing pairIdentity/pairCode/pairCodeHash');
+    }
+
+    const tagZones = zoneKeys.map((key) => ({ key }));
+    await publishAppEvent(sw, payload, pairingTags(ident.label, tagZones, targetGatewayPk));
+    return { ok: true, requestId, targetGatewayPk, service, action };
+  }
+
   if (method === 'identity.create') {
     // REQUIRED: must not already have a linked identity on this device
     const existing = await getIdentity();
@@ -314,19 +636,72 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
     await kvSet('device', dev);
     await setPendingJoinIdentityLabel(identityLabel);
 
-    await publishAppEvent(sw, {
-      type: 'pair_request',
-      identity: identityLabel,
+    const codeHash = await pairCodeHash(identityLabel, code);
+    await kvSet(PAIR_OFFER_KEY, {
+      identityLabel,
+      codeHash,
       code,
       devicePk: dev.nostr.pk,
       deviceDid: dev.did,
       deviceLabel,
-    }, [['i', identityLabel]]);
+      createdAt: Date.now(),
+      expiresAt: Date.now() + PAIR_OFFER_TTL_MS,
+    });
 
-    log(sw, `pair_request sent identity=${identityLabel} code=${code}`);
-    status(sw, 'pair request sent');
+    log(sw, `pair offer ready identity=${identityLabel} codeHash=${codeHash.slice(0, 12)}…`);
+    status(sw, 'pair offer ready');
     pokeUi(sw);
-    return { ok: true, code };
+    return { ok: true, code, codeHash };
+  }
+
+  if (method === 'pairing.claimCode') {
+    const ident = await getIdentity();
+    if (!ident?.linked || !ident?.label) throw new Error('no linked identity on this device');
+
+    const code = String(params?.code || '').trim();
+    if (!code) throw new Error('code required');
+
+    const claim = await activatePairClaim(sw, ident, code, {
+      ttlMs: params?.ttlMs,
+      autoApprove: !!params?.autoApprove,
+      publishClaim: params?.publishClaim !== false,
+    });
+
+    status(sw, claim.autoApprove ? 'pair claim sent (auto-approve armed)' : 'pair claim sent');
+    pokeUi(sw);
+    return { ok: true, ...claim };
+  }
+
+  if (method === 'pairing.prepareInstall') {
+    const ident = await getIdentity();
+    if (!ident?.linked || !ident?.label) throw new Error('no linked identity on this device');
+
+    const code = makePairCode();
+    const claim = await activatePairClaim(sw, ident, code, {
+      ttlMs: params?.ttlMs || (6 * 60 * 1000),
+      autoApprove: params?.autoApprove !== false,
+      publishClaim: false,
+    });
+
+    const target = String(params?.target || params?.installType || 'device').trim() || 'device';
+    status(sw, `${target} install pairing armed`);
+    pokeUi(sw);
+    return { ok: true, target, ...claim };
+  }
+
+  if (method === 'pairing.prepareGatewayInstall') {
+    const target = String(params?.target || 'gateway').trim() || 'gateway';
+    return await handleRpc(
+      sw,
+      'pairing.prepareInstall',
+      {
+        ttlMs: params?.ttlMs,
+        autoApprove: params?.autoApprove,
+        target,
+      },
+      getRelayState,
+      setRelayState,
+    );
   }
 
   // --- notifications ---
@@ -388,6 +763,7 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
         await publishZoneList(sw, ident, n.key, list.members, list.ts, n.name || "").catch(() => {});
       }
       await startPresenceLoop();
+      await startSwarmPublishLoop();
     }
     return { ok: true };
   }
@@ -414,7 +790,10 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
     const r = reqs.find(x => x.id === rid);
     if (!r) throw new Error('request not found');
 
+    const ident = await getIdentity();
     const dev = await ensureDevice();
+
+    const zones = await listZones(ident || {}).catch(() => []);
 
     await publishAppEvent(sw, {
       type: 'pair_reject',
@@ -422,7 +801,7 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
       code: r.code,
       toPk: r.devicePk,
       fromPk: dev.nostr.pk,
-    }, [['i', r.identityLabel], ['p', r.devicePk]]);
+    }, pairingTags(r.identityLabel, zones, r.devicePk));
 
     await publishAppEvent(sw, {
       type: 'pair_resolved',
@@ -431,7 +810,7 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
       code: r.code,
       devicePk: r.devicePk,
       status: 'rejected',
-    }, [['i', r.identityLabel], ['p', r.devicePk]]);
+    }, pairingTags(r.identityLabel, zones, r.devicePk));
 
     await pendingRemove(rid);
     await notifRemove(`n-pair-${rid}`);
@@ -470,6 +849,8 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
 
     const encryptedRoomKey = await nip04Encrypt(dev.nostr.skHex, r.devicePk, payload);
 
+    const zones = await listZones(ident || {}).catch(() => []);
+
     await publishAppEvent(sw, {
       type: 'pair_approve',
       identity: r.identityLabel,
@@ -477,7 +858,7 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
       toPk: r.devicePk,
       fromPk: dev.nostr.pk,
       encryptedRoomKey,
-    }, [['i', r.identityLabel], ['p', r.devicePk]]);
+    }, pairingTags(r.identityLabel, zones, r.devicePk));
 
     await publishAppEvent(sw, {
       type: 'pair_resolved',
@@ -486,7 +867,7 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
       code: r.code,
       devicePk: r.devicePk,
       status: 'approved',
-    }, [['i', r.identityLabel], ['p', r.devicePk]]);
+    }, pairingTags(r.identityLabel, zones, r.devicePk));
 
     await pendingRemove(rid);
     await notifRemove(`n-pair-${rid}`);

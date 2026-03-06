@@ -22,6 +22,8 @@
             <div class="popoverTitle">Status</div>
             <div class="popoverRow"><span class="muted">Relay</span><span id="popRelay">offline</span></div>
             <div class="popoverRow"><span class="muted">Identity</span><span id="popDaemon">unknown</span></div>
+            <div class="popoverRow"><span class="muted">Swarm</span><span id="popSwarm">offline</span></div>
+            <div class="popoverRow"><span class="muted">Swarm cache</span><span id="popSwarmCache">n/a</span></div>
             <div class="popoverDivider"></div>
             <div class="popoverTitle small">Recent</div>
             <div id="connLog" class="connLog" aria-label="Connection state log"></div>
@@ -88,14 +90,20 @@
         <div class="v" id="identityLinkedSummary"></div>
       </div>
     </div>
+    <div class="card">
+      <div class="cardTitle">Apps</div>
+      <div id="homeAppsList" class="list"></div>
+    </div>
   </section>
 
   <section id="viewSettings" class="activity hidden">
     <div class="tabs">
       <button class="tab" data-tab="profile">Profile</button>
       <button class="tab" data-tab="devices">Devices</button>
+      <button class="tab" data-tab="appliances">Appliances</button>
       <button class="tab" data-tab="peers">Peers</button>
       <button class="tab" data-tab="pairing">Pairing</button>
+      <button class="tab" data-tab="apps">Apps</button>
       <button class="tab" data-tab="identity">Identity</button>
     </div>
 
@@ -135,6 +143,36 @@
       <div id="blockedList" class="list"></div>
     </div>
 
+    <div id="tab_appliances" class="tabpane hidden">
+      <h2>Appliances</h2>
+
+      <div class="card">
+        <div class="cardTitle">Add Gateway</div>
+        <div class="small muted">Existing: use pairing flow in <strong>Settings → Pairing</strong>, then approve on your owner device.</div>
+        <div class="small muted" style="margin-top:.35rem;">Install: choose gateway target, then copy or download the installer helper for your current operator platform.</div>
+        <div class="small muted">Only Linux image gateways support additional services (for example NVR) in this iteration.</div>
+        <label class="small" style="display:block;margin-top:.5rem;">
+          <input id="gatewayInstallIncludeNvr" type="checkbox" />
+          Include NVR service install + pairing bootstrap for Linux target
+        </label>
+        <div class="row" style="margin-top:.6rem;">
+          <select id="gatewayInstallPlatform">
+            <option value="linux-image">Linux Image (FCOS metal)</option>
+            <option value="windows-service">Windows Service</option>
+          </select>
+          <button id="btnGatewayInstallCopy" type="button">Copy Command</button>
+          <button id="btnGatewayInstallOpen" type="button">Download Script</button>
+        </div>
+        <div id="gatewayInstallDetectedPlatform" class="small muted" style="margin-top:.5rem;"></div>
+        <div id="gatewayInstallStatus" class="small muted" style="margin-top:.35rem;"></div>
+      </div>
+
+      <div class="card">
+        <div class="cardTitle">Connected Appliances</div>
+        <div id="applianceList" class="list"></div>
+      </div>
+    </div>
+
     <div id="tab_peers" class="tabpane hidden">
       <h2>Peers</h2>
       <div class="card">
@@ -159,15 +197,49 @@
       </div>
 
       <div id="zonesList" class="list"></div>
+
+      <div class="card">
+        <div class="cardTitle">Zone Devices <span id="peersCount" class="small muted"></span></div>
+        <div id="peersList" class="list"></div>
+      </div>
     </div>
 
 
     <div id="tab_pairing" class="tabpane hidden">
       <h2>Pairing</h2>
 
+      <div class="card">
+        <div class="cardTitle">Add Device</div>
+        <div class="small muted">On the new device, finish onboarding and note its pairing code. Enter that code here to claim and start pairing.</div>
+        <div class="row" style="margin-top:.5rem;">
+          <input id="pairCodeInput" type="text" placeholder="Enter code from new device" />
+          <button id="btnClaimPairCode" type="button">Claim Code</button>
+        </div>
+        <div id="pairCodeStatus" class="small muted" style="margin-top:.5rem;"></div>
+      </div>
+
       <h3>Pending requests</h3>
       <div id="pairingList" class="list"></div>
       <div id="pairingEmpty" class="small muted">No pending pairing requests.</div>
+    </div>
+
+
+    <div id="tab_apps" class="tabpane hidden">
+      <h2>Apps</h2>
+      <div class="card">
+        <div class="cardTitle">Optional Repos</div>
+        <div class="small muted">Add GitHub repos with <code>app.manifest.json</code>. Enabled apps are stored locally as capabilities.</div>
+        <div class="row" style="margin-top:.5rem;">
+          <input id="appRepoInput" type="text" placeholder="https://github.com/owner/repo" />
+          <button id="btnAddAppRepo" type="button">Add Repo</button>
+        </div>
+        <div id="appRepoStatus" class="small muted" style="margin-top:.5rem;"></div>
+      </div>
+
+      <div class="card" style="margin-top:.75rem;">
+        <div class="cardTitle">Capabilities</div>
+        <div id="appCapabilityList" class="list"></div>
+      </div>
     </div>
 
     <div id="tab_identity" class="tabpane hidden">
@@ -231,6 +303,12 @@
         <button type="button" class="tab" data-mode="existing">Join existing</button>
       </div>
 
+      <div id="obPairCodeWrap" class="hidden" style="margin-top:.5rem;">
+        <label for="obPairCode">Pairing code (recommended)</label>
+        <input id="obPairCode" type="text" placeholder="Paste code from owner device" />
+        <div class="small muted">If blank, a random code is generated and shown after request.</div>
+      </div>
+
       <div class="row" style="margin-top:.75rem;">
         <button id="btnObIdentityContinue" type="button">Continue</button>
       </div>
@@ -243,3 +321,4 @@
 <script type="module" src="./app.js"></script>
 </body>
 </html>
+

@@ -1,69 +1,71 @@
 # Constitute
 
-Browser-native, decentralized identity and device association system with relay-based signaling and a path to peer-to-peer swarm sync.
+Browser-native identity and discovery client for the Constitution ecosystem.
+`constitute` is the web-side runtime that converges against `constitute-gateway` contracts.
 
 ## Status
 - Prototype: active development
-- Discovery bootstrap achieved (zones + directory)
-- Next focus: swarm transport (DHT / P2P)
+- Discovery bootstrap: implemented (zones + directory)
+- Gateway contract convergence: in progress (app-channel parity + ingest hardening)
+- Browser swarm transport: staged behind gateway-first convergence
 
 ## Key Concepts
 - Identity: cryptographic grouping of devices
-- Device: cryptographic endpoint, optionally WebAuthn-backed
-- Pairing: device association via approval flow
-- Zone: discovery scope joined by a shareable key
-- Directory: local store of discovered devices
+- Device: cryptographic endpoint (software or WebAuthn-backed)
+- Pairing: approval-based device association
+- Zone: discovery scope joined via shared key
+- Directory: local cache of discovered peers
 
-## Features
-- Device identity (software + WebAuthn option)
-- Identity create/join with pairing approval flow
-- Notifications + pending request management
-- Relay transport via SharedWorker
-- Directory of discovered devices (from zone presence)
+## Current Features
+- Device identity lifecycle (software + optional WebAuthn)
+- Identity create/join + pairing approval flow
+- Notifications and pending-request management
+- Relay transport via SharedWorker + Service Worker authority
+- Zone presence/list propagation and directory updates
+- Swarm record cache (identity/device) with signed record validation
+- Canonical app-channel plumbing for `swarm_record_request` and `swarm_dht_get/put`
+- Manifest-driven app auto-enable from service records (`uiRepo` / `uiRef` / `uiManifestUrl`)
+- Home app launcher cards for enabled capabilities
+- Appliances tab for gateway/NVR inventory, control-panel launch wiring, gateway install command generation, and remote NVR service install requests
 
 ## Project Layout
-- app.js: UI + activity routing + SW RPC client
-- identity/client.js: SW RPC client
-- relay.worker.js: WebSocket relay transport (SharedWorker)
-- identity/sw/*: Service Worker identity daemon
-- ARCHITECTURE.md: system architecture and roadmap
+- `app.js`: UI state, routing, and peer presentation
+- `identity/client.js`: window-to-Service Worker RPC bridge
+- `relay.worker.js`: shared relay transport worker
+- `identity/sw/*`: Service Worker daemon and protocol handlers
+- `ARCHITECTURE.md`: architecture and roadmap
 
 ## Architecture
-See `ARCHITECTURE.md` for the full system overview and roadmap.
+See `ARCHITECTURE.md` for system design and convergence direction.
 
 ## Running Locally
-1. Serve the repo at http://localhost:8000 (any static server)
+1. Serve this repo on `http://localhost:8000` (or equivalent static host)
 2. Open in a modern browser with Service Worker support
-3. Ensure HTTPS or localhost for WebAuthn
+3. Use HTTPS or localhost for WebAuthn paths
 
 ## Usage
-- Create an identity or join an existing one
-- Pair additional devices using the pairing flow
-- Settings > Peers manages zones and discovery devices
-- If no identity is linked, the UI redirects to onboarding
-
-## Zones
-- Zones are discovery scopes with a human label
-- Keys are generated at creation and shared via link
-- Zone presence + member lists update the Directory
+- Create or join an identity
+- Pair additional devices from notifications / pairing flow
+- Manage zones and discovered peers in `Settings > Peers`
+- Use `Settings > Appliances` to choose gateway target (`Linux Image` or `Windows Service`), then copy/download installer helpers for your operator platform (both paths configure release auto-update after install)
+- For Linux-image installs, you can append NVR install + pairing bootstrap directly from the same flow
+- For paired Linux-image gateways, use `Install NVR Service` in appliance actions to trigger host-side NVR install remotely
+- Linux-image gateways are the path for gateway-hosted services such as NVR; Windows-service gateways are relay-only in this iteration
+- Use `Settings > Appliances` to pair existing gateways and open NVR control panel surfaces
+- Manage optional app repos in `Settings > Apps` and launch enabled apps from Home
+- If identity/device prerequisites are missing, UI routes to onboarding
 
 ## Roadmap Snapshot
-- Stabilize zone list propagation + naming
-- Add Kademlia-style DHT (primary transport)
-- Swarm transport and discovery
-- Shared encrypted data layers
-- Messaging maturation + double-ratchet encryption
-
-## TODO
-- Improve Peers UX clarity
-- Swarm transport and discovery
-- Shared encrypted data layers
-- Messaging maturation + double-ratchet encryption
+- P0: converge web behavior to frozen gateway protocol contracts
+- P1: validate browser <-> gateway integration paths end-to-end
+- P2: browser swarm transport refinement (TURN as fallback boundary)
+- P3: codebase refactor and modularization
 
 ## Security Notes
-- UI never handles secret keys
-- Service Worker is the cryptographic authority
-- Relay is transport only (no trust assumed)
+- UI does not hold long-term secret material
+- Service Worker is the local cryptographic authority
+- Relay transport is treated as untrusted; envelopes must validate
 
 ## License
 TBD
+

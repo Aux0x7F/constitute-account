@@ -8,6 +8,8 @@ const KEY = 'zones';
 const CAP = 50;
 const LIST_PREFIX = 'zone_list:';
 const PENDING_KEY = 'pendingZoneKey';
+const NODE_ROLE = 'browser';
+const SERVICE_VERSION = 'web-dev';
 
 function listKey(key) {
   return `${LIST_PREFIX}${String(key || '').trim()}`;
@@ -146,6 +148,9 @@ export async function publishZonePresence(sw, ident, dev, key) {
     zone: z,
     devicePk: dev?.nostr?.pk || '',
     swarm: '',
+    role: NODE_ROLE,
+    relays: [],
+    serviceVersion: SERVICE_VERSION,
     ts: Date.now(),
     ttl: 120,
   };
