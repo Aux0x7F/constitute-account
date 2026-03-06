@@ -219,6 +219,10 @@ const GATEWAY_OPERATOR_UTILITY = Object.freeze({
   }),
 });
 
+const GATEWAY_RELEASES_API = 'https://api.github.com/repos/Aux0x7F/constitute-gateway/releases?per_page=20';
+const gatewayUtilityAssetUrlCache = new Map(); // asset -> { url, tag, prerelease }
+let gatewayReleasesCache = null;
+
 function currentGatewayUtilityDownloadInfo() {
   const byPlatform = GATEWAY_OPERATOR_UTILITY[OPERATOR_PLATFORM] || null;
   if (!byPlatform) return null;
@@ -227,8 +231,63 @@ function currentGatewayUtilityDownloadInfo() {
   return {
     platform: OPERATOR_PLATFORM,
     asset,
-    url: `https://github.com/Aux0x7F/constitute-gateway/releases/latest/download/${asset}`,
+    fallbackUrl: `https://github.com/Aux0x7F/constitute-gateway/releases/latest/download/${asset}`,
     hint: String(byPlatform.hint || '').trim(),
+  };
+}
+
+function pickGatewayReleaseAsset(releases, assetName) {
+  if (!Array.isArray(releases) || !assetName) return null;
+  for (const release of releases) {
+    if (release?.draft) continue;
+    const assets = Array.isArray(release?.assets) ? release.assets : [];
+    const hit = assets.find((a) => String(a?.name || '') === assetName);
+    const url = String(hit?.browser_download_url || '').trim();
+    if (url) {
+      return {
+        url,
+        tag: String(release?.tag_name || '').trim(),
+        prerelease: Boolean(release?.prerelease),
+      };
+    }
+  }
+  return null;
+}
+
+async function fetchGatewayReleases() {
+  if (Array.isArray(gatewayReleasesCache)) return gatewayReleasesCache;
+  const res = await fetch(GATEWAY_RELEASES_API, {
+    method: 'GET',
+    headers: { 'Accept': 'application/vnd.github+json' },
+    cache: 'no-store',
+  });
+  if (!res.ok) throw new Error(`GitHub releases query failed (${res.status})`);
+  const payload = await res.json();
+  gatewayReleasesCache = Array.isArray(payload) ? payload : [];
+  return gatewayReleasesCache;
+}
+
+async function resolveGatewayUtilityAssetUrl(assetName) {
+  const asset = String(assetName || '').trim();
+  if (!asset) throw new Error('missing utility asset name');
+
+  const cached = gatewayUtilityAssetUrlCache.get(asset);
+  if (cached?.url) return cached;
+
+  try {
+    const releases = await fetchGatewayReleases();
+    const match = pickGatewayReleaseAsset(releases, asset);
+    if (match?.url) {
+      gatewayUtilityAssetUrlCache.set(asset, match);
+      return match;
+    }
+  } catch {}
+
+  // Fallback for stable releases when API is blocked/rate-limited.
+  return {
+    url: `https://github.com/Aux0x7F/constitute-gateway/releases/latest/download/${asset}`,
+    tag: 'latest',
+    prerelease: false,
   };
 }
 
@@ -1152,13 +1211,13 @@ function updateGatewayInstallHint() {
   }
 
   const hintParts = [
-    'Utility defaults to releases/latest.',
+    'Utility resolves the newest release that contains the requested asset (pre-release safe).',
     'Enable dev source mode only for local development loops.',
     info.hint,
   ].filter(Boolean);
 
   setGatewayInstallHint(hintParts.join(' '));
-  setGatewayInstallCommandPreview(info.url);
+  setGatewayInstallCommandPreview(`asset: ${info.asset}`);
 }
 
 function isGatewayRecord(rec) {
@@ -1476,6 +1535,135 @@ function findAppIndexByManifestUrl(url) {
   const target = String(url || '').trim();
   if (!target) return -1;
   return appRepoCatalog.findIndex((entry) => String(entry?.manifestUrl || '').trim() === target);
+}
+
+function parseGitHubRepoInput(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+
+  const shorthand = raw.match(/^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)(?:@([A-Za-z0-9._\/-]+))?$/);
+  if (shorthand) {
+    const owner = shorthand[1];
+    const repo = shorthand[2];
+    const ref = String(shorthand[3] || 'main').trim() || 'main';
+    return {
+      owner,
+      repo,
+      ref,
+      url: `https://github.com/${owner}/${repo}/tree/${ref}`,
+    };
+  }
+
+  let candidate = raw;
+  if (!/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(candidate)) {
+    candidate = candidate.replace(/^github\.com\//i, 'https://github.com/');
+    if (!/^https?:\/\//i.test(candidate)) candidate = `https://${candidate}`;
+  }
+
+  let u;
+  try {
+    u = new URL(candidate);
+  } catch {
+    return null;
+  }
+
+  if (!/^(www\.)?github\.com$/i.test(u.hostname)) return null;
+
+  const parts = u.pathname.replace(/^\/+|\/+$/g, '').split('/').filter(Boolean);
+  if (parts.length < 2) return null;
+
+  const owner = parts[0];
+  const repo = String(parts[1] || '').replace(/\.git$/i, '');
+  if (!owner || !repo) return null;
+
+  let ref = 'main';
+  if (parts[2] === 'tree' && parts[3]) {
+    ref = decodeURIComponent(parts[3]);
+  }
+  ref = String(ref || 'main').trim() || 'main';
+
+  return {
+    owner,
+    repo,
+    ref,
+    url: `https://github.com/${owner}/${repo}/tree/${ref}`,
+  };
+}
+
+function buildAppManifestCandidateUrls(parsed, opts = {}) {
+  const owner = String(parsed?.owner || '').trim();
+  const repo = String(parsed?.repo || '').trim();
+  const ref = String(parsed?.ref || 'main').trim() || 'main';
+  if (!owner || !repo) return [];
+
+  const candidates = [];
+  const explicit = String(opts?.manifestUrl || '').trim();
+  if (explicit) candidates.push(explicit);
+
+  const base = `https://cdn.jsdelivr.net/gh/${owner}/${repo}@${ref}`;
+  candidates.push(`${base}/app.manifest.json`);
+  candidates.push(`${base}/manifest.json`);
+  candidates.push(`https://raw.githubusercontent.com/${owner}/${repo}/${ref}/app.manifest.json`);
+  candidates.push(`https://raw.githubusercontent.com/${owner}/${repo}/${ref}/manifest.json`);
+
+  return Array.from(new Set(candidates));
+}
+
+async function fetchJson(url) {
+  const res = await fetch(url, { method: 'GET', cache: 'no-store' });
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  return await res.json();
+}
+
+async function fetchAppManifest(parsed, opts = {}) {
+  const owner = String(parsed?.owner || '').trim();
+  const repo = String(parsed?.repo || '').trim();
+  const ref = String(parsed?.ref || 'main').trim() || 'main';
+  if (!owner || !repo) throw new Error('invalid repo input');
+
+  const candidates = buildAppManifestCandidateUrls(parsed, opts);
+  if (candidates.length === 0) throw new Error('no manifest candidates');
+
+  let payload = null;
+  let manifestUrl = '';
+  let lastErr = null;
+  for (const url of candidates) {
+    try {
+      payload = await fetchJson(url);
+      manifestUrl = url;
+      break;
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    throw new Error(`manifest unavailable (${String(lastErr?.message || 'not found')})`);
+  }
+
+  const id = String(payload.id || `${owner}/${repo}`).trim();
+  const label = String(payload.label || payload.name || repo).trim() || repo;
+  const entry = String(payload.entry || 'index.html').trim() || 'index.html';
+  const url = String(payload.url || `https://github.com/${owner}/${repo}/tree/${ref}`).trim();
+  const launchUrl = String(payload.launchUrl || payload.launch_url || '').trim();
+  const description = String(payload.description || '').trim();
+  const version = String(payload.version || '').trim();
+  const capabilities = Array.isArray(payload.capabilities) ? payload.capabilities.map(String) : [];
+
+  return {
+    id,
+    label,
+    owner,
+    repo,
+    ref,
+    url,
+    entry,
+    launchUrl,
+    description,
+    version,
+    capabilities,
+    manifestUrl,
+  };
 }
 
 function parseServiceRepoHint(value, repoRef = 'main') {
@@ -2484,15 +2672,23 @@ function wireUi() {
           throw new Error(`installer utility is unavailable for ${operatorPlatformLabel()} operators`);
         }
 
+        const resolved = await resolveGatewayUtilityAssetUrl(info.asset);
+        const downloadUrl = String(resolved?.url || info.fallbackUrl || '').trim();
+        if (!downloadUrl) {
+          throw new Error('could not resolve a utility download URL');
+        }
+
         const a = document.createElement('a');
-        a.href = info.url;
+        a.href = downloadUrl;
         a.rel = 'noopener noreferrer';
         a.target = '_blank';
         document.body.appendChild(a);
         a.click();
         a.remove();
 
-        setGatewayInstallStatus(`Downloading ${info.asset} from latest releases.`);
+        const releaseRef = String(resolved?.tag || 'latest').trim() || 'latest';
+        const releaseMeta = resolved?.prerelease ? `${releaseRef} (pre-release)` : releaseRef;
+        setGatewayInstallStatus(`Downloading ${info.asset} from ${releaseMeta}.`);
       } catch (err) {
         setGatewayInstallStatus(`Utility download failed: ${String(err?.message || err)}`, true);
       }
