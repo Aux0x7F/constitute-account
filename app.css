@@ -60,6 +60,7 @@ a{color:inherit}
 }
 
 .activity.hidden{display:none}
+.hidden{display:none !important}
 
 .card{
   background:rgba(255,255,255,0.03);
@@ -313,3 +314,44 @@ button:disabled{opacity:0.5; cursor:not-allowed}
 .choiceSub{font-size:.85rem; color:var(--muted); margin-top:.15rem}
 
 .row.wrap{flex-wrap:wrap}
+
+input[type="checkbox"]{
+  width:auto;
+  margin:0;
+}
+
+.gatewayInstallOptions{
+  display:flex;
+  flex-direction:column;
+  gap:.35rem;
+  margin-top:.55rem;
+}
+
+.toggleRow{
+  display:flex;
+  align-items:center;
+  gap:.55rem;
+  color:var(--text);
+}
+
+.row.compact{
+  margin-top:.2rem;
+}
+
+.row.compact input{
+  margin:0;
+  max-width:220px;
+}
+
+.commandPreview{
+  margin:.4rem 0 0 0;
+  padding:.6rem .7rem;
+  border:1px solid rgba(255,255,255,0.12);
+  border-radius:12px;
+  background:rgba(0,0,0,0.2);
+  color:var(--text);
+  font-family:var(--mono);
+  font-size:.82rem;
+  white-space:pre-wrap;
+  word-break:break-word;
+}
