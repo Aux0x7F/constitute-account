@@ -1,0 +1,31 @@
+name: web-syntax
+
+on:
+  pull_request:
+  push:
+    branches: [main, Swarm]
+
+jobs:
+  syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: JS parse checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --check app.js
+          node --check identity/client.js
+          for f in identity/sw/*.js; do
+            node --check "$f"
+          done
+          for f in identity/sw/swarm/*.js; do
+            node --check "$f"
+          done
