@@ -47,10 +47,10 @@ See `ARCHITECTURE.md` for system design and convergence direction.
 - Create or join an identity
 - Pair additional devices from notifications / pairing flow
 - Manage zones and discovered peers in `Settings > Peers`
-- Use `Settings > Appliances` to choose gateway target (`Linux Image` or `Windows Service`), then copy/download installer helpers for your operator platform (both paths configure release auto-update after install)
-- For Linux-image installs, you can append NVR install + pairing bootstrap directly from the same flow
+- Use `Settings > Appliances` to download the installer utility for your operator platform
+- In the installer utility, choose target (`Linux Image` or `Windows Service`), release or dev mode, and optional pairing bootstrap
+- Linux-image target supports gateway-hosted services such as NVR; Windows-service target is relay-only in this iteration
 - For paired Linux-image gateways, use `Install NVR Service` in appliance actions to trigger host-side NVR install remotely
-- Linux-image gateways are the path for gateway-hosted services such as NVR; Windows-service gateways are relay-only in this iteration
 - Use `Settings > Appliances` to pair existing gateways and open NVR control panel surfaces
 - Manage optional app repos in `Settings > Apps` and launch enabled apps from Home
 - If identity/device prerequisites are missing, UI routes to onboarding
