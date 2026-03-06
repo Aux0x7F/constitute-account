@@ -978,8 +978,7 @@ async function downloadGatewayInstallerScript(prepared) {
     ...header,
     command,
     '',
-  ].join('
-');
+  ].join('\n');
 
   const blob = new Blob([body], { type: 'text/plain;charset=utf-8' });
   const blobUrl = URL.createObjectURL(blob);
