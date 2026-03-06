@@ -1,9 +1,9 @@
 import { verifyEvent } from 'https://cdn.jsdelivr.net/npm/nostr-tools@2.7.2/+esm';
 // FILE: identity/sw/relayIn.js
 
-import { nip04Decrypt } from './nostr.js';
+import { nip04Decrypt, nip04Encrypt } from './nostr.js';
 import { randomBytes, b64url } from './crypto.js';
-import { getDevice } from './deviceStore.js';
+import { ensureDevice, getDevice } from './deviceStore.js';
 import { getIdentity, setIdentity } from './identityStore.js';
 import { notifAdd, notifClear, notifRemove } from './notifs.js';
 import { pendingAdd, pendingRemove } from './pending.js';
@@ -21,6 +21,73 @@ const REPLAY_SKEW_SEC = 2 * 60;
 const REPLAY_CAP = 400;
 const PAIR_OFFER_KEY = 'pairOffer';
 const PAIR_CLAIM_ACTIVE_KEY = 'pairClaimActive';
+
+
+function pairingTags(identityLabel, zones = [], toPk = '') {
+  const tags = [['i', String(identityLabel || '').trim()]];
+  for (const z of (Array.isArray(zones) ? zones : [])) {
+    const key = String(z?.key || '').trim();
+    if (key) tags.push(['z', key]);
+  }
+  const peerPk = String(toPk || '').trim();
+  if (peerPk) tags.push(['p', peerPk]);
+  return tags;
+}
+
+async function autoApprovePairRequest(sw, ident, req) {
+  if (!ident?.linked || !ident?.roomKeyB64) return false;
+  if (!req?.devicePk) return false;
+
+  ident.devices = Array.isArray(ident.devices) ? ident.devices : [];
+  const exists = ident.devices.some(d => d.pk === req.devicePk);
+  if (!exists) {
+    ident.devices.push({
+      pk: req.devicePk,
+      did: req.deviceDid || '',
+      label: req.deviceLabel || '',
+    });
+    await setIdentity(ident);
+  }
+
+  const dev = await ensureDevice();
+  const payload = JSON.stringify({
+    identityId: ident.id,
+    roomKeyB64: ident.roomKeyB64,
+    devices: ident.devices,
+  });
+
+  const encryptedRoomKey = await nip04Encrypt(dev.nostr.skHex, req.devicePk, payload);
+  const zones = await listZones(ident || {}).catch(() => []);
+
+  await publishAppEvent(sw, {
+    type: 'pair_approve',
+    identity: req.identityLabel,
+    code: req.code,
+    toPk: req.devicePk,
+    fromPk: dev.nostr.pk,
+    encryptedRoomKey,
+  }, pairingTags(req.identityLabel, zones, req.devicePk));
+
+  await publishAppEvent(sw, {
+    type: 'pair_resolved',
+    identity: req.identityLabel,
+    requestId: req.id,
+    code: req.code,
+    devicePk: req.devicePk,
+    status: 'approved',
+  }, pairingTags(req.identityLabel, zones, req.devicePk));
+
+  await notifAdd({
+    id: `n-auto-approve-${req.id}`,
+    kind: 'pairing',
+    title: 'Gateway auto-approved',
+    body: `${req.deviceLabel || 'Gateway'} added to ${req.identityLabel}`,
+    ts: Date.now(),
+    read: false,
+  });
+
+  return true;
+}
 
 function createdAtOk(createdAt) {
   const ts = Number(createdAt || 0);
@@ -223,6 +290,10 @@ export async function handleRelayFrame(sw, raw) {
       role: String(payload.role || ''),
       relays: Array.isArray(payload.relays) ? payload.relays : [],
       serviceVersion: String(payload.serviceVersion || ''),
+      hostPlatform: String(payload.hostPlatform || ''),
+      releaseChannel: String(payload.releaseChannel || ''),
+      releaseTrack: String(payload.releaseTrack || ''),
+      releaseBranch: String(payload.releaseBranch || ''),
     });
     pokeUi(sw);
     return;
@@ -433,6 +504,7 @@ export async function handleRelayFrame(sw, raw) {
     }
 
     const codeHash = String(payload.codeHash || '').trim();
+    let autoApprove = false;
     if (codeHash) {
       const activeClaim = (await kvGet(PAIR_CLAIM_ACTIVE_KEY)) || null;
       const nowMs = Date.now();
@@ -444,6 +516,7 @@ export async function handleRelayFrame(sw, raw) {
         log(sw, 'pair_request ignored: no active matching code claim');
         return;
       }
+      autoApprove = !!activeClaim?.autoApprove;
       await kvSet(PAIR_CLAIM_ACTIVE_KEY, null);
     }
 
@@ -460,6 +533,22 @@ export async function handleRelayFrame(sw, raw) {
       ts: Date.now(),
       status: 'pending',
     };
+
+    if (autoApprove) {
+      try {
+        const approved = await autoApprovePairRequest(sw, ident, req);
+        if (!approved) {
+          log(sw, 'pair_request auto-approve failed: missing identity state');
+          return;
+        }
+      } catch (e) {
+        log(sw, `pair_request auto-approve failed: ${String(e?.message || e)}`);
+        return;
+      }
+      pokeUi(sw);
+      return;
+    }
+
     await pendingAdd(req);
 
     await notifAdd({
@@ -710,6 +799,24 @@ export async function handleRelayFrame(sw, raw) {
       type: 'swarm_record_response',
       requestId: String(payload.requestId || '').trim(),
       status: String(payload.status || ''),
+      ts: Number(payload.ts || Date.now()),
+    });
+    return;
+  }
+
+  if (payload.type === 'gateway_service_install_status') {
+    emit(sw, {
+      type: 'gateway_service_install_status',
+      requestId: String(payload.requestId || '').trim(),
+      status: String(payload.status || '').trim(),
+      service: String(payload.service || '').trim(),
+      action: String(payload.action || '').trim(),
+      gatewayPk: String(payload.gatewayPk || '').trim(),
+      toDevicePk: String(payload.toDevicePk || '').trim(),
+      identityId: String(payload.identityId || '').trim(),
+      reason: String(payload.reason || '').trim(),
+      detail: String(payload.detail || '').trim(),
+      zone: String(payload.zone || '').trim(),
       ts: Number(payload.ts || Date.now()),
     });
     return;

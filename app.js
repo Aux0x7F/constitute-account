@@ -65,9 +65,11 @@ const appCapabilityList = document.getElementById('appCapabilityList');
 const homeAppsList = document.getElementById('homeAppsList');
 
 const gatewayInstallPlatform = document.getElementById('gatewayInstallPlatform');
+const gatewayInstallIncludeNvr = document.getElementById('gatewayInstallIncludeNvr');
 const btnGatewayInstallCopy = document.getElementById('btnGatewayInstallCopy');
 const btnGatewayInstallOpen = document.getElementById('btnGatewayInstallOpen');
 const gatewayInstallStatus = document.getElementById('gatewayInstallStatus');
+const gatewayInstallDetectedPlatform = document.getElementById('gatewayInstallDetectedPlatform');
 const applianceList = document.getElementById('applianceList');
 
 const joinDeviceLabelEl = document.getElementById('joinDeviceLabel');
@@ -139,25 +141,70 @@ let appEnabledIds = new Set();
 let appLaunchHints = new Map();
 window.__constituteEnabledApps = [];
 
+const GATEWAY_INSTALL_TARGETS = Object.freeze({
+  'linux-image': {
+    label: 'Linux image (FCOS metal)',
+    supportsServices: true,
+  },
+  'windows-service': {
+    label: 'Windows service',
+    supportsServices: false,
+  },
+});
+
+function detectOperatorPlatform() {
+  const uaDataPlatform = String(navigator?.userAgentData?.platform || '').toLowerCase();
+  const platform = String(navigator?.platform || '').toLowerCase();
+  const ua = String(navigator?.userAgent || '').toLowerCase();
+  const sample = `${uaDataPlatform} ${platform} ${ua}`;
+  if (sample.includes('win')) return 'windows';
+  if (sample.includes('mac')) return 'mac';
+  if (sample.includes('linux') || sample.includes('x11')) return 'linux';
+  return 'unknown';
+}
+
+const OPERATOR_PLATFORM = detectOperatorPlatform();
+
 const GATEWAY_INSTALLERS = Object.freeze({
-  linux: {
-    command: "curl -fsSL https://raw.githubusercontent.com/Aux0x7F/constitute-gateway/main/scripts/linux/install-latest.sh | bash",
-    scriptUrl: "https://raw.githubusercontent.com/Aux0x7F/constitute-gateway/main/scripts/linux/install-latest.sh",
-  },
-  windows: {
-    command: "powershell -NoProfile -ExecutionPolicy Bypass -Command \"irm https://raw.githubusercontent.com/Aux0x7F/constitute-gateway/main/scripts/windows/install-latest.ps1 | iex\"",
-    scriptUrl: "https://raw.githubusercontent.com/Aux0x7F/constitute-gateway/main/scripts/windows/install-latest.ps1",
-  },
+  'linux-image': Object.freeze({
+    windows: {
+      commandBase: 'powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/Aux0x7F/constitute-gateway/main/scripts/windows/prepare-auto-update-image.ps1 | iex"',
+      scriptUrl: 'https://raw.githubusercontent.com/Aux0x7F/constitute-gateway/main/scripts/windows/prepare-auto-update-image.ps1',
+      downloadName: 'constitute-gateway-linux-image.ps1',
+      note: 'Linux image target supports gateway-hosted services (including NVR).',
+    },
+    linux: {
+      commandBase: 'curl -fsSL https://raw.githubusercontent.com/Aux0x7F/constitute-gateway/main/scripts/fcos/prepare-auto-update-image.sh | bash',
+      scriptUrl: 'https://raw.githubusercontent.com/Aux0x7F/constitute-gateway/main/scripts/fcos/prepare-auto-update-image.sh',
+      downloadName: 'constitute-gateway-linux-image.sh',
+      note: 'Linux image target supports gateway-hosted services (including NVR).',
+    },
+    mac: {
+      commandBase: 'curl -fsSL https://raw.githubusercontent.com/Aux0x7F/constitute-gateway/main/scripts/fcos/prepare-auto-update-image.sh | bash',
+      scriptUrl: 'https://raw.githubusercontent.com/Aux0x7F/constitute-gateway/main/scripts/fcos/prepare-auto-update-image.sh',
+      downloadName: 'constitute-gateway-linux-image.sh',
+      note: 'Linux image target supports gateway-hosted services (including NVR).',
+    },
+  }),
+  'windows-service': Object.freeze({
+    windows: {
+      commandBase: 'powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/Aux0x7F/constitute-gateway/main/scripts/windows/install-latest.ps1 | iex"',
+      scriptUrl: 'https://raw.githubusercontent.com/Aux0x7F/constitute-gateway/main/scripts/windows/install-latest.ps1',
+      downloadName: 'constitute-gateway-windows-service.ps1',
+      note: 'Windows service target does not support gateway-hosted NVR service installation.',
+    },
+  }),
 });
 
 const NVR_INSTALLERS = Object.freeze({
   linux: {
-    command: "curl -fsSL https://raw.githubusercontent.com/Aux0x7F/constitute-nvr/main/scripts/linux/install-wizard.sh | bash",
-    scriptUrl: "https://raw.githubusercontent.com/Aux0x7F/constitute-nvr/main/scripts/linux/install-wizard.sh",
+    commandBase: "curl -fsSL https://raw.githubusercontent.com/Aux0x7F/constitute-nvr/main/scripts/linux/install-latest.sh | bash -s --",
+    scriptUrl: "https://raw.githubusercontent.com/Aux0x7F/constitute-nvr/main/scripts/linux/install-latest.sh",
   },
 });
 
 let lastSwarmDevices = [];
+const pendingGatewayServiceInstalls = new Map();
 
 class SwarmTransport {
   constructor({ client, onState }) {
@@ -654,22 +701,399 @@ function setGatewayInstallStatus(msg, error = false) {
   gatewayInstallStatus.classList.toggle('warn', !!error);
 }
 
-function selectedGatewayInstallPlatform() {
-  const raw = String(gatewayInstallPlatform?.value || 'linux').trim().toLowerCase();
-  return raw === 'windows' ? 'windows' : 'linux';
+function summarizeInstallDetail(detail) {
+  const raw = String(detail || '').trim();
+  if (!raw) return '';
+  return raw.length > 240 ? `${raw.slice(0, 240)}...` : raw;
+}
+
+function handleGatewayServiceInstallStatusEvent(evt) {
+  const requestId = String(evt?.requestId || '').trim();
+  const status = String(evt?.status || '').trim().toLowerCase();
+  const gatewayPk = String(evt?.gatewayPk || '').trim();
+  const reason = String(evt?.reason || '').trim();
+  const detail = summarizeInstallDetail(evt?.detail || '');
+
+  const meta = pendingGatewayServiceInstalls.get(requestId) || null;
+  const target = meta?.gatewayPk || gatewayPk || 'gateway';
+
+  const base = `NVR install ${status || 'update'} for ${target.slice(0, 12)}...`;
+  const reasonPart = reason ? ` (${reason})` : '';
+  const detailPart = detail ? ` — ${detail}` : '';
+
+  const isError = status === 'failed' || status === 'rejected';
+  setGatewayInstallStatus(`${base}${reasonPart}${detailPart}`, isError);
+
+  if (status === 'complete' || status === 'failed' || status === 'rejected') {
+    if (requestId) pendingGatewayServiceInstalls.delete(requestId);
+  }
+
+  if (status === 'complete') {
+    refreshAll().catch(() => {});
+  }
+}
+
+function operatorPlatformLabel() {
+  if (OPERATOR_PLATFORM === 'windows') return 'Windows';
+  if (OPERATOR_PLATFORM === 'linux') return 'Linux';
+  if (OPERATOR_PLATFORM === 'mac') return 'macOS';
+  return 'Unknown';
+}
+
+function selectedGatewayInstallTarget() {
+  const raw = String(gatewayInstallPlatform?.value || 'linux-image').trim().toLowerCase();
+  return raw === 'windows-service' ? 'windows-service' : 'linux-image';
+}
+
+function preferredGatewayInstallTarget() {
+  return 'linux-image';
+}
+
+function currentGatewayTargetInfo() {
+  return GATEWAY_INSTALL_TARGETS[selectedGatewayInstallTarget()] || GATEWAY_INSTALL_TARGETS['linux-image'];
+}
+
+function targetSupportsServices(target = selectedGatewayInstallTarget()) {
+  return Boolean(GATEWAY_INSTALL_TARGETS[target]?.supportsServices);
 }
 
 function currentGatewayInstaller() {
-  return GATEWAY_INSTALLERS[selectedGatewayInstallPlatform()] || GATEWAY_INSTALLERS.linux;
+  const target = selectedGatewayInstallTarget();
+  const byTarget = GATEWAY_INSTALLERS[target];
+  if (!byTarget) return null;
+  return byTarget[OPERATOR_PLATFORM] || null;
 }
 
 function currentNvrInstaller() {
   return NVR_INSTALLERS.linux;
 }
 
-function updateGatewayInstallHint() {
+function gatewayInstallIncludesNvr() {
+  return Boolean(gatewayInstallIncludeNvr?.checked);
+}
+
+function shellSingleQuote(value) {
+  const v = String(value ?? '');
+  return `'${v.replace(/'/g, `'"'"'`)}'`;
+}
+
+function collectAuthorizedIdentityDevicePks() {
+  const authorized = new Set();
+  const ownPk = String(lastDeviceState?.pk || '').trim();
+  if (ownPk) authorized.add(ownPk);
+  const identityDevices = Array.isArray(lastIdentity?.devices) ? lastIdentity.devices : [];
+  for (const d of identityDevices) {
+    const pk = String(d?.pk || d?.devicePk || '').trim();
+    if (pk) authorized.add(pk);
+  }
+  return Array.from(authorized.values());
+}
+
+async function prepareInstallEnrollment(target) {
+  const identityLabel = String(lastIdentity?.label || '').trim();
+  if (!identityLabel) throw new Error('link an identity before preparing install enrollment');
+
+  const enrollment = await client.call('pairing.prepareInstall', {
+    autoApprove: true,
+    ttlMs: 6 * 60 * 1000,
+    target: String(target || 'gateway'),
+  }, { timeoutMs: 20000 });
+
+  const pairCode = String(enrollment?.code || '').trim();
+  const pairCodeHash = String(enrollment?.codeHash || '').trim();
+  const pairIdentity = String(enrollment?.identityLabel || identityLabel).trim();
+  if (!pairIdentity || !pairCode || !pairCodeHash) {
+    throw new Error('invalid install enrollment payload');
+  }
+
+  return {
+    identityLabel: pairIdentity,
+    code: pairCode,
+    codeHash: pairCodeHash,
+    expiresAt: Number(enrollment?.expiresAt || 0),
+  };
+}
+
+function buildNvrInstallCommand({ identityId, enrollment, zoneKeys = [], swarmPeers = [], publicWsUrl = '' }) {
+  const installer = currentNvrInstaller();
+  if (!installer?.commandBase) throw new Error('no nvr installer configured');
+
+  const parts = [
+    installer.commandBase,
+    '--non-interactive',
+    '--identity-id', shellSingleQuote(identityId),
+    '--allow-unsigned-hello-mvp',
+    '--pair-identity', shellSingleQuote(enrollment.identityLabel),
+    '--pair-code', shellSingleQuote(enrollment.code),
+    '--pair-code-hash', shellSingleQuote(enrollment.codeHash),
+    '--enable-reolink-autoprovision',
+  ];
+
+  const ws = String(publicWsUrl || '').trim();
+  if (ws) {
+    parts.push('--public-ws-url', shellSingleQuote(ws));
+  }
+
+  for (const peer of swarmPeers) {
+    const v = String(peer || '').trim();
+    if (v) parts.push('--swarm-peer', shellSingleQuote(v));
+  }
+
+  for (const zone of zoneKeys) {
+    const v = String(zone || '').trim();
+    if (v) parts.push('--zone-key', shellSingleQuote(v));
+  }
+
+  for (const pk of collectAuthorizedIdentityDevicePks()) {
+    parts.push('--authorized-device-pk', shellSingleQuote(pk));
+  }
+
+  return parts.join(' ');
+}
+
+async function prepareGatewayInstallContext() {
+  const target = selectedGatewayInstallTarget();
+  const targetInfo = currentGatewayTargetInfo();
   const installer = currentGatewayInstaller();
-  setGatewayInstallStatus(installer?.command || 'No installer configured.', !installer);
+  if (!installer) {
+    throw new Error(`Target ${targetInfo.label} is not supported from ${operatorPlatformLabel()} operators`);
+  }
+
+  const noteParts = [];
+  if (installer.note) noteParts.push(String(installer.note));
+
+  let command = installer.commandBase;
+  let enrollment = null;
+
+  const identityId = String(lastIdentity?.id || '').trim();
+  const hasIdentity = Boolean(identityId && String(lastIdentity?.label || '').trim());
+
+  if (target === 'linux-image' && hasIdentity) {
+    const gwEnrollment = await prepareInstallEnrollment('gateway');
+    command = `${command} --pair-identity ${shellSingleQuote(gwEnrollment.identityLabel)} --pair-code ${shellSingleQuote(gwEnrollment.code)} --pair-code-hash ${shellSingleQuote(gwEnrollment.codeHash)}`;
+    enrollment = { gateway: gwEnrollment };
+    noteParts.push('Gateway auto-pair enrollment embedded.');
+  } else if (target === 'linux-image' && !hasIdentity) {
+    noteParts.push('Link an identity to embed gateway auto-pair enrollment.');
+  }
+
+  if (gatewayInstallIncludesNvr()) {
+    if (!targetInfo.supportsServices || target !== 'linux-image') {
+      throw new Error('NVR bootstrap is only available for Linux image target');
+    }
+    if (!hasIdentity) {
+      throw new Error('link an identity before including NVR bootstrap');
+    }
+
+    const zoneKeys = installZoneKeys();
+    if (zoneKeys.length === 0) {
+      throw new Error('join a zone before including NVR bootstrap');
+    }
+
+    const nvrEnrollment = await prepareInstallEnrollment('nvr');
+    const nvrCommand = buildNvrInstallCommand({
+      identityId,
+      enrollment: nvrEnrollment,
+      zoneKeys,
+      swarmPeers: ['127.0.0.1:4040'],
+      publicWsUrl: 'ws://127.0.0.1:8456/session',
+    });
+
+    command = `${command}
+
+# After gateway first boot (run on the gateway host)
+${nvrCommand}`;
+    enrollment = {
+      ...(enrollment || {}),
+      nvr: nvrEnrollment,
+    };
+    noteParts.push('NVR install + pairing bootstrap appended (post-boot host command).');
+  }
+
+  return {
+    target,
+    targetInfo,
+    installer,
+    command,
+    enrollment,
+    note: noteParts.join(' '),
+  };
+}
+
+
+async function downloadGatewayInstallerScript(installer) {
+  const scriptUrl = String(installer?.scriptUrl || '').trim();
+  if (!scriptUrl) throw new Error('missing script URL');
+
+  const res = await fetch(scriptUrl, { cache: 'no-store' });
+  if (!res.ok) {
+    throw new Error(`script download failed: HTTP ${res.status}`);
+  }
+
+  const content = await res.text();
+  const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+  const blobUrl = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = blobUrl;
+  a.download = String(installer?.downloadName || 'constitute-gateway-install-script.txt');
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+}
+
+function parseUdpPeer(endpoint) {
+  const raw = String(endpoint || '').trim();
+  if (!raw) return '';
+  let candidate = raw;
+  if (candidate.startsWith('udp://')) {
+    candidate = candidate.slice('udp://'.length);
+  }
+  if (!candidate.includes(':')) return '';
+  return candidate;
+}
+
+function gatewaySwarmPeerForRecord(record) {
+  const pk = String(record?.devicePk || record?.pk || '').trim();
+  if (!pk) return '';
+  const directory = Array.isArray(lastDirectory) ? lastDirectory : [];
+  const hit = directory.find((entry) => String(entry?.devicePk || '').trim() === pk);
+  if (!hit) return '';
+  return parseUdpPeer(hit?.swarm || '');
+}
+
+function installZoneKeys() {
+  const preferred = String(activeZoneKey || '').trim();
+  const zones = Array.isArray(lastZones) ? lastZones : [];
+  const keys = [];
+  if (preferred) keys.push(preferred);
+  for (const zone of zones) {
+    const key = String(zone?.key || '').trim();
+    if (key && !keys.includes(key)) keys.push(key);
+  }
+  return keys;
+}
+
+async function prepareNvrInstallContext(record) {
+  const installer = currentNvrInstaller();
+  if (!installer?.commandBase) throw new Error('no nvr installer configured');
+
+  const identityId = String(lastIdentity?.id || '').trim();
+  if (!identityId || !String(lastIdentity?.label || '').trim()) {
+    throw new Error('link an identity before installing NVR');
+  }
+
+  const gatewayHostPlatform = normalizeRole(record?.hostPlatform || record?.host_platform || record?.platform || '');
+  if (gatewayHostPlatform && gatewayHostPlatform !== 'linux' && gatewayHostPlatform !== 'fcos') {
+    throw new Error('selected gateway host platform does not support NVR service installation');
+  }
+
+  const gatewayPeer = gatewaySwarmPeerForRecord(record);
+  if (!gatewayPeer) throw new Error('gateway endpoint not discovered yet (wait for zone presence)');
+
+  const zones = installZoneKeys();
+  if (zones.length === 0) throw new Error('join a zone before installing NVR');
+
+  const enrollment = await prepareInstallEnrollment('nvr');
+
+  const gatewayHost = gatewayPeer.split(':')[0];
+  const defaultWs = gatewayHost ? `ws://${gatewayHost}:8456/session` : 'ws://127.0.0.1:8456/session';
+  const swarmPeers = [gatewayPeer, '127.0.0.1:4040'].filter((v, i, arr) => v && arr.indexOf(v) === i);
+
+  const command = buildNvrInstallCommand({
+    identityId,
+    enrollment,
+    zoneKeys: zones,
+    swarmPeers,
+    publicWsUrl: defaultWs,
+  });
+
+  return {
+    installer,
+    command,
+    enrollment,
+    gatewayPeer,
+    zones,
+  };
+}
+
+
+async function requestRemoteNvrInstall(record) {
+  const gatewayPk = String(record?.devicePk || record?.pk || '').trim();
+  if (!gatewayPk) throw new Error('gateway device pk missing');
+
+  const prepared = await prepareNvrInstallContext(record);
+  const identityId = String(lastIdentity?.id || '').trim();
+  if (!identityId) throw new Error('identity is not linked');
+
+  const gatewayHost = String(prepared.gatewayPeer || '').split(':')[0] || '';
+  const publicWsUrl = gatewayHost ? `ws://${gatewayHost}:8456/session` : 'ws://127.0.0.1:8456/session';
+
+  const payload = {
+    gatewayDevicePk: gatewayPk,
+    service: 'nvr',
+    action: 'install',
+    identityId,
+    pairIdentity: prepared.enrollment.identityLabel,
+    pairCode: prepared.enrollment.code,
+    pairCodeHash: prepared.enrollment.codeHash,
+    zone: String(prepared.zones?.[0] || ''),
+    zoneKeys: prepared.zones,
+    authorizedDevicePks: collectAuthorizedIdentityDevicePks(),
+    swarmPeers: [prepared.gatewayPeer, '127.0.0.1:4040'].filter((v, i, arr) => v && arr.indexOf(v) === i),
+    publicWsUrl,
+    allowUnsignedHelloMvp: true,
+    reolinkAutoprovision: true,
+    timeoutSecs: 900,
+  };
+
+  const response = await client.call('gateway.service.install', payload, { timeoutMs: 20000 });
+  const requestId = String(response?.requestId || '').trim();
+  if (requestId) {
+    pendingGatewayServiceInstalls.set(requestId, {
+      gatewayPk,
+      requestedAt: Date.now(),
+    });
+  }
+
+  return {
+    requestId,
+    enrollment: prepared.enrollment,
+  };
+}
+
+
+function updateGatewayInstallHint() {
+  const targetInfo = currentGatewayTargetInfo();
+  const installer = currentGatewayInstaller();
+
+  if (gatewayInstallDetectedPlatform) {
+    gatewayInstallDetectedPlatform.textContent = `Detected operator platform: ${operatorPlatformLabel()}.`;
+  }
+
+  if (gatewayInstallIncludeNvr) {
+    gatewayInstallIncludeNvr.disabled = !targetInfo.supportsServices;
+    if (!targetInfo.supportsServices) {
+      gatewayInstallIncludeNvr.checked = false;
+    }
+  }
+
+  if (!installer) {
+    setGatewayInstallStatus(
+      `No ${targetInfo.label} installer script is available for ${operatorPlatformLabel()} operators.`,
+      true,
+    );
+    return;
+  }
+
+  const supportNote = targetInfo.supportsServices
+    ? 'Target supports gateway-hosted services (including NVR).'
+    : 'Target does not support gateway-hosted NVR services.';
+  const includeNote = gatewayInstallIncludesNvr()
+    ? 'NVR install+pair bootstrap will be appended.'
+    : 'Enable the checkbox to append NVR install+pair bootstrap.';
+  const installerNote = installer.note ? `${installer.note} ` : '';
+  setGatewayInstallStatus(`${installer.commandBase} -- ${installerNote}${supportNote} ${includeNote}`);
 }
 
 function isGatewayRecord(rec) {
@@ -698,6 +1122,10 @@ function summarizeAppliance(rec, owned) {
   const role = normalizeRole(rec?.role || rec?.nodeType || rec?.type || '') || 'unknown';
   const service = normalizeRole(rec?.service || '') || 'none';
   const version = String(rec?.serviceVersion || rec?.service_version || '').trim();
+  const hostPlatform = normalizeRole(rec?.hostPlatform || rec?.host_platform || rec?.platform || '');
+  const releaseChannel = String(rec?.releaseChannel || rec?.release_channel || '').trim();
+  const releaseTrack = String(rec?.releaseTrack || rec?.release_track || '').trim();
+  const releaseBranch = String(rec?.releaseBranch || rec?.release_branch || '').trim();
   const updatedAt = Number(rec?.updatedAt || rec?.updated_at || rec?.ts || rec?.lastSeen || 0);
   return {
     pk,
@@ -705,9 +1133,22 @@ function summarizeAppliance(rec, owned) {
     role,
     service,
     version,
+    hostPlatform,
+    releaseChannel,
+    releaseTrack,
+    releaseBranch,
     updatedAt,
     owned,
   };
+}
+
+function formatReleaseMeta(channel, track, branch) {
+  const ch = String(channel || '').trim();
+  const tr = String(track || '').trim();
+  const br = String(branch || '').trim();
+  if (!ch && !tr && !br) return '';
+  const left = [ch, tr].filter(Boolean).join('/');
+  return br ? `${left || 'release'} @ ${br}` : (left || 'release');
 }
 
 async function ensureNvrAppEnabledFromRecord(record) {
@@ -814,10 +1255,14 @@ function renderApplianceList(identityDevices, swarmDevices) {
     const meta = document.createElement('div');
     const last = info.updatedAt ? new Date(info.updatedAt).toLocaleString() : 'n/a';
     const suffix = info.version ? ` (${info.version})` : '';
+    const host = info.hostPlatform ? ` • host ${info.hostPlatform}` : '';
+    const releaseMeta = formatReleaseMeta(info.releaseChannel, info.releaseTrack, info.releaseBranch);
+    const releaseLine = releaseMeta ? `<div class="itemMeta">release ${escapeHtml(releaseMeta)}</div>` : '';
     meta.innerHTML = `
       <div class="itemTitle">${escapeHtml(info.title)}</div>
       <div class="itemMeta">pk ${escapeHtml(info.pk.slice(0, 16))}…</div>
-      <div class="itemMeta">role ${escapeHtml(info.role)} • service ${escapeHtml(info.service)}${escapeHtml(suffix)}</div>
+      <div class="itemMeta">role ${escapeHtml(info.role)} • service ${escapeHtml(info.service)}${escapeHtml(suffix)}${escapeHtml(host)}</div>
+      ${releaseLine}
       <div class="itemMeta">${info.owned ? 'owned by this identity' : 'discovered in zone'} • updated ${escapeHtml(last)}</div>
     `;
 
@@ -835,19 +1280,43 @@ function renderApplianceList(identityDevices, swarmDevices) {
       };
       actions.appendChild(pair);
 
-      const installNvr = document.createElement('button');
-      installNvr.type = 'button';
-      installNvr.textContent = 'Copy NVR Install';
-      installNvr.onclick = async () => {
-        const installer = currentNvrInstaller();
-        try {
-          await navigator.clipboard.writeText(installer.command);
-          setGatewayInstallStatus('Copied NVR install command.', false);
-        } catch {
-          setGatewayInstallStatus('Could not copy NVR install command.', true);
-        }
-      };
-      actions.appendChild(installNvr);
+      const gatewaySupportsServices = info.hostPlatform
+        ? (info.hostPlatform === 'linux' || info.hostPlatform === 'fcos')
+        : true;
+      if (gatewaySupportsServices) {
+        const installNvr = document.createElement('button');
+        installNvr.type = 'button';
+        installNvr.textContent = 'Install NVR Service';
+        installNvr.onclick = async () => {
+          try {
+            setGatewayInstallStatus('Submitting NVR install request to gateway...');
+            const submitted = await requestRemoteNvrInstall(rec);
+            const until = submitted?.enrollment?.expiresAt
+              ? new Date(submitted.enrollment.expiresAt).toLocaleTimeString()
+              : '';
+            if (submitted?.requestId) {
+              setGatewayInstallStatus(
+                until
+                  ? `NVR install requested (request ${submitted.requestId.slice(0, 12)}...). Pair claim armed until ${until}.`
+                  : `NVR install requested (request ${submitted.requestId.slice(0, 12)}...).`,
+                false,
+              );
+            } else {
+              setGatewayInstallStatus('NVR install request submitted.', false);
+            }
+          } catch (err) {
+            setGatewayInstallStatus(`Could not submit NVR install request: ${String(err?.message || err)}`, true);
+          }
+        };
+        actions.appendChild(installNvr);
+      } else {
+        const unsupported = document.createElement('button');
+        unsupported.type = 'button';
+        unsupported.disabled = true;
+        unsupported.textContent = 'NVR Unsupported';
+        unsupported.title = 'Gateway-hosted services are currently supported on Linux image hosts only.';
+        actions.appendChild(unsupported);
+      }
     }
 
     if (isNvrRecord(rec)) {
@@ -1613,10 +2082,13 @@ function renderZones(list) {
         const role = String(e.role || '').trim();
         const serviceVersion = String(e.serviceVersion || '').trim();
         const roleLine = serviceVersion ? `${role || 'unknown'} (${serviceVersion})` : (role || 'unknown');
+        const releaseMeta = formatReleaseMeta(e.releaseChannel, e.releaseTrack, e.releaseBranch);
+        const releaseLine = releaseMeta ? `<div class="itemMeta">Release: ${escapeHtml(releaseMeta)}</div>` : '';
         row.innerHTML = `
           <div class="itemTitle">${escapeHtml(e.devicePk || '')}</div>
           <div class="itemMeta">Source: ${escapeHtml(sources)}</div>
           <div class="itemMeta">Role: ${escapeHtml(roleLine)}</div>
+          ${releaseLine}
           <div class="itemMeta">Nostr seen ${nostrSeen ? new Date(nostrSeen).toLocaleString() : 'n/a'}</div>
           <div class="itemMeta">Swarm seen ${swarmSeen ? new Date(swarmSeen).toLocaleString() : 'n/a'}</div>
         `;
@@ -1669,10 +2141,13 @@ function renderPeers(list) {
     const role = String(e.role || '').trim();
     const serviceVersion = String(e.serviceVersion || '').trim();
     const roleLine = serviceVersion ? `${role || 'unknown'} (${serviceVersion})` : (role || 'unknown');
+    const releaseMeta = formatReleaseMeta(e.releaseChannel, e.releaseTrack, e.releaseBranch);
+    const releaseLine = releaseMeta ? `<div class="itemMeta">Release: ${escapeHtml(releaseMeta)}</div>` : '';
     item.innerHTML = `
       <div class="itemTitle">${escapeHtml(e.devicePk || '')}</div>
       <div class="itemMeta">Source: ${escapeHtml(sources)}</div>
       <div class="itemMeta">Role: ${escapeHtml(roleLine)}</div>
+      ${releaseLine}
       <div class="itemMeta">Nostr seen ${nostrSeen ? new Date(nostrSeen).toLocaleString() : 'n/a'}</div>
       <div class="itemMeta">Swarm seen ${swarmSeen ? new Date(swarmSeen).toLocaleString() : 'n/a'}</div>
     `;
@@ -1935,34 +2410,40 @@ function wireUi() {
   }
 
   if (gatewayInstallPlatform) {
+    gatewayInstallPlatform.value = preferredGatewayInstallTarget();
     gatewayInstallPlatform.addEventListener('change', updateGatewayInstallHint);
-    updateGatewayInstallHint();
   }
+  if (gatewayInstallIncludeNvr) {
+    gatewayInstallIncludeNvr.addEventListener('change', updateGatewayInstallHint);
+  }
+  updateGatewayInstallHint();
 
   if (btnGatewayInstallCopy) {
     btnGatewayInstallCopy.onclick = async () => {
-      const installer = currentGatewayInstaller();
-      if (!installer) {
-        setGatewayInstallStatus('No install command available for this platform.', true);
-        return;
-      }
       try {
-        await navigator.clipboard.writeText(installer.command);
-        setGatewayInstallStatus('Copied gateway install command to clipboard.');
-      } catch {
-        setGatewayInstallStatus('Could not copy install command.', true);
+        const prepared = await prepareGatewayInstallContext();
+        await navigator.clipboard.writeText(prepared.command);
+        const suffix = prepared.note ? ` ${prepared.note}` : '';
+        setGatewayInstallStatus(`Copied ${prepared.targetInfo.label} command.${suffix}`);
+      } catch (err) {
+        setGatewayInstallStatus(`Could not prepare install command: ${String(err?.message || err)}`, true);
       }
     };
   }
 
   if (btnGatewayInstallOpen) {
-    btnGatewayInstallOpen.onclick = () => {
-      const installer = currentGatewayInstaller();
-      if (!installer?.scriptUrl) {
-        setGatewayInstallStatus('No script URL configured for this platform.', true);
-        return;
+    btnGatewayInstallOpen.onclick = async () => {
+      try {
+        const installer = currentGatewayInstaller();
+        if (!installer?.scriptUrl) {
+          setGatewayInstallStatus('No installer script URL configured for this target/operator combination.', true);
+          return;
+        }
+        await downloadGatewayInstallerScript(installer);
+        setGatewayInstallStatus(`Downloaded ${installer.downloadName || 'installer script'} for ${operatorPlatformLabel()} operator use.`);
+      } catch (err) {
+        setGatewayInstallStatus(`Script download failed: ${String(err?.message || err)}`, true);
       }
-      window.open(installer.scriptUrl, '_blank', 'noopener,noreferrer');
     };
   }
 
@@ -2170,6 +2651,9 @@ function startSharedRelayPipe(client, relayUrl) {
       if (evt?.type === 'swarm_signal') {
         if (swarm) swarm.onSignal(evt).catch(() => {});
       }
+      if (evt?.type === 'gateway_service_install_status') {
+        handleGatewayServiceInstallStatusEvent(evt);
+      }
       if (evt?.type === 'notify') refreshAll().catch(() => {});
     }
   });
@@ -2227,11 +2711,3 @@ function startSharedRelayPipe(client, relayUrl) {
     }
   }, 10000);
 })();
-
-
-
-
-
-
-
-
