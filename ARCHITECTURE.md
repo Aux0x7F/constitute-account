@@ -195,8 +195,10 @@ Current alignment slice:
 - DHT request plumbing (`swarm_dht_get`, `swarm_dht_put`) and local DHT record handling
 - relay ingest hardening (signature verification + timestamp/TTL window checks before mutation)
 - discovery/presence role metadata parity (`role`, `serviceVersion`)
+- service-advertised app module hints (`uiRepo`, `uiRef`, optional `uiManifestUrl`) consumed before static role maps
 
 Exit criteria for this slice:
 - web emits and consumes gateway canonical envelopes without regressions
 - invalid/expired relay envelopes are ignored consistently
 - docs reflect current parity state and known remaining gaps
+

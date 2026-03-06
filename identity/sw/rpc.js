@@ -56,10 +56,61 @@ const PAIR_OFFER_KEY = 'pairOffer';
 const PAIR_CLAIM_ACTIVE_KEY = 'pairClaimActive';
 const PAIR_OFFER_TTL_MS = 10 * 60 * 1000;
 const PAIR_CLAIM_TTL_MS = 2 * 60 * 1000;
+const PAIR_CLAIM_MAX_TTL_MS = 10 * 60 * 1000;
 
 async function pairCodeHash(identityLabel, code) {
   return await sha256B64Url(`${String(identityLabel || '').trim()}|${String(code || '').trim()}`);
 }
+
+
+function clampPairClaimTtl(ttlMs) {
+  const raw = Number(ttlMs || PAIR_CLAIM_TTL_MS);
+  if (!Number.isFinite(raw)) return PAIR_CLAIM_TTL_MS;
+  return Math.max(30 * 1000, Math.min(raw, PAIR_CLAIM_MAX_TTL_MS));
+}
+
+async function activatePairClaim(sw, ident, code, options = {}) {
+  const autoApprove = !!options.autoApprove;
+  const publishClaim = options.publishClaim !== false;
+  const ttlMs = clampPairClaimTtl(options.ttlMs);
+  const now = Date.now();
+
+  const dev = await ensureDevice();
+  const codeHash = await pairCodeHash(ident.label, code);
+  const claimId = makeSwarmRequestId('claim');
+
+  await kvSet(PAIR_CLAIM_ACTIVE_KEY, {
+    identityLabel: ident.label,
+    codeHash,
+    claimId,
+    autoApprove,
+    createdAt: now,
+    expiresAt: now + ttlMs,
+  });
+
+  if (publishClaim) {
+    const zones = await listZones(ident || {}).catch(() => []);
+    await publishAppEvent(sw, {
+      type: 'pair_claim',
+      identity: ident.label,
+      codeHash,
+      claimId,
+      fromPk: dev.nostr.pk,
+      ts: now,
+      ttl: 120,
+    }, pairingTags(ident.label, zones));
+  }
+
+  return {
+    code,
+    codeHash,
+    claimId,
+    identityLabel: ident.label,
+    autoApprove,
+    expiresAt: now + ttlMs,
+  };
+}
+
 
 export async function handleRpc(sw, method, params, getRelayState, setRelayState) {
   const LIST_MAX_AGE_MS = 3 * 60 * 1000;
@@ -420,6 +471,76 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
     return { ok: true };
   }
 
+  if (method === 'gateway.service.install') {
+    const ident = await getIdentity();
+    if (!ident?.linked || !ident?.id || !ident?.label) throw new Error('no linked identity');
+
+    const targetGatewayPk = String(params?.gatewayDevicePk || params?.toDevicePk || '').trim();
+    if (!targetGatewayPk) throw new Error('missing gatewayDevicePk');
+
+    const requestId = String(params?.requestId || '').trim() || makeSwarmRequestId('gw-svc');
+    const service = String(params?.service || 'nvr').trim().toLowerCase() || 'nvr';
+    const action = String(params?.action || 'install').trim().toLowerCase() || 'install';
+    if (service !== 'nvr' || action !== 'install') throw new Error('only nvr install is supported');
+
+    const explicitZones = Array.isArray(params?.zoneKeys)
+      ? params.zoneKeys.map((z) => String(z || '').trim()).filter(Boolean)
+      : [];
+    const explicitZone = String(params?.zone || '').trim();
+
+    const zones = await listZones(ident || {}).catch(() => []);
+    const fallbackZones = zones.map((z) => String(z?.key || '').trim()).filter(Boolean);
+
+    const zoneKeys = [];
+    for (const z of [...explicitZones, explicitZone, ...fallbackZones]) {
+      if (!z || zoneKeys.includes(z)) continue;
+      zoneKeys.push(z);
+    }
+
+    const authorizedDevicePks = Array.isArray(params?.authorizedDevicePks)
+      ? params.authorizedDevicePks.map((v) => String(v || '').trim()).filter(Boolean)
+      : [];
+    const swarmPeers = Array.isArray(params?.swarmPeers)
+      ? params.swarmPeers.map((v) => String(v || '').trim()).filter(Boolean)
+      : [];
+
+    const payload = {
+      type: 'gateway_service_install_request',
+      requestId,
+      toDevicePk: targetGatewayPk,
+      service,
+      action,
+      identityId: String(ident.id || '').trim(),
+      pairIdentity: String(params?.pairIdentity || '').trim(),
+      pairCode: String(params?.pairCode || '').trim(),
+      pairCodeHash: String(params?.pairCodeHash || '').trim(),
+      zone: zoneKeys[0] || '',
+      zoneKeys,
+      authorizedDevicePks,
+      swarmPeers,
+      publicWsUrl: String(params?.publicWsUrl || '').trim(),
+      allowUnsignedHelloMvp: params?.allowUnsignedHelloMvp !== false,
+      reolinkAutoprovision: params?.reolinkAutoprovision !== false,
+      reolinkUsername: String(params?.reolinkUsername || '').trim(),
+      reolinkPassword: String(params?.reolinkPassword || '').trim(),
+      reolinkDesiredPassword: String(params?.reolinkDesiredPassword || '').trim(),
+      reolinkGeneratePassword: !!params?.reolinkGeneratePassword,
+      reolinkHintIp: String(params?.reolinkHintIp || '').trim(),
+      storageRoot: String(params?.storageRoot || '').trim(),
+      timeoutSecs: Number(params?.timeoutSecs || 0) || undefined,
+      ts: Date.now(),
+      ttl: 300,
+    };
+
+    if (!payload.pairIdentity || !payload.pairCode || !payload.pairCodeHash) {
+      throw new Error('missing pairIdentity/pairCode/pairCodeHash');
+    }
+
+    const tagZones = zoneKeys.map((key) => ({ key }));
+    await publishAppEvent(sw, payload, pairingTags(ident.label, tagZones, targetGatewayPk));
+    return { ok: true, requestId, targetGatewayPk, service, action };
+  }
+
   if (method === 'identity.create') {
     // REQUIRED: must not already have a linked identity on this device
     const existing = await getIdentity();
@@ -540,32 +661,47 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
     const code = String(params?.code || '').trim();
     if (!code) throw new Error('code required');
 
-    const dev = await ensureDevice();
-    const codeHash = await pairCodeHash(ident.label, code);
-    const claimId = makeSwarmRequestId('claim');
-    const zones = await listZones(ident || {}).catch(() => []);
-
-    await kvSet(PAIR_CLAIM_ACTIVE_KEY, {
-      identityLabel: ident.label,
-      codeHash,
-      claimId,
-      createdAt: Date.now(),
-      expiresAt: Date.now() + PAIR_CLAIM_TTL_MS,
+    const claim = await activatePairClaim(sw, ident, code, {
+      ttlMs: params?.ttlMs,
+      autoApprove: !!params?.autoApprove,
+      publishClaim: params?.publishClaim !== false,
     });
 
-    await publishAppEvent(sw, {
-      type: 'pair_claim',
-      identity: ident.label,
-      codeHash,
-      claimId,
-      fromPk: dev.nostr.pk,
-      ts: Date.now(),
-      ttl: 120,
-    }, pairingTags(ident.label, zones));
-
-    status(sw, 'pair claim sent');
+    status(sw, claim.autoApprove ? 'pair claim sent (auto-approve armed)' : 'pair claim sent');
     pokeUi(sw);
-    return { ok: true, claimId, codeHash };
+    return { ok: true, ...claim };
+  }
+
+  if (method === 'pairing.prepareInstall') {
+    const ident = await getIdentity();
+    if (!ident?.linked || !ident?.label) throw new Error('no linked identity on this device');
+
+    const code = makePairCode();
+    const claim = await activatePairClaim(sw, ident, code, {
+      ttlMs: params?.ttlMs || (6 * 60 * 1000),
+      autoApprove: params?.autoApprove !== false,
+      publishClaim: false,
+    });
+
+    const target = String(params?.target || params?.installType || 'device').trim() || 'device';
+    status(sw, `${target} install pairing armed`);
+    pokeUi(sw);
+    return { ok: true, target, ...claim };
+  }
+
+  if (method === 'pairing.prepareGatewayInstall') {
+    const target = String(params?.target || 'gateway').trim() || 'gateway';
+    return await handleRpc(
+      sw,
+      'pairing.prepareInstall',
+      {
+        ttlMs: params?.ttlMs,
+        autoApprove: params?.autoApprove,
+        target,
+      },
+      getRelayState,
+      setRelayState,
+    );
   }
 
   // --- notifications ---
