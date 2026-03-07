@@ -64,7 +64,6 @@
   <nav class="drawerNav">
     <button class="navbtn" data-activity="home">Home</button>
     <button class="navbtn" data-activity="settings">Settings</button>
-    <button class="navbtn" data-activity="onboarding">Onboarding</button>
   </nav>
 
   <div class="drawerFooter small muted">
@@ -149,7 +148,7 @@
       <div class="card">
         <div class="cardTitle">Add Gateway</div>
         <div class="small muted">Existing: use pairing flow in <strong>Settings → Pairing</strong>, then approve on your owner device.</div>
-        <div class="small muted" style="margin-top:.35rem;">Install: download the native installer utility for this operator platform. The utility handles target selection (Linux image or Windows service), release/dev mode, and pairing bootstrap.</div>
+        <div class="small muted" style="margin-top:.35rem;">Install: download the native installer utility for this operator platform. The utility installs/updates the gateway service from release artifacts (no OS image/media generation).</div>
         <div class="row" style="margin-top:.6rem;">
           <button id="btnGatewayInstallOpen" type="button">Download Installer Utility</button>
         </div>
@@ -208,6 +207,17 @@
           <button id="btnClaimPairCode" type="button">Claim Code</button>
         </div>
         <div id="pairCodeStatus" class="small muted" style="margin-top:.5rem;"></div>
+      </div>
+
+      <div class="card" style="margin-top:.75rem;">
+        <div class="cardTitle">Generate Pairing Code (This Device)</div>
+        <div class="small muted">Use this on a new gateway/device when you need a fresh code. The owner enters that code above in <strong>Add Device</strong>.</div>
+        <div class="row" style="margin-top:.5rem;">
+          <input id="pairOfferIdentityInput" type="text" placeholder="Identity label (for owner device)" />
+          <input id="pairOfferDeviceInput" type="text" placeholder="This device label" />
+          <button id="btnGeneratePairCode" type="button">Generate Code</button>
+        </div>
+        <div id="pairOfferStatus" class="small muted" style="margin-top:.5rem;"></div>
       </div>
 
       <h3>Pending requests</h3>

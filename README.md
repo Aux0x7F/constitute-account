@@ -26,7 +26,7 @@ Browser-native identity and discovery client for the Constitution ecosystem.
 - Canonical app-channel plumbing for `swarm_record_request` and `swarm_dht_get/put`
 - Manifest-driven app auto-enable from service records (`uiRepo` / `uiRef` / `uiManifestUrl`)
 - Home app launcher cards for enabled capabilities
-- Appliances tab for gateway/NVR inventory, control-panel launch wiring, gateway install command generation, and remote NVR service install requests
+- Appliances tab for gateway/NVR inventory, control-panel launch wiring, gateway installer utility download, and remote NVR service install requests
 
 ## Project Layout
 - `app.js`: UI state, routing, and peer presentation
@@ -48,9 +48,8 @@ See `ARCHITECTURE.md` for system design and convergence direction.
 - Pair additional devices from notifications / pairing flow
 - Manage zones and discovered peers in `Settings > Peers`
 - Use `Settings > Appliances` to download the installer utility for your operator platform
-- In the installer utility, choose target (`Linux Image` or `Windows Service`), release or dev mode, and optional pairing bootstrap
-- Linux-image target supports gateway-hosted services such as NVR; Windows-service target is relay-only in this iteration
-- For paired Linux-image gateways, use `Install NVR Service` in appliance actions to trigger host-side NVR install remotely
+- In the installer utility, run release install/update for the current operator platform (service install only)
+- For paired Linux gateways, use `Install NVR Service` in appliance actions to trigger host-side NVR install remotely
 - Use `Settings > Appliances` to pair existing gateways and open NVR control panel surfaces
 - Manage optional app repos in `Settings > Apps` and launch enabled apps from Home
 - If identity/device prerequisites are missing, UI routes to onboarding
