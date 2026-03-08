@@ -541,6 +541,51 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
     return { ok: true, requestId, targetGatewayPk, service, action };
   }
 
+  if (method === 'gateway.zones.sync') {
+    const ident = await getIdentity();
+    if (!ident?.linked || !ident?.id || !ident?.label) throw new Error('no linked identity');
+
+    const targetGatewayPk = String(params?.gatewayDevicePk || params?.toDevicePk || '').trim();
+    if (!targetGatewayPk) throw new Error('missing gatewayDevicePk');
+
+    const requestId = String(params?.requestId || '').trim() || makeSwarmRequestId('gw-zone');
+
+    const explicitZones = Array.isArray(params?.zoneKeys)
+      ? params.zoneKeys.map((z) => String(z || '').trim()).filter(Boolean)
+      : [];
+    const explicitZone = String(params?.zone || '').trim();
+
+    const zones = await listZones(ident || {}).catch(() => []);
+    const fallbackZones = zones.map((z) => String(z?.key || '').trim()).filter(Boolean);
+
+    const zoneKeys = [];
+    for (const z of [...explicitZones, explicitZone, ...fallbackZones]) {
+      if (!z || zoneKeys.includes(z)) continue;
+      zoneKeys.push(z);
+    }
+    if (zoneKeys.length === 0) throw new Error('at least one identity zone is required');
+
+    const extraZoneKeys = Array.isArray(params?.extraZoneKeys)
+      ? params.extraZoneKeys.map((z) => String(z || '').trim()).filter(Boolean)
+      : [];
+
+    const payload = {
+      type: 'gateway_zone_sync_request',
+      requestId,
+      toDevicePk: targetGatewayPk,
+      identityId: String(ident.id || '').trim(),
+      zone: zoneKeys[0] || '',
+      zoneKeys,
+      extraZoneKeys,
+      ts: Date.now(),
+      ttl: 300,
+    };
+
+    const tagZones = zoneKeys.map((key) => ({ key }));
+    await publishAppEvent(sw, payload, pairingTags(ident.label, tagZones, targetGatewayPk));
+    return { ok: true, requestId, targetGatewayPk, zoneKeys, extraZoneKeys };
+  }
+
   if (method === 'identity.create') {
     // REQUIRED: must not already have a linked identity on this device
     const existing = await getIdentity();
