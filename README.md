@@ -54,6 +54,12 @@ See `ARCHITECTURE.md` for system design and convergence direction.
 - Manage optional app repos in `Settings > Apps` and launch enabled apps from Home
 - If identity/device prerequisites are missing, UI routes to onboarding
 
+## Update Durability
+- Browser app updates do not reset identity/device state by design.
+- Service Worker state remains in IndexedDB (`constitute_db`) and now mirrors to a CacheStorage backup lane for recovery.
+- On read, if IDB misses/fails, backup cache is used and state is rehydrated into IDB.
+- User state can still be lost by explicit browser site-data clearing; that is outside app control.
+
 ## Roadmap Snapshot
 - P0: converge web behavior to frozen gateway protocol contracts
 - P1: validate browser <-> gateway integration paths end-to-end
