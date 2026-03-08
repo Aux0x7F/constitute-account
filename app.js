@@ -52,8 +52,8 @@ const pairingEmpty = document.getElementById('pairingEmpty');
 const pairCodeInput = document.getElementById('pairCodeInput');
 const btnClaimPairCode = document.getElementById('btnClaimPairCode');
 const pairCodeStatus = document.getElementById('pairCodeStatus');
-const pairOfferIdentityInput = document.getElementById('pairOfferIdentityInput');
 const pairOfferDeviceInput = document.getElementById('pairOfferDeviceInput');
+const pairOfferCard = document.getElementById('pairOfferCard');
 const btnGeneratePairCode = document.getElementById('btnGeneratePairCode');
 const pairOfferStatus = document.getElementById('pairOfferStatus');
 
@@ -2150,14 +2150,29 @@ function ensureOnboardingState(ident) {
   }
 }
 
-function syncPairOfferDefaults(ident, st, myLabel) {
-  if (pairOfferIdentityInput && !String(pairOfferIdentityInput.value || '').trim()) {
-    pairOfferIdentityInput.value = String(ident?.label || '').trim();
+function syncPairOfferDefaults(_ident, _st, _myLabel) {
+  // Keep this field empty by default; operator should set a label for the new device.
+  if (pairOfferDeviceInput) {
+    pairOfferDeviceInput.placeholder = 'New device label';
   }
+}
 
-  if (pairOfferDeviceInput && !String(pairOfferDeviceInput.value || '').trim()) {
-    const fallback = String(myLabel?.label || st?.did || '').trim();
-    if (fallback) pairOfferDeviceInput.value = fallback;
+function updatePairOfferAvailability(ident) {
+  const linked = Boolean(ident?.linked && String(ident?.id || '').trim());
+  if (pairOfferCard) {
+    pairOfferCard.classList.toggle('muted', linked);
+  }
+  if (pairOfferDeviceInput) {
+    pairOfferDeviceInput.disabled = linked;
+  }
+  if (btnGeneratePairCode) {
+    btnGeneratePairCode.disabled = linked;
+    btnGeneratePairCode.title = linked
+      ? 'Generate codes on the new device during onboarding.'
+      : '';
+  }
+  if (linked) {
+    setPairOfferStatus('Generate pairing code is only used on the new device. On owner devices, use Add Device to claim and approve.', false);
   }
 }
 
@@ -2206,6 +2221,7 @@ async function refreshAll() {
 
   deviceLabel.value = myLabel?.label || '';
   syncPairOfferDefaults(ident, st, myLabel);
+  updatePairOfferAvailability(ident);
 
   renderDeviceList(ident?.devices || []);
   renderBlockedList(blocked || []);
@@ -2386,15 +2402,19 @@ function wireUi() {
 
   if (btnGeneratePairCode) {
     btnGeneratePairCode.onclick = async () => {
-      const identityLabel = String(pairOfferIdentityInput?.value || '').trim();
+      const identityLabel = String(lastIdentity?.label || '').trim();
       const deviceLabel = String(pairOfferDeviceInput?.value || '').trim();
 
+      if (lastIdentity?.linked) {
+        setPairOfferStatus('Generate pairing code is only used on the new device. Use Add Device here to claim and approve.', true);
+        return;
+      }
       if (!identityLabel) {
-        setPairOfferStatus('Identity label is required to generate a pairing code.', true);
+        setPairOfferStatus('No linked identity found on this device.', true);
         return;
       }
       if (!deviceLabel) {
-        setPairOfferStatus('Device label is required to generate a pairing code.', true);
+        setPairOfferStatus('New device label is required to generate a pairing code.', true);
         return;
       }
 
@@ -2410,7 +2430,7 @@ function wireUi() {
         }
 
         if (code) {
-          setPairOfferStatus(`Generated pairing code: ${code}. Enter this code on the owner device, then approve the request.`);
+          setPairOfferStatus(`Generated pairing code: ${code}. Enter this code on the owner device in Add Device, then approve the request.`);
         } else {
           setPairOfferStatus('Pair request sent. Wait for owner claim and approval.');
         }

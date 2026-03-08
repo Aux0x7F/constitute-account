@@ -209,12 +209,11 @@
         <div id="pairCodeStatus" class="small muted" style="margin-top:.5rem;"></div>
       </div>
 
-      <div class="card" style="margin-top:.75rem;">
-        <div class="cardTitle">Generate Pairing Code (This Device)</div>
-        <div class="small muted">Use this on a new gateway/device when you need a fresh code. The owner enters that code above in <strong>Add Device</strong>.</div>
+      <div id="pairOfferCard" class="card" style="margin-top:.75rem;">
+        <div class="cardTitle">Prepare New Device Pairing Code</div>
+        <div class="small muted">Create a code for the device being added. On the owner device, claim it in <strong>Add Device</strong>.</div>
         <div class="row" style="margin-top:.5rem;">
-          <input id="pairOfferIdentityInput" type="text" placeholder="Identity label (for owner device)" />
-          <input id="pairOfferDeviceInput" type="text" placeholder="This device label" />
+          <input id="pairOfferDeviceInput" type="text" placeholder="New device label" />
           <button id="btnGeneratePairCode" type="button">Generate Code</button>
         </div>
         <div id="pairOfferStatus" class="small muted" style="margin-top:.5rem;"></div>
