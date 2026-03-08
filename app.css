@@ -145,6 +145,26 @@ button:disabled{opacity:0.5; cursor:not-allowed}
   word-break:break-word;
 }
 .itemActions{display:flex; gap:0.4rem; align-items:center; flex-wrap:wrap}
+.inlineLabelInput{
+  width:clamp(160px, 28vw, 260px);
+  margin:0;
+  padding:0.35rem 0.5rem;
+  font-size:0.85rem;
+}
+.freshnessDot{
+  display:inline-block;
+  width:0.55rem;
+  height:0.55rem;
+  border-radius:50%;
+  margin-right:0.4rem;
+  vertical-align:middle;
+  box-shadow:0 0 0 1px rgba(255,255,255,0.12);
+}
+.freshness-live{background:rgba(109,242,198,0.95)}
+.freshness-recent{background:rgba(150,220,255,0.92)}
+.freshness-stale{background:rgba(255,196,110,0.92)}
+.freshness-offline{background:rgba(255,102,102,0.9)}
+.freshness-unknown{background:rgba(255,255,255,0.35)}
 .danger{border-color:rgba(255,77,77,0.4); color:#ffd1d1}
 .ok{border-color:rgba(76,255,154,0.35); color:#c6ffe2}
 .warn{color:#ffd1d1}

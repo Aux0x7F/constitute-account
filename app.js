@@ -163,6 +163,7 @@ const GATEWAY_RELEASES_API = 'https://api.github.com/repos/Aux0x7F/constitute-ga
 const gatewayUtilityAssetUrlCache = new Map(); // asset -> { url, tag, prerelease }
 let gatewayReleasesCache = null;
 let preparedGatewayInstall = null;
+const APPLIANCE_DISCOVERY_MAX_AGE_MS = 60 * 60 * 1000;
 
 function currentGatewayUtilityDownloadInfo() {
   const platform = currentOperatorPlatform();
@@ -1136,6 +1137,14 @@ function ownedPkSet(identityDevices) {
   );
 }
 
+
+function applianceSeenAt(rec) {
+  const pk = String(rec?.devicePk || rec?.pk || '').trim();
+  const nostrSeen = Number(rec?.updatedAt || rec?.updated_at || rec?.ts || rec?.lastSeen || 0);
+  const swarmSeen = (swarm && pk) ? Number(swarm.getSwarmSeen(pk) || 0) : 0;
+  return Math.max(0, nostrSeen, swarmSeen);
+}
+
 function summarizeAppliance(rec, owned) {
   const pk = String(rec?.devicePk || rec?.pk || '').trim();
   const label = String(rec?.deviceLabel || rec?.label || '').trim();
@@ -1160,6 +1169,30 @@ function summarizeAppliance(rec, owned) {
     updatedAt,
     owned,
   };
+}
+
+
+function formatAgeShort(ts) {
+  const at = Number(ts || 0);
+  if (!at) return 'unknown';
+  const ageSec = Math.max(0, Math.floor((Date.now() - at) / 1000));
+  if (ageSec < 60) return `${ageSec}s ago`;
+  const ageMin = Math.floor(ageSec / 60);
+  if (ageMin < 60) return `${ageMin}m ago`;
+  const ageHr = Math.floor(ageMin / 60);
+  if (ageHr < 24) return `${ageHr}h ago`;
+  const ageDay = Math.floor(ageHr / 24);
+  return `${ageDay}d ago`;
+}
+
+function applianceFreshness(updatedAt) {
+  const at = Number(updatedAt || 0);
+  if (!at) return { label: 'unknown', css: 'freshness-unknown' };
+  const ageMs = Math.max(0, Date.now() - at);
+  if (ageMs <= 2 * 60 * 1000) return { label: 'live', css: 'freshness-live' };
+  if (ageMs <= 15 * 60 * 1000) return { label: 'recent', css: 'freshness-recent' };
+  if (ageMs <= 2 * 60 * 60 * 1000) return { label: 'stale', css: 'freshness-stale' };
+  return { label: 'offline', css: 'freshness-offline' };
 }
 
 function formatReleaseMeta(channel, track, branch) {
@@ -1248,6 +1281,11 @@ function renderApplianceList(identityDevices, swarmDevices) {
     const pk = String(rec?.devicePk || rec?.pk || '').trim();
     if (!pk || seen.has(pk)) continue;
     if (!(isGatewayRecord(rec) || isNvrRecord(rec))) continue;
+    const ownedRec = owned.has(pk);
+    const seenAt = applianceSeenAt(rec);
+    const ageMs = seenAt ? Math.max(0, Date.now() - seenAt) : Number.POSITIVE_INFINITY;
+    // Keep owned appliances visible even if stale; hide very old unowned discovery rows.
+    if (!ownedRec && ageMs > APPLIANCE_DISCOVERY_MAX_AGE_MS) continue;
     seen.add(pk);
     recs.push(rec);
   }
@@ -1261,19 +1299,21 @@ function renderApplianceList(identityDevices, swarmDevices) {
   }
 
   recs.sort((a, b) => {
-    const aa = summarizeAppliance(a, owned.has(String(a?.devicePk || a?.pk || '').trim()));
-    const bb = summarizeAppliance(b, owned.has(String(b?.devicePk || b?.pk || '').trim()));
-    return Number(bb.updatedAt || 0) - Number(aa.updatedAt || 0);
+    const aa = applianceSeenAt(a);
+    const bb = applianceSeenAt(b);
+    return Number(bb || 0) - Number(aa || 0);
   });
 
   for (const rec of recs) {
     const info = summarizeAppliance(rec, owned.has(String(rec?.devicePk || rec?.pk || '').trim()));
+    const seenAt = applianceSeenAt(rec);
 
     const item = document.createElement('div');
     item.className = 'item';
 
     const meta = document.createElement('div');
-    const last = info.updatedAt ? new Date(info.updatedAt).toLocaleString() : 'n/a';
+    const freshness = applianceFreshness(seenAt);
+    const last = seenAt ? new Date(seenAt).toLocaleString() : 'n/a';
     const suffix = info.version ? ` (${info.version})` : '';
     const host = info.hostPlatform ? ` • host ${info.hostPlatform}` : '';
     const releaseMeta = formatReleaseMeta(info.releaseChannel, info.releaseTrack, info.releaseBranch);
@@ -1283,6 +1323,7 @@ function renderApplianceList(identityDevices, swarmDevices) {
       <div class="itemMeta">pk ${escapeHtml(info.pk.slice(0, 16))}…</div>
       <div class="itemMeta">role ${escapeHtml(info.role)} • service ${escapeHtml(info.service)}${escapeHtml(suffix)}${escapeHtml(host)}</div>
       ${releaseLine}
+      <div class="itemMeta"><span class="freshnessDot ${escapeHtml(freshness.css)}" title="${escapeHtml(last)}"></span>${escapeHtml(freshness.label)} • ${escapeHtml(formatAgeShort(seenAt))}</div>
       <div class="itemMeta">${info.owned ? 'owned by this identity' : 'discovered in zone'} • updated ${escapeHtml(last)}</div>
     `;
 
@@ -1290,15 +1331,17 @@ function renderApplianceList(identityDevices, swarmDevices) {
     actions.className = 'itemActions';
 
     if (isGatewayRecord(rec)) {
-      const pair = document.createElement('button');
-      pair.type = 'button';
-      pair.textContent = 'Pair Existing Gateway';
-      pair.onclick = () => {
-        showActivity('settings');
-        setSettingsTab('pairing');
-        setPairCodeStatus('Enter the pairing code shown by the gateway installer utility.');
-      };
-      actions.appendChild(pair);
+      if (!info.owned) {
+        const pair = document.createElement('button');
+        pair.type = 'button';
+        pair.textContent = 'Pair Existing Gateway';
+        pair.onclick = () => {
+          showActivity('settings');
+          setSettingsTab('pairing');
+          setPairCodeStatus('Enter the pairing code shown by the gateway installer utility.');
+        };
+        actions.appendChild(pair);
+      }
 
       const configureZones = document.createElement('button');
       configureZones.type = 'button';
@@ -1338,27 +1381,32 @@ function renderApplianceList(identityDevices, swarmDevices) {
         const installNvr = document.createElement('button');
         installNvr.type = 'button';
         installNvr.textContent = 'Install NVR Service';
-        installNvr.onclick = async () => {
-          try {
-            setGatewayInstallStatus('Submitting NVR install request to gateway...');
-            const submitted = await requestRemoteNvrInstall(rec);
-            const until = submitted?.enrollment?.expiresAt
-              ? new Date(submitted.enrollment.expiresAt).toLocaleTimeString()
-              : '';
-            if (submitted?.requestId) {
-              setGatewayInstallStatus(
-                until
-                  ? `NVR install requested (request ${submitted.requestId.slice(0, 12)}...). Pair claim armed until ${until}.`
-                  : `NVR install requested (request ${submitted.requestId.slice(0, 12)}...).`,
-                false,
-              );
-            } else {
-              setGatewayInstallStatus('NVR install request submitted.', false);
+        if (!info.owned) {
+          installNvr.disabled = true;
+          installNvr.title = 'Pair this gateway to your identity before installing services.';
+        } else {
+          installNvr.onclick = async () => {
+            try {
+              setGatewayInstallStatus('Submitting NVR install request to gateway...');
+              const submitted = await requestRemoteNvrInstall(rec);
+              const until = submitted?.enrollment?.expiresAt
+                ? new Date(submitted.enrollment.expiresAt).toLocaleTimeString()
+                : '';
+              if (submitted?.requestId) {
+                setGatewayInstallStatus(
+                  until
+                    ? `NVR install requested (request ${submitted.requestId.slice(0, 12)}...). Pair claim armed until ${until}.`
+                    : `NVR install requested (request ${submitted.requestId.slice(0, 12)}...).`,
+                  false,
+                );
+              } else {
+                setGatewayInstallStatus('NVR install request submitted.', false);
+              }
+            } catch (err) {
+              setGatewayInstallStatus(`Could not submit NVR install request: ${String(err?.message || err)}`, true);
             }
-          } catch (err) {
-            setGatewayInstallStatus(`Could not submit NVR install request: ${String(err?.message || err)}`, true);
-          }
-        };
+          };
+        }
         actions.appendChild(installNvr);
       } else {
         const unsupported = document.createElement('button');
@@ -2158,6 +2206,40 @@ function renderDeviceList(devs) {
 
     const actions = document.createElement('div');
     actions.className = 'itemActions';
+
+    const labelInput = document.createElement('input');
+    labelInput.type = 'text';
+    labelInput.className = 'inlineLabelInput';
+    labelInput.value = String(d0?.label || '');
+    labelInput.placeholder = 'New device label';
+    labelInput.setAttribute('aria-label', `Label for ${String(d0?.pk || '').slice(0, 12)}`);
+    actions.appendChild(labelInput);
+
+    const btnSave = document.createElement('button');
+    btnSave.type = 'button';
+    btnSave.textContent = 'Save Label';
+    btnSave.onclick = async () => {
+      const next = String(labelInput.value || '').trim();
+      if (!next) return;
+      btnSave.disabled = true;
+      const original = btnSave.textContent;
+      btnSave.textContent = 'Saving…';
+      try {
+        const selfPk = String(lastDeviceState?.pk || '').trim();
+        if (d0?.pk && d0.pk === selfPk) {
+          await client.call('device.setLabel', { label: next }, { timeoutMs: 20000 });
+        } else {
+          await client.call('devices.setLabel', { pk: d0?.pk || '', label: next }, { timeoutMs: 20000 });
+        }
+        await refreshAll();
+      } catch (e) {
+        console.error(e);
+      } finally {
+        btnSave.disabled = false;
+        btnSave.textContent = original;
+      }
+    };
+    actions.appendChild(btnSave);
 
     if (d0?.pk) {
       const btnRevoke = document.createElement('button');

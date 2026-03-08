@@ -214,6 +214,42 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
     return { ok: true };
   }
 
+
+  if (method === 'devices.setLabel') {
+    const pk = String(params?.pk || '').trim();
+    const label = String(params?.label || '').trim();
+    if (!pk) throw new Error('missing pk');
+    if (!label) throw new Error('missing label');
+
+    const ident = await getIdentity();
+    if (!ident?.linked || !ident?.label) throw new Error('identity not linked');
+
+    ident.devices = Array.isArray(ident.devices) ? ident.devices : [];
+    const target = ident.devices.find((d) => String(d?.pk || '').trim() === pk);
+    if (!target) throw new Error('device not found in identity');
+
+    target.label = label;
+    const targetDid = String(target.did || '').trim();
+    await setIdentity(ident);
+
+    const dev = await ensureDevice();
+    await publishAppEvent(sw, {
+      type: 'device_label_update',
+      identity: ident.label,
+      devicePk: pk,
+      deviceDid: targetDid,
+      deviceLabel: label,
+    }, [['i', ident.label]]);
+
+    // Keep the local mirrored label in sync when editing this device from the known-devices list.
+    if (pk === String(dev?.nostr?.pk || '').trim()) {
+      await setThisDeviceLabel(label);
+    }
+
+    pokeUi(sw);
+    return { ok: true };
+  }
+
   // --- profile ---
   if (method === 'profile.get') return await getProfile();
   if (method === 'profile.set') {
