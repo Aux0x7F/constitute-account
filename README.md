@@ -48,7 +48,8 @@ See `ARCHITECTURE.md` for system design and convergence direction.
 - Pair additional devices from notifications / pairing flow
 - Manage zones and discovered peers in `Settings > Peers`
 - Use `Settings > Appliances` to download the installer utility for your operator platform
-- In the installer utility, run release install/update for the current operator platform (service install only)
+- For CLI/source install flows, follow `constitute-gateway` operator docs: `https://github.com/Aux0x7F/constitute-gateway/blob/main/docs/OPERATOR.md`
+- In the installer utility, run release install/update for the current operator platform (service install only); first install prints a generated pairing code when pairing is pending
 - For paired Linux gateways, use `Install NVR Service` in appliance actions to trigger host-side NVR install remotely
 - Use `Settings > Appliances` to pair existing gateways and open NVR control panel surfaces
 - Manage optional app repos in `Settings > Apps` and launch enabled apps from Home

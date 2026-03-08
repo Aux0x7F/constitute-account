@@ -147,8 +147,8 @@
 
       <div class="card">
         <div class="cardTitle">Add Gateway</div>
-        <div class="small muted">Existing: use pairing flow in <strong>Settings → Pairing</strong>, then approve on your owner device.</div>
-        <div class="small muted" style="margin-top:.35rem;">Install: download the native installer utility for this operator platform. The utility installs/updates the gateway service from release artifacts (no OS image/media generation).</div>
+        <div class="small muted">Install: download the native installer utility for this operator platform. The generated command passes your identity label to the installer.</div>
+        <div class="small muted" style="margin-top:.35rem;">On first install, the installer generates and prints a one-time pairing code. Use that code in Settings → Pairing → Add Device.</div>
         <div class="row" style="margin-top:.6rem;">
           <button id="btnGatewayInstallOpen" type="button">Download Installer Utility</button>
         </div>
@@ -201,22 +201,12 @@
 
       <div class="card">
         <div class="cardTitle">Add Device</div>
-        <div class="small muted">On the new device, finish onboarding and note its pairing code. Enter that code here to claim and start pairing.</div>
+        <div class="small muted">On the new device, finish onboarding (or run gateway installer) and note its pairing code. Enter that code here to claim and start pairing when manual claim is required.</div>
         <div class="row" style="margin-top:.5rem;">
           <input id="pairCodeInput" type="text" placeholder="Enter code from new device" />
           <button id="btnClaimPairCode" type="button">Claim Code</button>
         </div>
         <div id="pairCodeStatus" class="small muted" style="margin-top:.5rem;"></div>
-      </div>
-
-      <div id="pairOfferCard" class="card" style="margin-top:.75rem;">
-        <div class="cardTitle">Prepare New Device Pairing Code</div>
-        <div class="small muted">Create a code for the device being added. On the owner device, claim it in <strong>Add Device</strong>.</div>
-        <div class="row" style="margin-top:.5rem;">
-          <input id="pairOfferDeviceInput" type="text" placeholder="New device label" />
-          <button id="btnGeneratePairCode" type="button">Generate Code</button>
-        </div>
-        <div id="pairOfferStatus" class="small muted" style="margin-top:.5rem;"></div>
       </div>
 
       <h3>Pending requests</h3>
