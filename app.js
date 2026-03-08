@@ -52,10 +52,6 @@ const pairingEmpty = document.getElementById('pairingEmpty');
 const pairCodeInput = document.getElementById('pairCodeInput');
 const btnClaimPairCode = document.getElementById('btnClaimPairCode');
 const pairCodeStatus = document.getElementById('pairCodeStatus');
-const pairOfferDeviceInput = document.getElementById('pairOfferDeviceInput');
-const pairOfferCard = document.getElementById('pairOfferCard');
-const btnGeneratePairCode = document.getElementById('btnGeneratePairCode');
-const pairOfferStatus = document.getElementById('pairOfferStatus');
 
 const identityLabelEl = document.getElementById('identityLabel');
 const identityIdEl = document.getElementById('identityId');
@@ -165,14 +161,16 @@ const GATEWAY_OPERATOR_UTILITY = Object.freeze({
 const GATEWAY_RELEASES_API = 'https://api.github.com/repos/Aux0x7F/constitute-gateway/releases?per_page=20';
 const gatewayUtilityAssetUrlCache = new Map(); // asset -> { url, tag, prerelease }
 let gatewayReleasesCache = null;
+let preparedGatewayInstall = null;
 
 function currentGatewayUtilityDownloadInfo() {
-  const byPlatform = GATEWAY_OPERATOR_UTILITY[OPERATOR_PLATFORM] || null;
+  const platform = currentOperatorPlatform();
+  const byPlatform = GATEWAY_OPERATOR_UTILITY[platform] || null;
   if (!byPlatform) return null;
   const asset = String(byPlatform.asset || '').trim();
   if (!asset) return null;
   return {
-    platform: OPERATOR_PLATFORM,
+    platform,
     asset,
     fallbackUrl: `https://github.com/Aux0x7F/constitute-gateway/releases/latest/download/${asset}`,
     hint: String(byPlatform.hint || '').trim(),
@@ -733,12 +731,6 @@ function setPairCodeStatus(msg, error = false) {
   pairCodeStatus.classList.toggle('warn', !!error);
 }
 
-function setPairOfferStatus(msg, error = false) {
-  if (!pairOfferStatus) return;
-  pairOfferStatus.textContent = String(msg || '');
-  pairOfferStatus.classList.toggle('warn', !!error);
-}
-
 function setGatewayInstallStatus(msg, error = false) {
   if (!gatewayInstallStatus) return;
   gatewayInstallStatus.textContent = String(msg || '');
@@ -788,11 +780,52 @@ function handleGatewayServiceInstallStatusEvent(evt) {
   }
 }
 
+function detectOperatorPlatform() {
+  const ua = String(navigator.userAgent || '').toLowerCase();
+  const platform = String(navigator.platform || '').toLowerCase();
+  if (platform.includes('win') || ua.includes('windows')) return 'windows';
+  if (platform.includes('mac') || ua.includes('mac os')) return 'mac';
+  if (platform.includes('linux') || ua.includes('linux')) return 'linux';
+  return 'unknown';
+}
+
+function currentOperatorPlatform() {
+  return detectOperatorPlatform();
+}
+
 function operatorPlatformLabel() {
-  if (OPERATOR_PLATFORM === 'windows') return 'Windows';
-  if (OPERATOR_PLATFORM === 'linux') return 'Linux';
-  if (OPERATOR_PLATFORM === 'mac') return 'macOS';
+  const platform = currentOperatorPlatform();
+  if (platform === 'windows') return 'Windows';
+  if (platform === 'linux') return 'Linux';
+  if (platform === 'mac') return 'macOS';
   return 'Unknown';
+}
+
+function quoteForShell(value, shell) {
+  const raw = String(value || '');
+  if (shell === 'powershell') {
+    return `'${raw.replace(/'/g, "''")}'`;
+  }
+  return `'${raw.split("'").join("'\\''")}'`;
+}
+
+function buildGatewayOperatorInstallCommand(identityLabel) {
+  const identity = String(identityLabel || '').trim();
+  if (!identity) return '';
+
+  if (currentOperatorPlatform() === 'windows') {
+    return [
+      './constitute-operator.exe',
+      '--pair-identity', quoteForShell(identity, 'powershell'),
+      'windows-service',
+    ].join(' ');
+  }
+
+  return [
+    './constitute-operator',
+    '--pair-identity', quoteForShell(identity, 'sh'),
+    'linux-service',
+  ].join(' ');
 }
 
 function parseUdpPeer(endpoint) {
@@ -825,6 +858,31 @@ function installZoneKeys() {
     if (key && !keys.includes(key)) keys.push(key);
   }
   return keys;
+}
+
+async function prepareInstallEnrollment(target = 'device') {
+  const kind = String(target || 'device').trim().toLowerCase() || 'device';
+  const method = kind === 'gateway' ? 'pairing.prepareGatewayInstall' : 'pairing.prepareInstall';
+  const res = await client.call(method, { target: kind }, { timeoutMs: 20000 });
+
+  const identityLabel = String(res?.identityLabel || '').trim();
+  const code = String(res?.code || '').trim();
+  const codeHash = String(res?.codeHash || '').trim();
+  const expiresAt = Number(res?.expiresAt || 0);
+
+  if (!identityLabel || !code || !codeHash) {
+    throw new Error('pairing bootstrap did not return complete material');
+  }
+
+  return {
+    target: kind,
+    identityLabel,
+    code,
+    codeHash,
+    expiresAt,
+    autoApprove: Boolean(res?.autoApprove),
+    claimId: String(res?.claimId || '').trim(),
+  };
 }
 
 async function prepareNvrInstallContext(record) {
@@ -929,14 +987,20 @@ function updateGatewayInstallHint() {
   }
 
   const hintParts = [
-    'Utility resolves the newest release that contains the requested asset (pre-release safe).',
+    'Download the native operator utility from releases.',
+    'Installer generates a one-time pairing code during first install when identity pairing is configured.',
+    'Copy that code into Settings > Pairing > Add Device to claim and approve.',
     'This path installs/updates gateway services only (no OS image/media generation).',
     info.hint,
-    'For local dev builds: clone the repo and run scripts/linux/install-service.sh or scripts/windows/install-service.ps1 after cargo build.',
   ].filter(Boolean);
 
   setGatewayInstallHint(hintParts.join(' '));
-  setGatewayInstallCommandPreview(`asset: ${info.asset}`);
+
+  if (preparedGatewayInstall?.command) {
+    setGatewayInstallCommandPreview(preparedGatewayInstall.command);
+  } else {
+    setGatewayInstallCommandPreview('# click "Download Installer Utility" to generate install command');
+  }
 }
 
 function isGatewayRecord(rec) {
@@ -1119,7 +1183,7 @@ function renderApplianceList(identityDevices, swarmDevices) {
       pair.onclick = () => {
         showActivity('settings');
         setSettingsTab('pairing');
-        setPairCodeStatus('Enter pairing code shown by the gateway installer.');
+        setPairCodeStatus('Enter the pairing code shown by the gateway installer utility.');
       };
       actions.appendChild(pair);
 
@@ -2150,32 +2214,6 @@ function ensureOnboardingState(ident) {
   }
 }
 
-function syncPairOfferDefaults(_ident, _st, _myLabel) {
-  // Keep this field empty by default; operator should set a label for the new device.
-  if (pairOfferDeviceInput) {
-    pairOfferDeviceInput.placeholder = 'New device label';
-  }
-}
-
-function updatePairOfferAvailability(ident) {
-  const linked = Boolean(ident?.linked && String(ident?.id || '').trim());
-  if (pairOfferCard) {
-    pairOfferCard.classList.toggle('muted', linked);
-  }
-  if (pairOfferDeviceInput) {
-    pairOfferDeviceInput.disabled = linked;
-  }
-  if (btnGeneratePairCode) {
-    btnGeneratePairCode.disabled = linked;
-    btnGeneratePairCode.title = linked
-      ? 'Generate codes on the new device during onboarding.'
-      : '';
-  }
-  if (linked) {
-    setPairOfferStatus('Generate pairing code is only used on the new device. On owner devices, use Add Device to claim and approve.', false);
-  }
-}
-
 async function refreshAll() {
   // SEQUENTIAL (not Promise.all) to avoid SW starvation/timeouts.
   const st = await client.call('device.getState', {}, { timeoutMs: 20000 });
@@ -2192,6 +2230,9 @@ async function refreshAll() {
 
   lastDeviceState = st;
   lastIdentity = ident;
+  if (preparedGatewayInstall && preparedGatewayInstall.identityLabel !== String(ident?.label || '').trim()) {
+    preparedGatewayInstall = null;
+  }
   lastDirectory = directory || [];
   lastZones = zones || [];
   lastSwarmDevices = swarmDevices || [];
@@ -2220,8 +2261,7 @@ async function refreshAll() {
   profileAbout.value = prof?.about || '';
 
   deviceLabel.value = myLabel?.label || '';
-  syncPairOfferDefaults(ident, st, myLabel);
-  updatePairOfferAvailability(ident);
+  updateGatewayInstallHint();
 
   renderDeviceList(ident?.devices || []);
   renderBlockedList(blocked || []);
@@ -2400,46 +2440,6 @@ function wireUi() {
     };
   }
 
-  if (btnGeneratePairCode) {
-    btnGeneratePairCode.onclick = async () => {
-      const identityLabel = String(lastIdentity?.label || '').trim();
-      const deviceLabel = String(pairOfferDeviceInput?.value || '').trim();
-
-      if (lastIdentity?.linked) {
-        setPairOfferStatus('Generate pairing code is only used on the new device. Use Add Device here to claim and approve.', true);
-        return;
-      }
-      if (!identityLabel) {
-        setPairOfferStatus('No linked identity found on this device.', true);
-        return;
-      }
-      if (!deviceLabel) {
-        setPairOfferStatus('New device label is required to generate a pairing code.', true);
-        return;
-      }
-
-      try {
-        const res = await client.call('identity.requestPair', {
-          identityLabel,
-          deviceLabel,
-        }, { timeoutMs: 20000 });
-
-        const code = String(res?.code || '').trim();
-        if (code && pairCodeInput && !String(pairCodeInput.value || '').trim()) {
-          pairCodeInput.value = code;
-        }
-
-        if (code) {
-          setPairOfferStatus(`Generated pairing code: ${code}. Enter this code on the owner device in Add Device, then approve the request.`);
-        } else {
-          setPairOfferStatus('Pair request sent. Wait for owner claim and approval.');
-        }
-      } catch (e) {
-        setPairOfferStatus(`Generate failed: ${String(e?.message || e)}`, true);
-      }
-    };
-  }
-
   if (btnAddAppRepo) {
     btnAddAppRepo.onclick = () => addAppRepoFromInput().catch((e) => console.error(e));
   }
@@ -2457,6 +2457,22 @@ function wireUi() {
   if (btnGatewayInstallOpen) {
     btnGatewayInstallOpen.onclick = async () => {
       try {
+        const identityLabel = String(lastIdentity?.label || '').trim();
+        if (!String(lastIdentity?.id || '').trim() || !identityLabel) {
+          throw new Error('link an identity before preparing gateway install command');
+        }
+
+        const command = buildGatewayOperatorInstallCommand(identityLabel);
+        if (!command) {
+          throw new Error('could not build operator install command');
+        }
+
+        preparedGatewayInstall = {
+          identityLabel,
+          command,
+          preparedAt: Date.now(),
+        };
+
         const info = currentGatewayUtilityDownloadInfo();
         if (!info) {
           throw new Error(`installer utility is unavailable for ${operatorPlatformLabel()} operators`);
@@ -2478,7 +2494,12 @@ function wireUi() {
 
         const releaseRef = String(resolved?.tag || 'latest').trim() || 'latest';
         const releaseMeta = resolved?.prerelease ? `${releaseRef} (pre-release)` : releaseRef;
-        setGatewayInstallStatus(`Downloading ${info.asset} from ${releaseMeta}.`);
+
+        setGatewayInstallCommandPreview(command);
+        setGatewayInstallStatus(
+          `Downloading ${info.asset} from ${releaseMeta}. Run the command below with the downloaded utility. The installer will print a generated pairing code if pairing is pending.`,
+          false,
+        );
       } catch (err) {
         setGatewayInstallStatus(`Utility download failed: ${String(err?.message || err)}`, true);
       }
