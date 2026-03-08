@@ -128,6 +128,7 @@ let swarmBootRequested = false;
 
 const APPS_REPOS_KEY = 'constitute.apps.repos';
 const APPS_ENABLED_KEY = 'constitute.apps.enabled';
+const GATEWAY_EXTRA_ZONES_KEY = 'constitute.gateway.extraZones';
 const DEFAULT_APP_REPOS = ['https://github.com/Aux0x7F/constitute-nvr-ui'];
 const ROLE_APP_REPO_MAP = Object.freeze({
   nvr: ['https://github.com/Aux0x7F/constitute-nvr-ui'],
@@ -234,6 +235,8 @@ async function resolveGatewayUtilityAssetUrl(assetName) {
 
 let lastSwarmDevices = [];
 const pendingGatewayServiceInstalls = new Map();
+const pendingGatewayZoneSyncs = new Map();
+let gatewayExtraZonesByPk = {};
 
 class SwarmTransport {
   constructor({ client, onState }) {
@@ -780,6 +783,32 @@ function handleGatewayServiceInstallStatusEvent(evt) {
   }
 }
 
+function handleGatewayZoneSyncStatusEvent(evt) {
+  const requestId = String(evt?.requestId || '').trim();
+  const status = String(evt?.status || '').trim().toLowerCase();
+  const gatewayPk = String(evt?.gatewayPk || '').trim();
+  const reason = String(evt?.reason || '').trim();
+  const detail = summarizeInstallDetail(evt?.detail || '');
+
+  const meta = pendingGatewayZoneSyncs.get(requestId) || null;
+  const target = meta?.gatewayPk || gatewayPk || 'gateway';
+
+  const base = `Gateway zone sync ${status || 'update'} for ${target.slice(0, 12)}...`;
+  const reasonPart = reason ? ` (${reason})` : '';
+  const detailPart = detail ? ` — ${detail}` : '';
+
+  const isError = status === 'failed' || status === 'rejected';
+  setGatewayInstallStatus(`${base}${reasonPart}${detailPart}`, isError);
+
+  if (status === 'complete' || status === 'failed' || status === 'rejected') {
+    if (requestId) pendingGatewayZoneSyncs.delete(requestId);
+  }
+
+  if (status === 'complete') {
+    refreshAll().catch(() => {});
+  }
+}
+
 function detectOperatorPlatform() {
   const ua = String(navigator.userAgent || '').toLowerCase();
   const platform = String(navigator.platform || '').toLowerCase();
@@ -860,6 +889,54 @@ function installZoneKeys() {
   return keys;
 }
 
+function loadGatewayExtraZones() {
+  try {
+    const raw = localStorage.getItem(GATEWAY_EXTRA_ZONES_KEY);
+    const parsed = raw ? JSON.parse(raw) : {};
+    gatewayExtraZonesByPk = parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    gatewayExtraZonesByPk = {};
+  }
+}
+
+function saveGatewayExtraZones() {
+  try {
+    localStorage.setItem(GATEWAY_EXTRA_ZONES_KEY, JSON.stringify(gatewayExtraZonesByPk || {}));
+  } catch {}
+}
+
+function parseZoneKeyList(input) {
+  const values = String(input || '')
+    .split(/[\s,]+/)
+    .map((v) => normalizeZoneKey(v))
+    .filter(Boolean);
+  const keys = [];
+  for (const key of values) {
+    if (!keys.includes(key)) keys.push(key);
+  }
+  return keys;
+}
+
+function gatewayExtraZonesForPk(pk) {
+  const key = String(pk || '').trim();
+  if (!key) return [];
+  const value = gatewayExtraZonesByPk?.[key];
+  if (!Array.isArray(value)) return [];
+  return parseZoneKeyList(value.join(' '));
+}
+
+function setGatewayExtraZonesForPk(pk, zones) {
+  const key = String(pk || '').trim();
+  if (!key) return;
+  const clean = parseZoneKeyList((Array.isArray(zones) ? zones : []).join(' '));
+  if (clean.length === 0) {
+    delete gatewayExtraZonesByPk[key];
+  } else {
+    gatewayExtraZonesByPk[key] = clean;
+  }
+  saveGatewayExtraZones();
+}
+
 async function prepareInstallEnrollment(target = 'device') {
   const kind = String(target || 'device').trim().toLowerCase() || 'device';
   const method = kind === 'gateway' ? 'pairing.prepareGatewayInstall' : 'pairing.prepareInstall';
@@ -928,6 +1005,42 @@ async function prepareNvrInstallContext(record) {
   };
 }
 
+
+async function requestGatewayZoneSync(record, extraZoneKeys = []) {
+  const gatewayPk = String(record?.devicePk || record?.pk || '').trim();
+  if (!gatewayPk) throw new Error('gateway device pk missing');
+
+  const identityId = String(lastIdentity?.id || '').trim();
+  if (!identityId || !String(lastIdentity?.label || '').trim()) {
+    throw new Error('link an identity before syncing gateway zones');
+  }
+
+  const zoneKeys = installZoneKeys();
+  if (zoneKeys.length === 0) throw new Error('join at least one zone before syncing gateway zones');
+
+  const extraKeys = parseZoneKeyList((Array.isArray(extraZoneKeys) ? extraZoneKeys : []).join(' '));
+
+  const payload = {
+    gatewayDevicePk: gatewayPk,
+    identityId,
+    zone: String(zoneKeys[0] || ''),
+    zoneKeys,
+    extraZoneKeys: extraKeys,
+  };
+
+  const response = await client.call('gateway.zones.sync', payload, { timeoutMs: 20000 });
+  const requestId = String(response?.requestId || '').trim();
+  if (requestId) {
+    pendingGatewayZoneSyncs.set(requestId, {
+      gatewayPk,
+      requestedAt: Date.now(),
+      zoneKeys,
+      extraZoneKeys: extraKeys,
+    });
+  }
+
+  return { requestId, zoneKeys, extraZoneKeys: extraKeys };
+}
 
 async function requestRemoteNvrInstall(record) {
   const gatewayPk = String(record?.devicePk || record?.pk || '').trim();
@@ -1186,6 +1299,37 @@ function renderApplianceList(identityDevices, swarmDevices) {
         setPairCodeStatus('Enter the pairing code shown by the gateway installer utility.');
       };
       actions.appendChild(pair);
+
+      const configureZones = document.createElement('button');
+      configureZones.type = 'button';
+      configureZones.textContent = 'Configure Zones';
+      if (!info.owned) {
+        configureZones.disabled = true;
+        configureZones.title = 'Pair this gateway to your identity before configuring zones.';
+      } else {
+        configureZones.onclick = async () => {
+          try {
+            const currentExtra = gatewayExtraZonesForPk(info.pk);
+            const entered = window.prompt(
+              'Extra gateway zone keys (comma or space separated). Identity zones are always synced automatically.',
+              currentExtra.join(', '),
+            );
+            if (entered === null) return;
+            const extras = parseZoneKeyList(entered);
+            setGatewayExtraZonesForPk(info.pk, extras);
+            setGatewayInstallStatus('Submitting gateway zone sync request...');
+            const submitted = await requestGatewayZoneSync(rec, extras);
+            if (submitted?.requestId) {
+              setGatewayInstallStatus(`Gateway zone sync requested (${submitted.requestId.slice(0, 12)}...).`, false);
+            } else {
+              setGatewayInstallStatus('Gateway zone sync request submitted.', false);
+            }
+          } catch (err) {
+            setGatewayInstallStatus(`Could not sync gateway zones: ${String(err?.message || err)}`, true);
+          }
+        };
+      }
+      actions.appendChild(configureZones);
 
       const gatewaySupportsServices = info.hostPlatform
         ? (info.hostPlatform === 'linux' || info.hostPlatform === 'fcos')
@@ -2712,6 +2856,9 @@ function startSharedRelayPipe(client, relayUrl) {
       if (evt?.type === 'gateway_service_install_status') {
         handleGatewayServiceInstallStatusEvent(evt);
       }
+      if (evt?.type === 'gateway_zone_sync_status') {
+        handleGatewayZoneSyncStatusEvent(evt);
+      }
       if (evt?.type === 'notify') refreshAll().catch(() => {});
     }
   });
@@ -2734,6 +2881,7 @@ function startSharedRelayPipe(client, relayUrl) {
     swarm.setPeers(fallbackPeers.map(pk => ({ devicePk: pk })));
   }
 
+  loadGatewayExtraZones();
   wireUi();
   await hydrateAppCatalog();
   _pushConnLog('init');

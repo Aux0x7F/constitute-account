@@ -822,6 +822,25 @@ export async function handleRelayFrame(sw, raw) {
     return;
   }
 
+  if (payload.type === 'gateway_zone_sync_status') {
+    emit(sw, {
+      type: 'gateway_zone_sync_status',
+      requestId: String(payload.requestId || '').trim(),
+      status: String(payload.status || '').trim(),
+      gatewayPk: String(payload.gatewayPk || '').trim(),
+      toDevicePk: String(payload.toDevicePk || '').trim(),
+      identityId: String(payload.identityId || '').trim(),
+      reason: String(payload.reason || '').trim(),
+      detail: String(payload.detail || '').trim(),
+      zone: String(payload.zone || '').trim(),
+      zoneKeys: Array.isArray(payload.zoneKeys) ? payload.zoneKeys.map((z) => String(z || '').trim()).filter(Boolean) : [],
+      extraZoneKeys: Array.isArray(payload.extraZoneKeys) ? payload.extraZoneKeys.map((z) => String(z || '').trim()).filter(Boolean) : [],
+      restartRequired: payload.restartRequired === true,
+      ts: Number(payload.ts || Date.now()),
+    });
+    return;
+  }
+
   // --- Swarm signal (WebRTC signaling) ---
   if (payload.type === 'swarm_signal') {
     const to = String(payload.to || '').trim();
