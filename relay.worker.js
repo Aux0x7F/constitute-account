@@ -1,15 +1,21 @@
 const RELAY_WORKER_BUILD_ID = '2026-04-03-relay-pool';
 const MAX_RECENT_EVENT_IDS = 2048;
 
-const ports = new Set();
+const endpoints = new Set();
 const relays = new Map();
 const recentEventIds = new Map();
 let desiredRelayUrls = [];
+let dedicatedEndpoint = null;
+
+function endpointPost(endpoint, msg) {
+  try {
+    if (endpoint.kind === 'shared') endpoint.port.postMessage(msg);
+    else self.postMessage(msg);
+  } catch {}
+}
 
 function broadcast(msg) {
-  for (const port of ports) {
-    try { port.postMessage(msg); } catch {}
-  }
+  for (const endpoint of endpoints) endpointPost(endpoint, msg);
 }
 
 function currentRelayUrls() {
@@ -33,7 +39,9 @@ function aggregateRelayState() {
   if (relays.size === 0) return { state: 'offline', code: null, reason: 'no relays configured' };
   const snapshot = Array.from(relays.values());
   if (snapshot.some((relay) => relay.state === 'open')) return { state: 'open', code: null, reason: '' };
-  if (snapshot.some((relay) => relay.state === 'connecting')) return { state: 'connecting', code: null, reason: 'waiting for relay open' };
+  if (snapshot.some((relay) => relay.state === 'connecting')) {
+    return { state: 'connecting', code: null, reason: 'waiting for relay open' };
+  }
   const firstFailure = snapshot.find((relay) => relay.code != null || relay.reason);
   return {
     state: 'error',
@@ -80,8 +88,7 @@ function extractEventId(frame) {
     const parsed = JSON.parse(String(frame || ''));
     if (!Array.isArray(parsed) || parsed[0] !== 'EVENT') return '';
     const event = parsed.length >= 3 ? parsed[2] : parsed[1];
-    const id = event && typeof event === 'object' ? String(event.id || '').trim() : '';
-    return id;
+    return event && typeof event === 'object' ? String(event.id || '').trim() : '';
   } catch {
     return '';
   }
@@ -200,51 +207,49 @@ function send(frame) {
   if (!sent) throw new Error('relay not open');
 }
 
-onconnect = (event) => {
-  const port = event.ports[0];
-  ports.add(port);
-
-  port.onmessage = (messageEvent) => {
-    const msg = messageEvent.data || {};
-    try {
-      if (msg.type === 'relay.connect') {
-        const urls = Array.isArray(msg.urls) ? msg.urls : (msg.url ? [msg.url] : []);
-        updateRelayTargets(urls);
-        port.postMessage({ type: 'relay.ack', ok: true });
-        return;
-      }
-      if (msg.type === 'relay.send') {
-        send(msg.frame);
-        port.postMessage({ type: 'relay.ack', ok: true });
-        return;
-      }
-      if (msg.type === 'relay.status') {
-        const aggregate = aggregateRelayState();
-        port.postMessage({
-          type: 'relay.status',
-          version: RELAY_WORKER_BUILD_ID,
-          state: aggregate.state,
-          code: aggregate.code,
-          reason: aggregate.reason,
-          urls: currentRelayUrls(),
-          relays: relaySnapshot(),
-        });
-        return;
-      }
-      if (msg.type === 'relay.close') {
-        desiredRelayUrls = [];
-        for (const url of currentRelayUrls()) closeRelay(url);
-        emitStatus();
-        port.postMessage({ type: 'relay.ack', ok: true });
-        return;
-      }
-    } catch (err) {
-      port.postMessage({ type: 'relay.ack', ok: false, error: String(err?.message || err) });
+function handleControlMessage(msg, endpoint) {
+  try {
+    if (msg.type === 'relay.connect') {
+      const urls = Array.isArray(msg.urls) ? msg.urls : (msg.url ? [msg.url] : []);
+      updateRelayTargets(urls);
+      endpointPost(endpoint, { type: 'relay.ack', ok: true });
+      return;
     }
-  };
+    if (msg.type === 'relay.send') {
+      send(msg.frame);
+      endpointPost(endpoint, { type: 'relay.ack', ok: true });
+      return;
+    }
+    if (msg.type === 'relay.status') {
+      const aggregate = aggregateRelayState();
+      endpointPost(endpoint, {
+        type: 'relay.status',
+        version: RELAY_WORKER_BUILD_ID,
+        state: aggregate.state,
+        code: aggregate.code,
+        reason: aggregate.reason,
+        urls: currentRelayUrls(),
+        relays: relaySnapshot(),
+      });
+      return;
+    }
+    if (msg.type === 'relay.close') {
+      desiredRelayUrls = [];
+      for (const url of currentRelayUrls()) closeRelay(url);
+      emitStatus();
+      endpointPost(endpoint, { type: 'relay.ack', ok: true });
+    }
+  } catch (err) {
+    endpointPost(endpoint, { type: 'relay.ack', ok: false, error: String(err?.message || err) });
+  }
+}
 
+function attachSharedPort(port) {
+  const endpoint = { kind: 'shared', port };
+  endpoints.add(endpoint);
+  port.onmessage = (event) => handleControlMessage(event.data || {}, endpoint);
   port.start();
-  port.postMessage({
+  endpointPost(endpoint, {
     type: 'relay.status',
     version: RELAY_WORKER_BUILD_ID,
     state: aggregateRelayState().state,
@@ -253,4 +258,30 @@ onconnect = (event) => {
     urls: currentRelayUrls(),
     relays: relaySnapshot(),
   });
+}
+
+function ensureDedicatedEndpoint() {
+  if (dedicatedEndpoint) return dedicatedEndpoint;
+  dedicatedEndpoint = { kind: 'dedicated' };
+  endpoints.add(dedicatedEndpoint);
+  endpointPost(dedicatedEndpoint, {
+    type: 'relay.status',
+    version: RELAY_WORKER_BUILD_ID,
+    state: aggregateRelayState().state,
+    code: aggregateRelayState().code,
+    reason: aggregateRelayState().reason,
+    urls: currentRelayUrls(),
+    relays: relaySnapshot(),
+  });
+  return dedicatedEndpoint;
+}
+
+self.onconnect = (event) => {
+  const port = event.ports?.[0];
+  if (port) attachSharedPort(port);
 };
+
+self.addEventListener('message', (event) => {
+  const endpoint = ensureDedicatedEndpoint();
+  handleControlMessage(event.data || {}, endpoint);
+});

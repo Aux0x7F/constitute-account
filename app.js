@@ -155,6 +155,7 @@ const GATEWAY_HOSTED_SNAPSHOT_KEY = 'constitute.gatewayHostedSnapshots';
 const RELAY_BRIDGE_LEASE_KEY = 'constitute.relayBridge.owner';
 const RELAY_BRIDGE_LEASE_MS = 12_000;
 const RELAY_BRIDGE_HEARTBEAT_MS = 4_000;
+const RELAY_WORKER_QUIET_TIMEOUT_MS = 1_500;
 
 const NVR_INSTALLERS = Object.freeze({
   linux: {
@@ -843,6 +844,21 @@ function randomOpaqueId(prefix = 'id') {
   crypto.getRandomValues(bytes);
   const token = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
   return `${prefix}-${token}`;
+}
+
+function relayWorkerScriptUrl() {
+  const url = new URL('./relay.worker.js', window.location.href);
+  url.searchParams.set('v', SHELL_BUILD_ID);
+  return url.toString();
+}
+
+function browserPrefersDedicatedRelayWorker() {
+  try {
+    const ua = String(navigator.userAgent || '');
+    return typeof SharedWorker === 'undefined' || /\bFirefox\//.test(ua);
+  } catch {
+    return typeof SharedWorker === 'undefined';
+  }
 }
 
 function managedLaunchStorageKey(launchId) {
@@ -3597,13 +3613,32 @@ function wireUi() {
 }
 
 function startSharedRelayPipe(client, initialRelayUrls) {
-  const w = new SharedWorker('./relay.worker.js');
-  const port = w.port;
-  port.start();
   const ownerId = randomOpaqueId('relay-bridge');
   let relayBridgeOwner = false;
   let heartbeatTimer = null;
   let targetKey = '';
+  let relayRuntime = null;
+  let workerQuietTimer = null;
+  let lastRelayRuntimeMessageAt = 0;
+
+  function clearWorkerQuietTimer() {
+    if (!workerQuietTimer) return;
+    clearTimeout(workerQuietTimer);
+    workerQuietTimer = null;
+  }
+
+  function teardownRelayRuntime(reason = '') {
+    clearWorkerQuietTimer();
+    if (!relayRuntime) return;
+    try {
+      relayRuntime.postMessage?.({ type: 'relay.close' });
+    } catch {}
+    try {
+      relayRuntime.close?.();
+    } catch {}
+    relayRuntime = null;
+    if (reason) console.info('[relay.bridge] runtime closed', reason);
+  }
 
   function readRelayBridgeLease() {
     try {
@@ -3657,18 +3692,8 @@ function startSharedRelayPipe(client, initialRelayUrls) {
     });
   }
 
-  function updateTargets(urls, reason = 'update') {
-    const targets = Array.isArray(urls) ? urls.filter(Boolean) : [];
-    const nextKey = targets.join('\n');
-    if (nextKey === targetKey) return false;
-    targetKey = nextKey;
-    console.info('[relay.bridge] targets', reason, targets);
-    port.postMessage({ type: 'relay.connect', urls: targets });
-    return true;
-  }
-
-  port.onmessage = async (ev) => {
-    const msg = ev.data || {};
+  function handleRelayRuntimeMessage(msg) {
+    lastRelayRuntimeMessageAt = Date.now();
     if (msg.type === 'relay.status') {
       const reason = [msg.reason || '', msg.code != null ? `code=${msg.code}` : ''].filter(Boolean).join(' ');
       if (msg.state === 'error' || msg.state === 'closed') {
@@ -3708,20 +3733,94 @@ function startSharedRelayPipe(client, initialRelayUrls) {
         client.call('relay.rx', { data: msg.data, url: msg.url || '' }, { timeoutMs: 20000, priority: 'immediate' })
           .catch((e) => console.error('relay.rx rpc failed', e));
       }
-      return;
     }
-  };
+  }
+
+  function scheduleQuietFallback() {
+    clearWorkerQuietTimer();
+    workerQuietTimer = setTimeout(() => {
+      if (!relayRuntime || relayRuntime.mode !== 'shared') return;
+      if (lastRelayRuntimeMessageAt > 0) return;
+      console.warn('[relay.bridge] shared worker quiet; falling back to dedicated runtime');
+      startRelayRuntime('shared-timeout');
+      if (targetKey) {
+        relayRuntime?.postMessage?.({ type: 'relay.connect', urls: targetKey.split('\n').filter(Boolean) });
+      }
+    }, RELAY_WORKER_QUIET_TIMEOUT_MS);
+  }
+
+  function createSharedRelayRuntime() {
+    const scriptUrl = relayWorkerScriptUrl();
+    const worker = new SharedWorker(scriptUrl);
+    const port = worker.port;
+    port.start();
+    port.onmessage = (ev) => handleRelayRuntimeMessage(ev.data || {});
+    port.onmessageerror = (ev) => console.error('[relay.bridge] shared worker messageerror', ev);
+    return {
+      mode: 'shared',
+      scriptUrl,
+      postMessage: (msg) => port.postMessage(msg),
+      close: () => {
+        try { port.onmessage = null; } catch {}
+        try { port.postMessage({ type: 'relay.close' }); } catch {}
+      },
+    };
+  }
+
+  function createDedicatedRelayRuntime() {
+    const scriptUrl = relayWorkerScriptUrl();
+    const worker = new Worker(scriptUrl);
+    worker.onmessage = (ev) => handleRelayRuntimeMessage(ev.data || {});
+    worker.onerror = (ev) => console.error('[relay.bridge] dedicated worker error', ev?.message || ev);
+    worker.onmessageerror = (ev) => console.error('[relay.bridge] dedicated worker messageerror', ev);
+    return {
+      mode: 'dedicated',
+      scriptUrl,
+      postMessage: (msg) => worker.postMessage(msg),
+      close: () => worker.terminate(),
+    };
+  }
+
+  function startRelayRuntime(reason = 'init') {
+    teardownRelayRuntime(`restart:${reason}`);
+    lastRelayRuntimeMessageAt = 0;
+    const preferDedicated = browserPrefersDedicatedRelayWorker();
+    try {
+      relayRuntime = preferDedicated ? createDedicatedRelayRuntime() : createSharedRelayRuntime();
+    } catch (err) {
+      console.warn('[relay.bridge] shared worker unavailable; using dedicated runtime', err);
+      relayRuntime = createDedicatedRelayRuntime();
+    }
+    console.info('[relay.bridge] runtime', relayRuntime.mode, reason, relayRuntime.scriptUrl);
+    if (relayRuntime.mode === 'shared') scheduleQuietFallback();
+    relayRuntime.postMessage({ type: 'relay.status' });
+    return relayRuntime;
+  }
+
+  function updateTargets(urls, reason = 'update') {
+    const targets = Array.isArray(urls) ? urls.filter(Boolean) : [];
+    const nextKey = targets.join('\n');
+    if (nextKey === targetKey) return false;
+    targetKey = nextKey;
+    console.info('[relay.bridge] targets', reason, targets);
+    relayRuntime?.postMessage?.({ type: 'relay.connect', urls: targets });
+    return true;
+  }
 
   navigator.serviceWorker.addEventListener('message', (e) => {
     const m = e.data || {};
     if (relayBridgeOwner && m.type === 'relay.tx' && typeof m.data === 'string') {
-      port.postMessage({ type: 'relay.send', frame: m.data });
+      relayRuntime?.postMessage?.({ type: 'relay.send', frame: m.data });
     }
   });
 
   startRelayBridgeHeartbeat();
+  startRelayRuntime('init');
   updateTargets(initialRelayUrls, 'init');
-  return { port, updateTargets };
+  return {
+    updateTargets,
+    close: () => teardownRelayRuntime('api-close'),
+  };
 }
 
 (async function main() {
