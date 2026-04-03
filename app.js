@@ -143,6 +143,9 @@ const MANAGED_LAUNCH_STORAGE_PREFIX = 'constitute.launch.';
 const MANAGED_LAUNCH_TTL_MS = 2 * 60 * 1000;
 const MANAGED_APP_CHANNEL_NAME = 'constitute.app.launch';
 const GATEWAY_INVENTORY_REFRESH_TTL_MS = 15_000;
+const RELAY_BRIDGE_LEASE_KEY = 'constitute.relayBridge.owner';
+const RELAY_BRIDGE_LEASE_MS = 12_000;
+const RELAY_BRIDGE_HEARTBEAT_MS = 4_000;
 
 const NVR_INSTALLERS = Object.freeze({
   linux: {
@@ -3397,6 +3400,61 @@ function startSharedRelayPipe(client, relayUrl) {
   const w = new SharedWorker('./relay.worker.js');
   const port = w.port;
   port.start();
+  const ownerId = randomOpaqueId('relay-bridge');
+  let relayBridgeOwner = false;
+  let heartbeatTimer = null;
+
+  function readRelayBridgeLease() {
+    try {
+      const raw = localStorage.getItem(RELAY_BRIDGE_LEASE_KEY);
+      const parsed = raw ? JSON.parse(raw) : null;
+      return parsed && typeof parsed === 'object' ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function writeRelayBridgeLease() {
+    const next = {
+      ownerId,
+      expiresAt: Date.now() + RELAY_BRIDGE_LEASE_MS,
+    };
+    try {
+      localStorage.setItem(RELAY_BRIDGE_LEASE_KEY, JSON.stringify(next));
+    } catch {}
+    return next;
+  }
+
+  function updateRelayBridgeOwner(reason = '') {
+    const lease = readRelayBridgeLease();
+    const now = Date.now();
+    const shouldOwn = !lease || Number(lease.expiresAt || 0) <= now || lease.ownerId === ownerId;
+    if (shouldOwn) writeRelayBridgeLease();
+    const nextOwner = shouldOwn;
+    if (nextOwner !== relayBridgeOwner) {
+      relayBridgeOwner = nextOwner;
+      console.info('[relay.bridge]', relayBridgeOwner ? 'owner' : 'follower', reason || '');
+    }
+    return relayBridgeOwner;
+  }
+
+  function startRelayBridgeHeartbeat() {
+    updateRelayBridgeOwner('init');
+    heartbeatTimer = setInterval(() => {
+      updateRelayBridgeOwner('heartbeat');
+    }, RELAY_BRIDGE_HEARTBEAT_MS);
+    window.addEventListener('storage', (ev) => {
+      if (ev.key === RELAY_BRIDGE_LEASE_KEY) updateRelayBridgeOwner('storage');
+    });
+    window.addEventListener('beforeunload', () => {
+      clearInterval(heartbeatTimer);
+      if (!relayBridgeOwner) return;
+      const lease = readRelayBridgeLease();
+      if (lease?.ownerId === ownerId) {
+        try { localStorage.removeItem(RELAY_BRIDGE_LEASE_KEY); } catch {}
+      }
+    });
+  }
 
   port.onmessage = async (ev) => {
     const msg = ev.data || {};
@@ -3406,7 +3464,7 @@ function startSharedRelayPipe(client, relayUrl) {
         console.warn('[relay.worker]', msg.state, reason || '(no reason)');
       }
       setRelayState(msg.state, reason);
-      if (clientReady) {
+      if (clientReady && relayBridgeOwner) {
         client.call('relay.status', {
           state: msg.state,
           url: msg.url || '',
@@ -3417,7 +3475,7 @@ function startSharedRelayPipe(client, relayUrl) {
       return;
     }
     if (msg.type === 'relay.rx' && typeof msg.data === 'string') {
-      if (clientReady) {
+      if (clientReady && relayBridgeOwner) {
         client.call('relay.rx', { data: msg.data, url: msg.url || '' }, { timeoutMs: 20000 })
           .catch((e) => console.error('relay.rx rpc failed', e));
       }
@@ -3427,11 +3485,12 @@ function startSharedRelayPipe(client, relayUrl) {
 
   navigator.serviceWorker.addEventListener('message', (e) => {
     const m = e.data || {};
-    if (m.type === 'relay.tx' && typeof m.data === 'string') {
+    if (relayBridgeOwner && m.type === 'relay.tx' && typeof m.data === 'string') {
       port.postMessage({ type: 'relay.send', frame: m.data });
     }
   });
 
+  startRelayBridgeHeartbeat();
   port.postMessage({ type: 'relay.connect', url: relayUrl });
   return port;
 }
