@@ -1,204 +1,145 @@
-# Constitute – Architecture Overview
+# Constitute - Architecture Overview
 
-Constitute is a browser-native, decentralized identity and device association system built around cryptographic device identity, relay-based signaling, and progressive movement toward peer-to-peer swarm synchronization. The project is intentionally modular and transport-agnostic, with security and identity primitives implemented first, and higher-level collaboration features layered on top.
+`constitute` is the browser-native management shell for the Constitution ecosystem.
+It owns identity, device, pairing, gateway, zone, and managed-service control UX.
 
-This document orients contributors to the current structure, module responsibilities, and roadmap direction.
+It does not permanently embed every first-party application inside the shell. Instead, it launches managed app surfaces that publish separately under the same site domain.
 
 ## Core Concepts
 
 ### Identity
-An Identity is a logical grouping of devices.
-It is not a username or profile — it is a cryptographic association set.
-
-- Stored as shared state across associated devices
-- Contains:
-  - Identity label (human-readable)
-  - Identity ID (stable unique identifier)
-  - Device list
-  - Room/shared keys (for encrypted state)
-- Exists as a “room” concept over relay transport today, swarm later
+An identity is the trust domain / owner grouping:
+- identity label
+- identity id
+- approved devices
+- approved service-backed devices
 
 ### Device
-A Device is a cryptographic endpoint.
+A paired endpoint acting for an identity.
 
-- Has a DID-like identifier
-- May be:
-  - Software-backed (soft key)
-  - Platform-backed (WebAuthn / TPM)
-- Has a required human label
-- Devices can be approved or rejected by existing devices in the identity
+### Service-Backed Device
+A native runtime with its own keypair that still publishes as a device record.
 
-### Pairing
-Pairing is the process of associating a new device to an identity.
+Examples:
+- owned gateway
+- hosted NVR service
 
-- Device requests pairing
-- Existing device approves or rejects
-- Approval results in:
-  - Device added to identity
-  - Shared keys exchanged
-  - Request resolved at source
-- Pending requests must never persist after resolution
+### Gateway
+A special service-backed device that:
+- brokers browser launch/signaling
+- inventories hosted services
+- enforces managed-service capability checks
 
-### Notifications
-Notifications are identity-scoped state.
+## Shell Responsibilities
+`constitute` owns:
+- onboarding
+- device creation and pairing approval
+- identity lifecycle
+- zone management
+- gateway inventory and freshness
+- hosted service inventory
+- managed app launch
 
-- Represent events such as pairing requests or approvals
-- Stored as structured data, not UI artifacts
-- Support:
-  - Clear
-  - Remove
-  - Sync across devices (configurable per-device vs global)
+`constitute` does not own:
+- long-running native transport
+- camera ingest or retention
+- direct service-specific media pipelines
 
-## High-Level Architecture
+## UI Structure
+
+### Management Shell
+The shell remains at `tld/constitute/` and is responsible for:
+- Home
+- Settings
+- pairing and identity management
+- devices and service-backed devices
+- appliances/gateway management
+- launch entry points for managed apps
+
+### Managed App Surfaces
+First-party apps publish separately, for example:
+- `tld/constitute-nvr-ui/`
+
+The shell launches these in a new tab or window and provides a short-lived launch context instead of long-lived secrets in the URL.
+
+## Runtime Structure
 
 Browser UI
-- app.js
-  - Activity routing (Home / Settings / Onboarding)
-  - Navigation drawer + notification bell
-  - SharedWorker relay bridge
-- identity/client.js
-  - RPC bridge to Service Worker daemon
-- relay.worker.js (SharedWorker)
-  - Persistent WebSocket transport
+- `app.js`
+  - shell routes and appliances, launcher flow, and peer/service presentation
+- `identity/client.js`
+  - window-to-Service Worker RPC bridge
+- `relay.worker.js`
+  - persistent WebSocket relay bridge
 
-Service Worker (Identity Daemon)
-- identity/sw/daemon.js
-  - Device state
-  - Identity state
-  - Pairing lifecycle
-  - Notifications state
-  - Relay frame handling
-- identity/sw/idb.js
-  - IndexedDB abstraction
-- identity/sw/crypto.js
-  - Signing / encryption helpers
-- identity/sw/nostr.js
-  - Relay event formatting / signing
-- identity/sw/zone.js
-  - Zone key derivation + presence
-- identity/sw/directory.js
-  - Device directory store
+Service Worker
+- `identity/sw/daemon.js`
+  - identity, device, pairing, and relay state authority
+- `identity/sw/rpc.js`
+  - RPC surface for shell actions
+- `identity/sw/relayIn.js`
+  - relay ingest and event dispatch
+- `identity/sw/*`
+  - storage, crypto, Nostr, zone, and directory helpers
 
-## Transport Layers
+## Transport Direction
 
-### Current
-- WebSocket Relay (Nostr-style)
-- SharedWorker owns persistent connection
-- Service Worker owns signing, parsing, and state updates
-- Window only transports frames, never secrets
+### Current Browser Authority
+- Service Worker is the cryptographic/state authority.
+- SharedWorker holds long-lived relay transport.
+- Windows never own long-lived secret authority directly.
 
-### Planned
-- Gateway Backbone (native)
-  - QUIC/UDP mesh
-  - Relay/bridge mode for browsers
-  - Federated/volunteer relays (no single owner)
-- Browser Swarm Transport
-  - WebRTC + TURN fallback
-  - Relay used only for bootstrap/signaling
-  - Encrypted room state synchronization
+### Managed-Service Direction
+- browser app surfaces should attach to owned services through owned gateways
+- gateway remains the control/auth boundary
+- WebRTC is the preferred browser-safe transport direction for managed live media and direct paths
+- shell launch/bootstrap must stay separate from media transport
 
-## Discovery + Directory
-
-Zones are the discovery scope. Devices join zones via a sharable link (zone key).
-
-- Zone keys are generated at creation time (randomized, human label stored locally)
-- Zone presence + member lists are published over relay
-- Directory is a local store of discovered devices
-- Directory powers Peers (discovery) and future apps
-
+## Discovery and Directory
+Zones remain the discovery scope:
+- zone keys are operator/user-shared
+- directory stores discovered devices and service-backed devices
+- service-backed devices must render distinctly from user devices
+- appliance inventory should show host relationship, freshness, and launch availability
 
 ## State Storage
 
 ### IndexedDB
-Authoritative local state store.
+Authoritative local state store:
+- device metadata
+- identity metadata
+- pairing requests
+- notifications
+- discovered devices
+- discovered service-backed devices
+- zone memberships
 
-Stores:
-- Device metadata
-- Identity metadata
-- Pairing requests
-- Notifications
-- Blocked devices
-- Directory entries
-- Zone list
-
-### Relay / Room State
-Ephemeral + syncable channel.
-
+### Relay and App-Channel State
 Used for:
-- Pairing request broadcast
-- Pair approval events
-- Notifications clear sync (optional)
-- Device/identity label updates
-- Zone presence
+- pairing requests/approvals
+- device and identity label updates
+- gateway/service status events
+- discovery and zone presence
+- managed launch/signaling coordination
 
 ## Security Model
+- device-level signing remains mandatory
+- Service Worker remains the cryptographic authority for shell state
+- long-lived identity secrets must not be passed in app launch URLs
+- managed app surfaces should redeem short-lived launch context
+- relay transport remains untrusted and validation-bound
 
-- Device-level signing mandatory
-- WebAuthn / TPM encouraged during onboarding
-- Software fallback supported
-- Room keys symmetric, distributed via trusted device approval
-- UI never holds secret keys
-- Service Worker is cryptographic authority
-
-## Pairing Lifecycle Rules
-
-1. Request created -> status = pending
-2. Approval or rejection:
-   - Status updated immediately
-   - Identity device list updated
-   - Notification emitted
-3. Pending lists only show pending
-4. Requests referencing known devices are auto-filtered
-5. Requester device auto-advances to Home when approved
-
-## Notifications Rules
-
-- Stored as structured objects
-- Clearing updates data store, not just UI
-- May propagate as room state
-- Never persist “phantom” items after resolution
-
-## Roadmap
-
-### Near Term
-- Stabilize zone list propagation + naming
-- Clean up Peers UX
-
-### Mid Term
-- P0: constitute-gateway repo (native backbone)
-- P2: browser swarm transport (TURN-backed)
-- P3: codebase refactor + module boundaries
-- Shared encrypted data layers
-- Messaging maturation + double-ratchet encryption
-
-### Long Term
-- Full decentralized app substrate
-- Identity-scoped application namespaces
-- Cross-app identity federation
-- Plugin / module system
+## Active Convergence Slice
+`constitute` is converging toward:
+- service-backed device rendering (`deviceKind = user|service`)
+- gateway-managed launch authorization
+- Pages-native app surfaces (`tld/<repo-name>/`)
+- managed NVR launch into `constitute-nvr-ui`
+- WebRTC live preview as the managed browser media direction
 
 ## Design Principles
-
-- Transport agnostic
-- Security first
-- State authoritative in daemon
-- UI is observer, not source of truth
-- Progressive decentralization
-- Minimal implicit trust
-- Deterministic lifecycle resolution
-
-## Gateway Convergence (Active)
-Web convergence is currently targeting `constitute-gateway/docs/PROTOCOL.md` as contract source.
-
-Current alignment slice:
-- canonical app-channel request envelope support (`swarm_record_request` + legacy alias compatibility)
-- DHT request plumbing (`swarm_dht_get`, `swarm_dht_put`) and local DHT record handling
-- relay ingest hardening (signature verification + timestamp/TTL window checks before mutation)
-- discovery/presence role metadata parity (`role`, `serviceVersion`)
-- service-advertised app module hints (`uiRepo`, `uiRef`, optional `uiManifestUrl`) consumed before static role maps
-
-Exit criteria for this slice:
-- web emits and consumes gateway canonical envelopes without regressions
-- invalid/expired relay envelopes are ignored consistently
-- docs reflect current parity state and known remaining gaps
-
+- management shell and app surfaces stay separate
+- gateway remains the canonical browser control boundary
+- transport choice must not redefine trust
+- service-backed devices participate in the same identity model
+- launch context is short-lived and explicit

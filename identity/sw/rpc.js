@@ -622,6 +622,75 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
     return { ok: true, requestId, targetGatewayPk, zoneKeys, extraZoneKeys };
   }
 
+  if (method === 'gateway.managedLaunch.request') {
+    const ident = await getIdentity();
+    if (!ident?.linked || !ident?.id || !ident?.label) throw new Error('no linked identity');
+
+    const dev = await ensureDevice();
+    const targetGatewayPk = String(params?.gatewayPk || params?.gatewayDevicePk || params?.toDevicePk || '').trim();
+    const servicePk = String(params?.servicePk || '').trim();
+    const service = String(params?.service || 'nvr').trim() || 'nvr';
+    const capability = String(params?.capability || `${service}.view`).trim() || `${service}.view`;
+    if (!targetGatewayPk) throw new Error('missing gatewayPk');
+    if (!servicePk) throw new Error('missing servicePk');
+
+    const requestId = String(params?.requestId || '').trim() || makeSwarmRequestId('gw-launch');
+    const payload = {
+      type: 'gateway_managed_launch_request',
+      requestId,
+      toDevicePk: targetGatewayPk,
+      identityId: String(ident.id || '').trim(),
+      devicePk: String(dev?.nostr?.pk || '').trim(),
+      servicePk,
+      service,
+      capability,
+      appRepo: String(params?.appRepo || '').trim(),
+      display: params?.display && typeof params.display === 'object' ? params.display : {},
+      ts: Date.now(),
+      ttl: 120,
+    };
+
+    const zones = await listZones(ident || {}).catch(() => []);
+    await publishAppEvent(sw, payload, pairingTags(ident.label, zones, targetGatewayPk));
+    return { ok: true, requestId, gatewayPk: targetGatewayPk, servicePk, service, capability };
+  }
+
+  if (method === 'gateway.signal.request') {
+    const ident = await getIdentity();
+    if (!ident?.linked || !ident?.id || !ident?.label) throw new Error('no linked identity');
+
+    const dev = await ensureDevice();
+    const targetGatewayPk = String(params?.gatewayPk || params?.gatewayDevicePk || params?.toDevicePk || '').trim();
+    const servicePk = String(params?.servicePk || '').trim();
+    const service = String(params?.service || 'nvr').trim() || 'nvr';
+    const signalType = String(params?.signalType || '').trim().toLowerCase();
+    const launchToken = String(params?.launchToken || '').trim();
+    if (!targetGatewayPk) throw new Error('missing gatewayPk');
+    if (!servicePk) throw new Error('missing servicePk');
+    if (!signalType) throw new Error('missing signalType');
+    if (!launchToken) throw new Error('missing launchToken');
+
+    const requestId = String(params?.requestId || '').trim() || makeSwarmRequestId('gw-signal');
+    const payload = {
+      type: 'gateway_signal_request',
+      requestId,
+      toDevicePk: targetGatewayPk,
+      identityId: String(ident.id || '').trim(),
+      devicePk: String(dev?.nostr?.pk || '').trim(),
+      servicePk,
+      service,
+      signalType,
+      payload: params?.payload ?? {},
+      launchToken,
+      ts: Date.now(),
+      ttl: 120,
+    };
+
+    const zones = await listZones(ident || {}).catch(() => []);
+    await publishAppEvent(sw, payload, pairingTags(ident.label, zones, targetGatewayPk));
+    return { ok: true, requestId, gatewayPk: targetGatewayPk, servicePk, service, signalType };
+  }
+
   if (method === 'identity.create') {
     // REQUIRED: must not already have a linked identity on this device
     const existing = await getIdentity();

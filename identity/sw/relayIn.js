@@ -841,6 +841,68 @@ export async function handleRelayFrame(sw, raw) {
     return;
   }
 
+  if (payload.type === 'gateway_managed_launch_status') {
+    const toDevicePk = String(payload.toDevicePk || '').trim();
+    if (toDevicePk && toDevicePk !== String(dev?.nostr?.pk || '').trim()) return;
+    emit(sw, {
+      type: 'gateway_managed_launch_status',
+      requestId: String(payload.requestId || '').trim(),
+      status: String(payload.status || '').trim(),
+      gatewayPk: String(payload.gatewayPk || '').trim(),
+      toDevicePk,
+      identityId: String(payload.identityId || '').trim(),
+      devicePk: String(payload.devicePk || '').trim(),
+      servicePk: String(payload.servicePk || '').trim(),
+      service: String(payload.service || '').trim(),
+      capability: String(payload.capability || '').trim(),
+      launchToken: String(payload.launchToken || '').trim(),
+      expiresAt: Number(payload.expiresAt || 0),
+      display: payload.display ?? null,
+      reason: String(payload.reason || '').trim(),
+      detail: String(payload.detail || '').trim(),
+      ts: Number(payload.ts || Date.now()),
+    });
+    return;
+  }
+
+  if (payload.type === 'gateway_signal_status') {
+    const devicePk = String(payload.devicePk || '').trim();
+    if (devicePk && devicePk !== String(dev?.nostr?.pk || '').trim()) return;
+    emit(sw, {
+      type: 'gateway_signal_status',
+      requestId: String(payload.requestId || '').trim(),
+      status: String(payload.status || '').trim(),
+      gatewayPk: String(payload.gatewayPk || '').trim(),
+      identityId: String(payload.identityId || '').trim(),
+      devicePk,
+      servicePk: String(payload.servicePk || '').trim(),
+      service: String(payload.service || '').trim(),
+      signalType: String(payload.signalType || '').trim(),
+      reason: String(payload.reason || '').trim(),
+      detail: String(payload.detail || '').trim(),
+      ts: Number(payload.ts || Date.now()),
+    });
+    return;
+  }
+
+  if (payload.type === 'gateway_signal') {
+    const devicePk = String(payload.devicePk || '').trim();
+    if (devicePk && devicePk !== String(dev?.nostr?.pk || '').trim()) return;
+    emit(sw, {
+      type: 'gateway_signal',
+      requestId: String(payload.requestId || '').trim(),
+      gatewayPk: String(payload.gatewayPk || '').trim(),
+      identityId: String(payload.identityId || '').trim(),
+      devicePk,
+      servicePk: String(payload.servicePk || '').trim(),
+      service: String(payload.service || '').trim(),
+      signalType: String(payload.signalType || '').trim(),
+      payload: payload.payload ?? null,
+      ts: Number(payload.ts || Date.now()),
+    });
+    return;
+  }
+
   // --- Swarm signal (WebRTC signaling) ---
   if (payload.type === 'swarm_signal') {
     const to = String(payload.to || '').trim();

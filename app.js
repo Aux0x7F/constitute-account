@@ -129,17 +129,19 @@ let swarmBootRequested = false;
 const APPS_REPOS_KEY = 'constitute.apps.repos';
 const APPS_ENABLED_KEY = 'constitute.apps.enabled';
 const GATEWAY_EXTRA_ZONES_KEY = 'constitute.gateway.extraZones';
-const DEFAULT_APP_REPOS = ['https://github.com/Aux0x7F/constitute-nvr-ui'];
-const ROLE_APP_REPO_MAP = Object.freeze({
-  nvr: ['https://github.com/Aux0x7F/constitute-nvr-ui'],
-});
-const SERVICE_APP_REPO_MAP = Object.freeze({
-  nvr: ['https://github.com/Aux0x7F/constitute-nvr-ui'],
-});
+const DEFAULT_APP_REPOS = [];
+const ROLE_APP_REPO_MAP = Object.freeze({});
+const SERVICE_APP_REPO_MAP = Object.freeze({});
 let appRepoCatalog = [];
 let appEnabledIds = new Set();
 let appLaunchHints = new Map();
 window.__constituteEnabledApps = [];
+const MANAGED_APP_SURFACES = Object.freeze({
+  nvr: 'constitute-nvr-ui',
+});
+const MANAGED_LAUNCH_STORAGE_PREFIX = 'constitute.launch.';
+const MANAGED_LAUNCH_TTL_MS = 2 * 60 * 1000;
+const MANAGED_APP_CHANNEL_NAME = 'constitute.app.launch';
 
 const NVR_INSTALLERS = Object.freeze({
   linux: {
@@ -237,7 +239,10 @@ async function resolveGatewayUtilityAssetUrl(assetName) {
 let lastSwarmDevices = [];
 const pendingGatewayServiceInstalls = new Map();
 const pendingGatewayZoneSyncs = new Map();
+const pendingManagedLaunches = new Map();
+const pendingGatewaySignals = new Map();
 let gatewayExtraZonesByPk = {};
+let managedAppChannel = null;
 
 class SwarmTransport {
   constructor({ client, onState }) {
@@ -752,6 +757,188 @@ function setGatewayInstallCommandPreview(msg = '') {
   gatewayInstallCommandPreview.textContent = String(msg || '');
 }
 
+function randomOpaqueId(prefix = 'id') {
+  const bytes = new Uint8Array(12);
+  crypto.getRandomValues(bytes);
+  const token = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+  return `${prefix}-${token}`;
+}
+
+function managedLaunchStorageKey(launchId) {
+  return `${MANAGED_LAUNCH_STORAGE_PREFIX}${String(launchId || '').trim()}`;
+}
+
+function cleanupManagedLaunchContexts() {
+  try {
+    const now = Date.now();
+    const keys = [];
+    for (let i = 0; i < localStorage.length; i += 1) {
+      const key = localStorage.key(i);
+      if (key && key.startsWith(MANAGED_LAUNCH_STORAGE_PREFIX)) keys.push(key);
+    }
+    for (const key of keys) {
+      try {
+        const raw = localStorage.getItem(key);
+        const parsed = raw ? JSON.parse(raw) : null;
+        const expiresAt = Number(parsed?.expiresAt || parsed?.createdAt || 0);
+        if (!parsed || !expiresAt || expiresAt < now) {
+          localStorage.removeItem(key);
+        }
+      } catch {
+        localStorage.removeItem(key);
+      }
+    }
+  } catch {}
+}
+
+function readManagedLaunchContext(launchId) {
+  const id = String(launchId || '').trim();
+  if (!id) return null;
+  cleanupManagedLaunchContexts();
+  try {
+    const raw = localStorage.getItem(managedLaunchStorageKey(id));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    const expiresAt = Number(parsed?.expiresAt || 0);
+    if (expiresAt && expiresAt < Date.now()) {
+      localStorage.removeItem(managedLaunchStorageKey(id));
+      return null;
+    }
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeManagedLaunchContext(context) {
+  const launchId = String(context?.launchId || '').trim();
+  if (!launchId) throw new Error('launch context missing launchId');
+  cleanupManagedLaunchContexts();
+  const payload = {
+    ...context,
+    createdAt: Number(context?.createdAt || Date.now()),
+    expiresAt: Number(context?.expiresAt || (Date.now() + MANAGED_LAUNCH_TTL_MS)),
+  };
+  localStorage.setItem(managedLaunchStorageKey(launchId), JSON.stringify(payload));
+  return payload;
+}
+
+function buildManagedAppSurfaceUrl(repoName, launchId) {
+  const repo = String(repoName || '').trim();
+  if (!repo) throw new Error('missing managed app repo');
+  const target = new URL(window.location.origin);
+  target.pathname = `/${repo}/`;
+  target.hash = `launch=${encodeURIComponent(String(launchId || '').trim())}`;
+  return target.toString();
+}
+
+function settlePending(map, requestId, error, result) {
+  const key = String(requestId || '').trim();
+  if (!key) return false;
+  const pending = map.get(key);
+  if (!pending) return false;
+  clearTimeout(pending.timer);
+  map.delete(key);
+  if (error) pending.reject(error);
+  else pending.resolve(result);
+  return true;
+}
+
+function createPendingRequest(map, requestId, label, timeoutMs = 20_000) {
+  const key = String(requestId || '').trim();
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      map.delete(key);
+      reject(new Error(`${label} timed out`));
+    }, timeoutMs);
+    map.set(key, { resolve, reject, timer, createdAt: Date.now() });
+  });
+}
+
+function managedAppSurfaceRepoForService(service) {
+  const key = normalizeRole(service || '');
+  return MANAGED_APP_SURFACES[key] || '';
+}
+
+function isManagedFirstPartyApp(app) {
+  const repo = String(app?.repo || '').trim().toLowerCase();
+  return Object.values(MANAGED_APP_SURFACES).some((value) => value.toLowerCase() === repo);
+}
+
+function ensureManagedAppChannel() {
+  if (managedAppChannel || typeof BroadcastChannel === 'undefined') return managedAppChannel;
+  managedAppChannel = new BroadcastChannel(MANAGED_APP_CHANNEL_NAME);
+  managedAppChannel.onmessage = (event) => {
+    handleManagedAppChannelMessage(event?.data || {}).catch((err) => {
+      console.error('managed app channel message failed', err);
+    });
+  };
+  return managedAppChannel;
+}
+
+async function handleManagedAppChannelMessage(message) {
+  const type = String(message?.type || '').trim();
+  const channel = ensureManagedAppChannel();
+  if (!type || !channel) return;
+
+  if (type === 'launch-context.request') {
+    const launchId = String(message?.launchId || '').trim();
+    if (!launchId) return;
+    const context = readManagedLaunchContext(launchId);
+    channel.postMessage({
+      type: 'launch-context.response',
+      launchId,
+      ok: !!context,
+      context,
+      error: context ? '' : 'launch context unavailable',
+    });
+    return;
+  }
+
+  if (type === 'gateway.signal.request') {
+    const requestId = String(message?.requestId || '').trim() || randomOpaqueId('gw-signal-ui');
+    const launchId = String(message?.launchId || '').trim();
+    const context = readManagedLaunchContext(launchId);
+    if (!context) {
+      channel.postMessage({
+        type: 'gateway.signal.response',
+        launchId,
+        requestId,
+        ok: false,
+        error: 'launch context unavailable',
+      });
+      return;
+    }
+
+    try {
+      const result = await requestGatewaySignal({
+        requestId,
+        gatewayPk: context.gatewayPk,
+        servicePk: context.servicePk,
+        service: context.service || 'nvr',
+        launchToken: context.launchToken,
+        signalType: String(message?.signalType || '').trim(),
+        payload: message?.payload ?? {},
+      });
+      channel.postMessage({
+        type: 'gateway.signal.response',
+        launchId,
+        requestId,
+        ok: true,
+        result,
+      });
+    } catch (err) {
+      channel.postMessage({
+        type: 'gateway.signal.response',
+        launchId,
+        requestId,
+        ok: false,
+        error: String(err?.message || err),
+      });
+    }
+  }
+}
+
 function summarizeInstallDetail(detail) {
   const raw = String(detail || '').trim();
   if (!raw) return '';
@@ -808,6 +995,64 @@ function handleGatewayZoneSyncStatusEvent(evt) {
   if (status === 'complete') {
     refreshAll().catch(() => {});
   }
+}
+
+function handleGatewayManagedLaunchStatusEvent(evt) {
+  const requestId = String(evt?.requestId || '').trim();
+  const status = String(evt?.status || '').trim().toLowerCase();
+  if (!requestId) return;
+
+  if (status === 'complete') {
+    settlePending(pendingManagedLaunches, requestId, null, {
+      requestId,
+      gatewayPk: String(evt?.gatewayPk || '').trim(),
+      servicePk: String(evt?.servicePk || '').trim(),
+      service: String(evt?.service || '').trim(),
+      capability: String(evt?.capability || '').trim(),
+      launchToken: String(evt?.launchToken || '').trim(),
+      expiresAt: Number(evt?.expiresAt || 0),
+      display: evt?.display ?? {},
+      ts: Number(evt?.ts || Date.now()),
+    });
+    return;
+  }
+
+  if (status === 'failed' || status === 'rejected') {
+    const detail = String(evt?.detail || evt?.reason || 'managed launch failed').trim();
+    settlePending(pendingManagedLaunches, requestId, new Error(detail || 'managed launch failed'));
+  }
+}
+
+function handleGatewaySignalStatusRelayEvent(evt) {
+  const requestId = String(evt?.requestId || '').trim();
+  const status = String(evt?.status || '').trim().toLowerCase();
+  if (!requestId) return;
+  if (status === 'failed' || status === 'rejected') {
+    const detail = String(evt?.detail || evt?.reason || 'gateway signal failed').trim();
+    settlePending(pendingGatewaySignals, requestId, new Error(detail || 'gateway signal failed'));
+    return;
+  }
+  if (status === 'complete' && String(evt?.signalType || '').trim().toLowerCase() === 'session_close') {
+    settlePending(pendingGatewaySignals, requestId, null, {
+      requestId,
+      signalType: 'session_close',
+      ts: Number(evt?.ts || Date.now()),
+    });
+  }
+}
+
+function handleGatewaySignalRelayEvent(evt) {
+  const requestId = String(evt?.requestId || '').trim();
+  if (!requestId) return;
+  settlePending(pendingGatewaySignals, requestId, null, {
+    requestId,
+    gatewayPk: String(evt?.gatewayPk || '').trim(),
+    servicePk: String(evt?.servicePk || '').trim(),
+    service: String(evt?.service || '').trim(),
+    signalType: String(evt?.signalType || '').trim(),
+    payload: evt?.payload ?? {},
+    ts: Number(evt?.ts || Date.now()),
+  });
 }
 
 function detectOperatorPlatform() {
@@ -1148,6 +1393,7 @@ function applianceSeenAt(rec) {
 function summarizeAppliance(rec, owned) {
   const pk = String(rec?.devicePk || rec?.pk || '').trim();
   const label = String(rec?.deviceLabel || rec?.label || '').trim();
+  const deviceKind = normalizeRole(rec?.deviceKind || rec?.device_kind || '') || 'user';
   const role = normalizeRole(rec?.role || rec?.nodeType || rec?.type || '') || 'unknown';
   const service = normalizeRole(rec?.service || '') || 'none';
   const version = String(rec?.serviceVersion || rec?.service_version || '').trim();
@@ -1155,10 +1401,15 @@ function summarizeAppliance(rec, owned) {
   const releaseChannel = String(rec?.releaseChannel || rec?.release_channel || '').trim();
   const releaseTrack = String(rec?.releaseTrack || rec?.release_track || '').trim();
   const releaseBranch = String(rec?.releaseBranch || rec?.release_branch || '').trim();
+  const hostGatewayPk = String(rec?.hostGatewayPk || rec?.host_gateway_pk || '').trim();
+  const hostedServices = Array.isArray(rec?.hostedServices || rec?.hosted_services)
+    ? (rec.hostedServices || rec.hosted_services)
+    : [];
   const updatedAt = Number(rec?.updatedAt || rec?.updated_at || rec?.ts || rec?.lastSeen || 0);
   return {
     pk,
     title: label || `${role}:${pk.slice(0, 12)}`,
+    deviceKind,
     role,
     service,
     version,
@@ -1166,6 +1417,8 @@ function summarizeAppliance(rec, owned) {
     releaseChannel,
     releaseTrack,
     releaseBranch,
+    hostGatewayPk,
+    hostedServices,
     updatedAt,
     owned,
   };
@@ -1238,6 +1491,71 @@ async function ensureNvrAppEnabledFromRecord(record) {
   ) || null;
 }
 
+function managedGatewayPkForRecord(record) {
+  const gatewayPk = String(record?.hostGatewayPk || record?.host_gateway_pk || '').trim();
+  if (gatewayPk) return gatewayPk;
+  if (isGatewayRecord(record)) return String(record?.devicePk || record?.pk || '').trim();
+  return '';
+}
+
+function managedServicePkForRecord(record) {
+  return String(record?.devicePk || record?.pk || '').trim();
+}
+
+async function requestGatewayManagedLaunch(record, opts = {}) {
+  const gatewayPk = managedGatewayPkForRecord(record);
+  const servicePk = managedServicePkForRecord(record);
+  const service = String(opts?.service || record?.service || 'nvr').trim() || 'nvr';
+  const capability = String(opts?.capability || `${service}.view`).trim() || `${service}.view`;
+  if (!gatewayPk) throw new Error('host gateway is not known for this service yet');
+  if (!servicePk) throw new Error('service public key is missing');
+  if (!String(lastIdentity?.id || '').trim()) throw new Error('link an identity before opening managed services');
+  if (!String(lastDeviceState?.pk || '').trim()) throw new Error('device key is not ready yet');
+
+  const requestId = randomOpaqueId('gw-launch');
+  const pending = createPendingRequest(pendingManagedLaunches, requestId, 'managed launch', 20_000);
+  try {
+    await client.call('gateway.managedLaunch.request', {
+      requestId,
+      gatewayPk,
+      servicePk,
+      service,
+      capability,
+      appRepo: managedAppSurfaceRepoForService(service),
+      display: {
+        shell: 'constitute',
+        surface: managedAppSurfaceRepoForService(service),
+      },
+    }, { timeoutMs: 20_000 });
+  } catch (err) {
+    settlePending(pendingManagedLaunches, requestId, err);
+    throw err;
+  }
+  return await pending;
+}
+
+async function requestGatewaySignal(req) {
+  const requestId = String(req?.requestId || '').trim() || randomOpaqueId('gw-signal');
+  const signalType = String(req?.signalType || '').trim().toLowerCase();
+  if (!signalType) throw new Error('missing signal type');
+  const pending = createPendingRequest(pendingGatewaySignals, requestId, `gateway ${signalType}`, 30_000);
+  try {
+    await client.call('gateway.signal.request', {
+      requestId,
+      gatewayPk: String(req?.gatewayPk || '').trim(),
+      servicePk: String(req?.servicePk || '').trim(),
+      service: String(req?.service || 'nvr').trim() || 'nvr',
+      signalType,
+      payload: req?.payload ?? {},
+      launchToken: String(req?.launchToken || '').trim(),
+    }, { timeoutMs: 20_000 });
+  } catch (err) {
+    settlePending(pendingGatewaySignals, requestId, err);
+    throw err;
+  }
+  return await pending;
+}
+
 function launchAppWindow(app) {
   const base = appLaunchUrl(app);
   if (!base) {
@@ -1258,15 +1576,48 @@ function launchAppWindow(app) {
 }
 
 async function launchNvrControlPanel(record) {
+  let popup = null;
   try {
-    const app = await ensureNvrAppEnabledFromRecord(record);
-    if (!app) {
-      setGatewayInstallStatus('NVR UI manifest unavailable for this device.', true);
-      return;
+    popup = window.open('', '_blank');
+    if (popup && !popup.closed) {
+      popup.document.title = 'Launching Security Cameras';
+      popup.document.body.innerHTML = '<pre style="font:14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; padding:16px; color:#dce3ea; background:#0b1220;">Launching Security Cameras…</pre>';
     }
-    launchAppWindow(app);
+
+    const launch = await requestGatewayManagedLaunch(record, {
+      service: 'nvr',
+      capability: 'nvr.view',
+    });
+
+    const launchId = randomOpaqueId('launch');
+    const context = writeManagedLaunchContext({
+      launchId,
+      app: 'nvr',
+      repo: managedAppSurfaceRepoForService('nvr'),
+      identityId: String(lastIdentity?.id || '').trim(),
+      devicePk: String(lastDeviceState?.pk || '').trim(),
+      gatewayPk: String(launch?.gatewayPk || managedGatewayPkForRecord(record) || '').trim(),
+      servicePk: String(launch?.servicePk || managedServicePkForRecord(record) || '').trim(),
+      service: 'nvr',
+      launchToken: String(launch?.launchToken || '').trim(),
+      display: launch?.display ?? {},
+      createdAt: Date.now(),
+      expiresAt: Number(launch?.expiresAt || (Date.now() + MANAGED_LAUNCH_TTL_MS)),
+    });
+
+    const url = buildManagedAppSurfaceUrl(managedAppSurfaceRepoForService('nvr'), launchId);
+    if (popup && !popup.closed) {
+      popup.location.replace(url);
+    } else {
+      window.open(url, '_blank', 'noopener,noreferrer');
+    }
+    setGatewayInstallStatus('Opened Security Cameras.', false);
   } catch (err) {
     setGatewayInstallStatus(`NVR control panel failed: ${String(err?.message || err)}`, true);
+    if (popup && !popup.closed) {
+      popup.document.title = 'Security Cameras Launch Failed';
+      popup.document.body.innerHTML = `<pre style="font:14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; padding:16px; color:#fca5a5; background:#0b1220;">Launch failed: ${escapeHtml(String(err?.message || err))}</pre>`;
+    }
   }
 }
 
@@ -1275,19 +1626,46 @@ function renderApplianceList(identityDevices, swarmDevices) {
   clear(applianceList);
 
   const owned = ownedPkSet(identityDevices);
-  const recs = [];
+  const actual = [];
   const seen = new Set();
-  for (const rec of (Array.isArray(swarmDevices) ? swarmDevices : [])) {
+  const sourceRecords = Array.isArray(swarmDevices) ? swarmDevices : [];
+  for (const rec of sourceRecords) {
     const pk = String(rec?.devicePk || rec?.pk || '').trim();
     if (!pk || seen.has(pk)) continue;
     if (!(isGatewayRecord(rec) || isNvrRecord(rec))) continue;
-    const ownedRec = owned.has(pk);
+    const ownedRec = owned.has(pk) || owned.has(String(rec?.hostGatewayPk || rec?.host_gateway_pk || '').trim());
     const seenAt = applianceSeenAt(rec);
     const ageMs = seenAt ? Math.max(0, Date.now() - seenAt) : Number.POSITIVE_INFINITY;
     // Keep owned appliances visible even if stale; hide very old unowned discovery rows.
     if (!ownedRec && ageMs > APPLIANCE_DISCOVERY_MAX_AGE_MS) continue;
     seen.add(pk);
-    recs.push(rec);
+    actual.push(rec);
+  }
+
+  const recs = [...actual];
+  const actualPkSet = new Set(actual.map((rec) => String(rec?.devicePk || rec?.pk || '').trim()).filter(Boolean));
+  for (const rec of actual) {
+    if (!isGatewayRecord(rec)) continue;
+    const hostedServices = Array.isArray(rec?.hostedServices || rec?.hosted_services)
+      ? (rec.hostedServices || rec.hosted_services)
+      : [];
+    for (const hosted of hostedServices) {
+      const pk = String(hosted?.devicePk || hosted?.device_pk || '').trim();
+      if (!pk || actualPkSet.has(pk)) continue;
+      recs.push({
+        devicePk: pk,
+        deviceLabel: String(hosted?.deviceLabel || hosted?.device_label || hosted?.service || 'service').trim(),
+        deviceKind: String(hosted?.deviceKind || hosted?.device_kind || 'service').trim() || 'service',
+        role: String(hosted?.service || '').trim(),
+        service: String(hosted?.service || '').trim(),
+        hostGatewayPk: String(hosted?.hostGatewayPk || hosted?.host_gateway_pk || rec?.devicePk || rec?.pk || '').trim(),
+        serviceVersion: String(hosted?.serviceVersion || hosted?.service_version || '').trim(),
+        updatedAt: Number(hosted?.updatedAt || hosted?.updated_at || rec?.updatedAt || 0),
+        freshnessMs: Number(hosted?.freshnessMs || hosted?.freshness_ms || 0),
+        hostedSynthetic: true,
+      });
+      actualPkSet.add(pk);
+    }
   }
 
   if (recs.length === 0) {
@@ -1316,12 +1694,21 @@ function renderApplianceList(identityDevices, swarmDevices) {
     const last = seenAt ? new Date(seenAt).toLocaleString() : 'n/a';
     const suffix = info.version ? ` (${info.version})` : '';
     const host = info.hostPlatform ? ` • host ${info.hostPlatform}` : '';
+    const kind = info.deviceKind ? `type ${info.deviceKind}` : '';
     const releaseMeta = formatReleaseMeta(info.releaseChannel, info.releaseTrack, info.releaseBranch);
     const releaseLine = releaseMeta ? `<div class="itemMeta">release ${escapeHtml(releaseMeta)}</div>` : '';
+    const hostGatewayLine = info.hostGatewayPk
+      ? `<div class="itemMeta">host gateway ${escapeHtml(info.hostGatewayPk.slice(0, 16))}…</div>`
+      : '';
+    const hostedServicesLine = Array.isArray(info.hostedServices) && info.hostedServices.length > 0
+      ? `<div class="itemMeta">hosted services ${escapeHtml(info.hostedServices.map((svc) => String(svc?.service || 'service')).join(', '))}</div>`
+      : '';
     meta.innerHTML = `
       <div class="itemTitle">${escapeHtml(info.title)}</div>
       <div class="itemMeta">pk ${escapeHtml(info.pk.slice(0, 16))}…</div>
-      <div class="itemMeta">role ${escapeHtml(info.role)} • service ${escapeHtml(info.service)}${escapeHtml(suffix)}${escapeHtml(host)}</div>
+      <div class="itemMeta">${escapeHtml([kind, `role ${info.role}`, `service ${info.service}${suffix}`, host ? host.replace(/^ • /, '') : ''].filter(Boolean).join(' • '))}</div>
+      ${hostGatewayLine}
+      ${hostedServicesLine}
       ${releaseLine}
       <div class="itemMeta"><span class="freshnessDot ${escapeHtml(freshness.css)}" title="${escapeHtml(last)}"></span>${escapeHtml(freshness.label)} • ${escapeHtml(formatAgeShort(seenAt))}</div>
       <div class="itemMeta">${info.owned ? 'owned by this identity' : 'discovered in zone'} • updated ${escapeHtml(last)}</div>
@@ -1422,11 +1809,16 @@ function renderApplianceList(identityDevices, swarmDevices) {
       const open = document.createElement('button');
       open.type = 'button';
       open.textContent = 'Open Security Cameras';
-      open.onclick = () => {
-        launchNvrControlPanel(rec).catch((err) => {
-          setGatewayInstallStatus(`NVR launch failed: ${String(err?.message || err)}`, true);
-        });
-      };
+      if (!info.owned) {
+        open.disabled = true;
+        open.title = 'Only services owned by this identity can be launched.';
+      } else {
+        open.onclick = () => {
+          launchNvrControlPanel(rec).catch((err) => {
+            setGatewayInstallStatus(`NVR launch failed: ${String(err?.message || err)}`, true);
+          });
+        };
+      }
       actions.appendChild(open);
     }
 
@@ -1922,11 +2314,11 @@ function renderHomeApps() {
   clear(homeAppsList);
   if (!homeAppsList) return;
 
-  const apps = enabledAppManifests();
+  const apps = enabledAppManifests().filter((app) => !isManagedFirstPartyApp(app));
   if (!apps.length) {
     const d = document.createElement('div');
     d.className = 'small muted';
-    d.textContent = 'No apps enabled.';
+    d.textContent = 'No external apps enabled. Managed services launch from Appliances.';
     homeAppsList.appendChild(d);
     return;
   }
@@ -2941,6 +3333,15 @@ function startSharedRelayPipe(client, relayUrl) {
       if (evt?.type === 'gateway_zone_sync_status') {
         handleGatewayZoneSyncStatusEvent(evt);
       }
+      if (evt?.type === 'gateway_managed_launch_status') {
+        handleGatewayManagedLaunchStatusEvent(evt);
+      }
+      if (evt?.type === 'gateway_signal_status') {
+        handleGatewaySignalStatusRelayEvent(evt);
+      }
+      if (evt?.type === 'gateway_signal') {
+        handleGatewaySignalRelayEvent(evt);
+      }
       if (evt?.type === 'notify') refreshAll().catch(() => {});
     }
   });
@@ -2964,6 +3365,8 @@ function startSharedRelayPipe(client, relayUrl) {
   }
 
   loadGatewayExtraZones();
+  cleanupManagedLaunchContexts();
+  ensureManagedAppChannel();
   wireUi();
   await hydrateAppCatalog();
   _pushConnLog('init');
