@@ -142,6 +142,7 @@ const MANAGED_APP_SURFACES = Object.freeze({
 const MANAGED_LAUNCH_STORAGE_PREFIX = 'constitute.launch.';
 const MANAGED_LAUNCH_TTL_MS = 2 * 60 * 1000;
 const MANAGED_APP_CHANNEL_NAME = 'constitute.app.launch';
+const GATEWAY_INVENTORY_REFRESH_TTL_MS = 15_000;
 
 const NVR_INSTALLERS = Object.freeze({
   linux: {
@@ -237,6 +238,7 @@ async function resolveGatewayUtilityAssetUrl(assetName) {
 }
 
 let lastSwarmDevices = [];
+const gatewayInventoryRefreshAt = new Map();
 const pendingGatewayServiceInstalls = new Map();
 const pendingGatewayZoneSyncs = new Map();
 const pendingManagedLaunches = new Map();
@@ -1709,6 +1711,30 @@ function findGatewayHostedServiceRecord(gatewayPk, applianceRecords, serviceName
   }) || null;
 }
 
+function shouldRefreshGatewayInventory(gatewayPk) {
+  const pk = String(gatewayPk || '').trim();
+  if (!pk) return false;
+  const lastAt = Number(gatewayInventoryRefreshAt.get(pk) || 0);
+  return (Date.now() - lastAt) >= GATEWAY_INVENTORY_REFRESH_TTL_MS;
+}
+
+async function requestGatewayInventoryRefresh(gatewayPk) {
+  const pk = String(gatewayPk || '').trim();
+  if (!pk || !shouldRefreshGatewayInventory(pk)) return false;
+  gatewayInventoryRefreshAt.set(pk, Date.now());
+  console.info('[managed] requesting fresh gateway inventory', pk);
+  try {
+    await client.call('swarm.record.request', {
+      want: ['device'],
+      devicePk: pk,
+    }, { timeoutMs: 20_000 });
+    return true;
+  } catch (err) {
+    console.warn('[managed] gateway inventory request failed', pk, err);
+    return false;
+  }
+}
+
 function renderApplianceList(identityDevices, swarmDevices) {
   if (!applianceList) return;
   clear(applianceList);
@@ -2978,9 +3004,20 @@ async function refreshAll() {
   renderZones(lastZones);
   renderPeers(lastDirectory);
   renderApplianceList(ident?.devices || [], lastSwarmDevices);
+  renderHomeApps();
   renderPairRequests(reqs || [], ident?.devices || []);
   renderNotifications(notifs || []);
   ensureOnboardingState(ident);
+  const applianceRecords = buildApplianceRecords(ident?.devices || [], lastSwarmDevices);
+  const ownedGatewayPksNeedingRefresh = applianceRecords
+    .filter((rec) => isGatewayRecord(rec))
+    .map((rec) => summarizeAppliance(rec, ownedPkSet(ident?.devices || []).has(String(rec?.devicePk || rec?.pk || '').trim())))
+    .filter((info) => info.owned)
+    .filter((info) => !findGatewayHostedServiceRecord(info.pk, applianceRecords, 'nvr'))
+    .map((info) => info.pk);
+  for (const gatewayPk of ownedGatewayPksNeedingRefresh) {
+    requestGatewayInventoryRefresh(gatewayPk).catch(() => {});
+  }
   await autoEnableAppsForIdentityDeviceRoles(ident?.devices || [], swarmDevices || []).catch(() => {});
   if (swarm && ident?.linked) {
     swarm.setLocalPk(st.pk || '');
@@ -3364,7 +3401,11 @@ function startSharedRelayPipe(client, relayUrl) {
   port.onmessage = async (ev) => {
     const msg = ev.data || {};
     if (msg.type === 'relay.status') {
-      setRelayState(msg.state, msg.reason || '');
+      const reason = [msg.reason || '', msg.code != null ? `code=${msg.code}` : ''].filter(Boolean).join(' ');
+      if (msg.state === 'error' || msg.state === 'closed') {
+        console.warn('[relay.worker]', msg.state, reason || '(no reason)');
+      }
+      setRelayState(msg.state, reason);
       if (clientReady) {
         client.call('relay.status', {
           state: msg.state,

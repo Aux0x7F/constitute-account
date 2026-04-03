@@ -2,6 +2,16 @@ let ws = null;
 let wsUrl = null;
 let state = 'idle';
 const ports = new Set();
+let reconnectTimer = null;
+let reconnectAttempt = 0;
+let manualClose = false;
+
+function clearReconnectTimer() {
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+}
 
 function broadcast(msg) {
   for (const p of ports) {
@@ -14,9 +24,23 @@ function setState(next, extra = {}) {
   broadcast({ type: 'relay.status', state, url: wsUrl || '', ...extra });
 }
 
-function connect(url) {
+function scheduleReconnect() {
+  clearReconnectTimer();
+  if (manualClose || !wsUrl) return;
+  reconnectAttempt += 1;
+  const delayMs = Math.min(15_000, 1_000 * Math.max(1, reconnectAttempt));
+  setState('connecting', { reason: `reconnect in ${delayMs}ms`, attempt: reconnectAttempt });
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    connect(wsUrl, { isRetry: true });
+  }, delayMs);
+}
+
+function connect(url, { isRetry = false } = {}) {
   const target = String(url || '').trim();
   if (!target) throw new Error('missing url');
+  manualClose = false;
+  clearReconnectTimer();
 
   if (ws && wsUrl === target && ws.readyState === WebSocket.OPEN) {
     setState('open');
@@ -27,15 +51,19 @@ function connect(url) {
   ws = null;
 
   wsUrl = target;
-  setState('connecting');
+  setState('connecting', isRetry ? { reason: `retry ${reconnectAttempt}` } : {});
 
   ws = new WebSocket(wsUrl);
 
-  ws.onopen = () => setState('open');
+  ws.onopen = () => {
+    reconnectAttempt = 0;
+    setState('open');
+  };
   ws.onerror = () => setState('error');
   ws.onclose = (e) => {
     setState('closed', { code: e?.code ?? null, reason: e?.reason ?? '' });
     ws = null;
+    scheduleReconnect();
   };
 
   ws.onmessage = (e) => {
@@ -70,6 +98,8 @@ onconnect = (e) => {
         return;
       }
       if (msg.type === 'relay.close') {
+        manualClose = true;
+        clearReconnectTimer();
         try { if (ws) ws.close(); } catch {}
         ws = null;
         setState('closed');
