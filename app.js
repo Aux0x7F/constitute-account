@@ -275,6 +275,16 @@ class SwarmTransport {
       return;
     }
     const peers = this._selectPeers(list);
+    const peerSet = new Set(peers);
+    for (const pk of Array.from(this.channels.keys())) {
+      if (!peerSet.has(pk)) this._dropPeer(pk);
+    }
+    for (const pk of Array.from(this.peers.keys())) {
+      if (!peerSet.has(pk)) this._dropPeer(pk);
+    }
+    for (const pk of Array.from(this.connecting)) {
+      if (!peerSet.has(pk)) this.connecting.delete(pk);
+    }
     const key = peers.slice().sort().join(',');
     if (key === this.lastPeerKey) {
       this._updateState();
@@ -299,6 +309,16 @@ class SwarmTransport {
     if (openCount > 0) this.onState('open');
     else if (this.connecting.size > 0) this.onState('connecting');
     else this.onState('offline');
+  }
+
+  _dropPeer(pk) {
+    this.connecting.delete(pk);
+    const ch = this.channels.get(pk);
+    if (ch) try { ch.close(); } catch {}
+    this.channels.delete(pk);
+    const pc = this.peers.get(pk);
+    if (pc) try { pc.close(); } catch {}
+    this.peers.delete(pk);
   }
 
   async _connectTo(pk) {
@@ -430,6 +450,11 @@ class SwarmTransport {
 
   _selectPeers(list) {
     const arr = (Array.isArray(list) ? list : [])
+      .filter((rec) => {
+        const role = normalizeRole(rec?.role || rec?.nodeType || rec?.type || '');
+        const service = normalizeRole(rec?.service || '');
+        return role === 'browser' && !service;
+      })
       .map(r => String(r?.devicePk || '').trim())
       .filter(Boolean)
       .filter(pk => pk !== this.localPk);
@@ -1621,10 +1646,7 @@ async function launchNvrControlPanel(record) {
   }
 }
 
-function renderApplianceList(identityDevices, swarmDevices) {
-  if (!applianceList) return;
-  clear(applianceList);
-
+function buildApplianceRecords(identityDevices, swarmDevices) {
   const owned = ownedPkSet(identityDevices);
   const actual = [];
   const seen = new Set();
@@ -1636,7 +1658,6 @@ function renderApplianceList(identityDevices, swarmDevices) {
     const ownedRec = owned.has(pk) || owned.has(String(rec?.hostGatewayPk || rec?.host_gateway_pk || '').trim());
     const seenAt = applianceSeenAt(rec);
     const ageMs = seenAt ? Math.max(0, Date.now() - seenAt) : Number.POSITIVE_INFINITY;
-    // Keep owned appliances visible even if stale; hide very old unowned discovery rows.
     if (!ownedRec && ageMs > APPLIANCE_DISCOVERY_MAX_AGE_MS) continue;
     seen.add(pk);
     actual.push(rec);
@@ -1668,6 +1689,33 @@ function renderApplianceList(identityDevices, swarmDevices) {
     }
   }
 
+  recs.sort((a, b) => {
+    const aa = applianceSeenAt(a);
+    const bb = applianceSeenAt(b);
+    return Number(bb || 0) - Number(aa || 0);
+  });
+  return recs;
+}
+
+function findGatewayHostedServiceRecord(gatewayPk, applianceRecords, serviceName = 'nvr') {
+  const targetGatewayPk = String(gatewayPk || '').trim();
+  const targetService = normalizeRole(serviceName || '');
+  if (!targetGatewayPk || !targetService) return null;
+  const records = Array.isArray(applianceRecords) ? applianceRecords : [];
+  return records.find((rec) => {
+    const service = normalizeRole(rec?.service || '');
+    const hostGatewayPk = String(rec?.hostGatewayPk || rec?.host_gateway_pk || '').trim();
+    return service === targetService && hostGatewayPk === targetGatewayPk;
+  }) || null;
+}
+
+function renderApplianceList(identityDevices, swarmDevices) {
+  if (!applianceList) return;
+  clear(applianceList);
+
+  const owned = ownedPkSet(identityDevices);
+  const recs = buildApplianceRecords(identityDevices, swarmDevices);
+
   if (recs.length === 0) {
     const empty = document.createElement('div');
     empty.className = 'item';
@@ -1676,15 +1724,10 @@ function renderApplianceList(identityDevices, swarmDevices) {
     return;
   }
 
-  recs.sort((a, b) => {
-    const aa = applianceSeenAt(a);
-    const bb = applianceSeenAt(b);
-    return Number(bb || 0) - Number(aa || 0);
-  });
-
   for (const rec of recs) {
     const info = summarizeAppliance(rec, owned.has(String(rec?.devicePk || rec?.pk || '').trim()));
     const seenAt = applianceSeenAt(rec);
+    const hostedNvr = isGatewayRecord(rec) ? findGatewayHostedServiceRecord(info.pk, recs, 'nvr') : null;
 
     const item = document.createElement('div');
     item.className = 'item';
@@ -1767,10 +1810,16 @@ function renderApplianceList(identityDevices, swarmDevices) {
       if (gatewaySupportsServices) {
         const installNvr = document.createElement('button');
         installNvr.type = 'button';
-        installNvr.textContent = 'Install NVR Service';
+        installNvr.textContent = hostedNvr ? 'Open Security Cameras' : 'Install NVR Service';
         if (!info.owned) {
           installNvr.disabled = true;
           installNvr.title = 'Pair this gateway to your identity before installing services.';
+        } else if (hostedNvr) {
+          installNvr.onclick = () => {
+            launchNvrControlPanel(hostedNvr).catch((err) => {
+              setGatewayInstallStatus(`NVR launch failed: ${String(err?.message || err)}`, true);
+            });
+          };
         } else {
           installNvr.onclick = async () => {
             try {
@@ -2315,12 +2364,19 @@ function renderHomeApps() {
   if (!homeAppsList) return;
 
   const apps = enabledAppManifests().filter((app) => !isManagedFirstPartyApp(app));
-  if (!apps.length) {
+  const managedServices = buildApplianceRecords(lastIdentity?.devices || [], lastSwarmDevices)
+    .filter((rec) => isNvrRecord(rec))
+    .filter((rec) => {
+      const pk = String(rec?.devicePk || rec?.pk || '').trim();
+      const hostGatewayPk = String(rec?.hostGatewayPk || rec?.host_gateway_pk || '').trim();
+      const owned = ownedPkSet(lastIdentity?.devices || []);
+      return owned.has(pk) || owned.has(hostGatewayPk);
+    });
+  if (!apps.length && !managedServices.length) {
     const d = document.createElement('div');
     d.className = 'small muted';
-    d.textContent = 'No external apps enabled. Managed services launch from Appliances.';
+    d.textContent = 'No apps available yet. Install or pair a managed service from Appliances.';
     homeAppsList.appendChild(d);
-    return;
   }
 
   for (const app of apps) {
@@ -2349,6 +2405,42 @@ function renderHomeApps() {
     btn.textContent = 'Launch';
     btn.onclick = () => {
       launchAppWindow(app);
+    };
+
+    row.appendChild(left);
+    row.appendChild(btn);
+    homeAppsList.appendChild(row);
+  }
+
+  for (const rec of managedServices) {
+    const info = summarizeAppliance(rec, true);
+    const row = document.createElement('div');
+    row.className = 'item appItem';
+
+    const left = document.createElement('div');
+    left.className = 'appItemLabel';
+
+    const text = document.createElement('div');
+    const title = document.createElement('strong');
+    title.textContent = info.title || 'Security Cameras';
+
+    const meta = document.createElement('div');
+    meta.className = 'small muted';
+    const parts = ['Managed service', `service ${info.service || 'nvr'}`];
+    if (info.hostGatewayPk) parts.push(`gateway ${info.hostGatewayPk.slice(0, 12)}...`);
+    meta.textContent = parts.join(' - ');
+
+    text.appendChild(title);
+    text.appendChild(meta);
+    left.appendChild(text);
+
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.textContent = 'Open';
+    btn.onclick = () => {
+      launchNvrControlPanel(rec).catch((err) => {
+        setGatewayInstallStatus(`NVR launch failed: ${String(err?.message || err)}`, true);
+      });
     };
 
     row.appendChild(left);
