@@ -897,11 +897,12 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
   if (method === 'relay.status') {
     const state = String(params?.state || '');
     const url = String(params?.url || '');
-    if (state && state !== getRelayState()) {
+    const prevState = String(getRelayState() || '');
+    if (state && state !== prevState) {
       setRelayState(state);
       log(sw, `relay state -> ${state} ${url}`);
     }
-    if (state === 'open') {
+    if (state === 'open' && prevState !== 'open') {
       const ident = await getIdentity();
       const dev = await ensureDevice();
       await subOpen(sw, ident, (m) => log(sw, m));

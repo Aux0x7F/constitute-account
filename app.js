@@ -8,6 +8,7 @@ const connStateText = document.getElementById('connStateText');
 const connLog = document.getElementById('connLog');
 const connPopover = document.getElementById('connPopover');
 const popRelay = document.getElementById('popRelay');
+const popRelayDetails = document.getElementById('popRelayDetails');
 const popDaemon = document.getElementById('popDaemon');
 const popSwarm = document.getElementById('popSwarm');
 const popSwarmCache = document.getElementById('popSwarmCache');
@@ -110,6 +111,13 @@ const SWARM_ICE_SERVERS = [
   // { urls: 'turn:turn.example.com:3478', username: 'user', credential: 'pass' },
 ];
 
+const SHELL_BUILD_ID = '2026-04-03-relay-pool';
+const DEFAULT_PUBLIC_RELAYS = Object.freeze([
+  'wss://nos.lol',
+  'wss://relay.primal.net',
+  'wss://nostr.mom',
+]);
+
 let relayState = 'offline';
 let daemonState = 'unknown';
 let swarmState = 'offline';
@@ -143,6 +151,7 @@ const MANAGED_LAUNCH_STORAGE_PREFIX = 'constitute.launch.';
 const MANAGED_LAUNCH_TTL_MS = 2 * 60 * 1000;
 const MANAGED_APP_CHANNEL_NAME = 'constitute.app.launch';
 const GATEWAY_INVENTORY_REFRESH_TTL_MS = 15_000;
+const GATEWAY_HOSTED_SNAPSHOT_KEY = 'constitute.gatewayHostedSnapshots';
 const RELAY_BRIDGE_LEASE_KEY = 'constitute.relayBridge.owner';
 const RELAY_BRIDGE_LEASE_MS = 12_000;
 const RELAY_BRIDGE_HEARTBEAT_MS = 4_000;
@@ -170,6 +179,10 @@ const gatewayUtilityAssetUrlCache = new Map(); // asset -> { url, tag, prereleas
 let gatewayReleasesCache = null;
 let preparedGatewayInstall = null;
 const APPLIANCE_DISCOVERY_MAX_AGE_MS = 60 * 60 * 1000;
+
+let relayBridge = null;
+let relayPoolSnapshot = { version: '', urls: [], relays: {}, state: 'offline' };
+const gatewayHostedSnapshotCache = loadGatewayHostedSnapshotCache();
 
 function currentGatewayUtilityDownloadInfo() {
   const platform = currentOperatorPlatform();
@@ -661,9 +674,47 @@ function renderConnLog() {
   }
 }
 
-function setRelayState(s, reason = '') {
+function renderRelayDetails() {
+  if (!popRelayDetails) return;
+  const relayUrls = Array.isArray(relayPoolSnapshot?.urls) ? relayPoolSnapshot.urls : [];
+  const relays = relayPoolSnapshot?.relays && typeof relayPoolSnapshot.relays === 'object'
+    ? relayPoolSnapshot.relays
+    : {};
+  popRelayDetails.innerHTML = '';
+  const lines = [`shell ${SHELL_BUILD_ID}${relayPoolSnapshot?.version ? ` • relay ${relayPoolSnapshot.version}` : ''}`];
+  if (relayUrls.length > 0) lines.push(`targets ${relayUrls.length}: ${relayUrls.join(', ')}`);
+  for (const entry of lines) {
+    const line = document.createElement('div');
+    line.textContent = entry;
+    popRelayDetails.appendChild(line);
+  }
+  for (const relayUrl of relayUrls) {
+    const info = relays[relayUrl] || {};
+    const parts = [String(info.state || 'offline')];
+    if (info.code != null && info.code !== '') parts.push(`code=${info.code}`);
+    if (info.reason) parts.push(String(info.reason));
+    const line = document.createElement('div');
+    line.textContent = `${relayUrl} — ${parts.join(' • ')}`;
+    popRelayDetails.appendChild(line);
+  }
+}
+
+function setRelayState(s, reason = '', meta = null) {
   relayState = String(s || 'offline');
-  popRelay.textContent = relayState;
+  if (meta && typeof meta === 'object') {
+    relayPoolSnapshot = {
+      version: String(meta.version || relayPoolSnapshot.version || '').trim(),
+      urls: Array.isArray(meta.urls) ? meta.urls.slice() : (relayPoolSnapshot.urls || []),
+      relays: (meta.relays && typeof meta.relays === 'object') ? meta.relays : (relayPoolSnapshot.relays || {}),
+      state: relayState,
+    };
+  } else {
+    relayPoolSnapshot = { ...relayPoolSnapshot, state: relayState };
+  }
+  const relayUrls = Array.isArray(relayPoolSnapshot.urls) ? relayPoolSnapshot.urls : [];
+  const openCount = relayUrls.filter((relayUrl) => String(relayPoolSnapshot?.relays?.[relayUrl]?.state || '') === 'open').length;
+  popRelay.textContent = relayUrls.length > 0 ? `${relayState} (${openCount}/${relayUrls.length})` : relayState;
+  renderRelayDetails();
 
   _setConnDot();
   _pushConnLog(reason);
@@ -1656,7 +1707,8 @@ function buildApplianceRecords(identityDevices, swarmDevices) {
   const actual = [];
   const seen = new Set();
   const sourceRecords = Array.isArray(swarmDevices) ? swarmDevices : [];
-  for (const rec of sourceRecords) {
+  for (const rawRec of sourceRecords) {
+    const rec = applyGatewayHostedSnapshot(rawRec);
     const pk = String(rec?.devicePk || rec?.pk || '').trim();
     if (!pk || seen.has(pk)) continue;
     if (!(isGatewayRecord(rec) || isNvrRecord(rec))) continue;
@@ -1961,6 +2013,123 @@ function publishEnabledApps() {
 
 function normalizeRole(value) {
   return String(value || '').trim().toLowerCase();
+}
+
+function loadGatewayHostedSnapshotCache() {
+  try {
+    const raw = localStorage.getItem(GATEWAY_HOSTED_SNAPSHOT_KEY);
+    const parsed = raw ? JSON.parse(raw) : {};
+    return (parsed && typeof parsed === 'object') ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveGatewayHostedSnapshotCache() {
+  try {
+    localStorage.setItem(GATEWAY_HOSTED_SNAPSHOT_KEY, JSON.stringify(gatewayHostedSnapshotCache));
+  } catch {}
+}
+
+function normalizeHostedServices(value) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((entry) => (entry && typeof entry === 'object') ? entry : null)
+    .filter(Boolean);
+}
+
+function gatewayHostedSnapshot(record) {
+  const pk = String(record?.devicePk || record?.pk || '').trim();
+  const updatedAt = Number(record?.updatedAt || record?.updated_at || record?.ts || 0);
+  const hostedServices = normalizeHostedServices(record?.hostedServices || record?.hosted_services);
+  return { pk, updatedAt, hostedServices };
+}
+
+function applyGatewayHostedSnapshot(record) {
+  if (!isGatewayRecord(record)) return record;
+
+  const current = gatewayHostedSnapshot(record);
+  if (!current.pk) return record;
+
+  const cached = gatewayHostedSnapshotCache[current.pk] || null;
+  let effectiveHostedServices = current.hostedServices;
+
+  if (effectiveHostedServices.length > 0) {
+    gatewayHostedSnapshotCache[current.pk] = {
+      updatedAt: current.updatedAt,
+      hostedServices: effectiveHostedServices,
+    };
+    saveGatewayHostedSnapshotCache();
+  } else if (cached && Array.isArray(cached.hostedServices) && cached.hostedServices.length > 0) {
+    const cachedUpdatedAt = Number(cached.updatedAt || 0);
+    if (cachedUpdatedAt >= current.updatedAt) {
+      effectiveHostedServices = cached.hostedServices;
+    } else if (current.updatedAt >= cachedUpdatedAt) {
+      gatewayHostedSnapshotCache[current.pk] = {
+        updatedAt: current.updatedAt,
+        hostedServices: [],
+      };
+      saveGatewayHostedSnapshotCache();
+    }
+  }
+
+  if (effectiveHostedServices === current.hostedServices) return record;
+  return {
+    ...record,
+    hostedServices: effectiveHostedServices,
+  };
+}
+
+function pageAllowsInsecureRelayUrls() {
+  try {
+    const u = new URL(window.location.href);
+    return u.protocol === 'http:' || u.hostname === 'localhost' || u.hostname === '127.0.0.1';
+  } catch {
+    return false;
+  }
+}
+
+function normalizeRelayCandidate(url) {
+  const raw = String(url || '').trim();
+  if (!raw) return '';
+  let parsed;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    return '';
+  }
+  if (parsed.protocol !== 'ws:' && parsed.protocol !== 'wss:') return '';
+  if (parsed.protocol === 'ws:' && !pageAllowsInsecureRelayUrls()) return '';
+  const host = String(parsed.hostname || '').trim().toLowerCase();
+  if (!host || host === 'gateway.example' || host.includes('replace-host') || host.endsWith('.example')) return '';
+  parsed.hash = '';
+  return parsed.toString();
+}
+
+function collectOwnedGatewayRelayUrls(identityDevices, swarmDevices) {
+  const owned = ownedPkSet(identityDevices);
+  const out = [];
+  for (const rec of (Array.isArray(swarmDevices) ? swarmDevices : [])) {
+    if (!isGatewayRecord(rec)) continue;
+    const pk = String(rec?.devicePk || rec?.pk || '').trim();
+    if (!pk || !owned.has(pk)) continue;
+    const relays = Array.isArray(rec?.relays) ? rec.relays : [];
+    for (const relayUrl of relays) {
+      const normalized = normalizeRelayCandidate(relayUrl);
+      if (normalized && !out.includes(normalized)) out.push(normalized);
+    }
+  }
+  return out;
+}
+
+function desiredRelayUrls(identityDevices = [], swarmDevices = []) {
+  const candidates = [...DEFAULT_PUBLIC_RELAYS, ...collectOwnedGatewayRelayUrls(identityDevices, swarmDevices)];
+  const out = [];
+  for (const relayUrl of candidates) {
+    const normalized = normalizeRelayCandidate(relayUrl);
+    if (normalized && !out.includes(normalized)) out.push(normalized);
+  }
+  return out;
 }
 
 function repoKey(owner, repo) {
@@ -3005,6 +3174,7 @@ async function refreshAll() {
   lastDirectory = directory || [];
   lastZones = zones || [];
   lastSwarmDevices = swarmDevices || [];
+  relayBridge?.updateTargets(desiredRelayUrls(ident?.devices || [], lastSwarmDevices), 'refresh');
 
   // If we only have a key, try to resolve the human name via peers.
   for (const z of (lastZones || [])) {
@@ -3426,13 +3596,14 @@ function wireUi() {
   };
 }
 
-function startSharedRelayPipe(client, relayUrl) {
+function startSharedRelayPipe(client, initialRelayUrls) {
   const w = new SharedWorker('./relay.worker.js');
   const port = w.port;
   port.start();
   const ownerId = randomOpaqueId('relay-bridge');
   let relayBridgeOwner = false;
   let heartbeatTimer = null;
+  let targetKey = '';
 
   function readRelayBridgeLease() {
     try {
@@ -3486,6 +3657,16 @@ function startSharedRelayPipe(client, relayUrl) {
     });
   }
 
+  function updateTargets(urls, reason = 'update') {
+    const targets = Array.isArray(urls) ? urls.filter(Boolean) : [];
+    const nextKey = targets.join('\n');
+    if (nextKey === targetKey) return false;
+    targetKey = nextKey;
+    console.info('[relay.bridge] targets', reason, targets);
+    port.postMessage({ type: 'relay.connect', urls: targets });
+    return true;
+  }
+
   port.onmessage = async (ev) => {
     const msg = ev.data || {};
     if (msg.type === 'relay.status') {
@@ -3493,11 +3674,29 @@ function startSharedRelayPipe(client, relayUrl) {
       if (msg.state === 'error' || msg.state === 'closed') {
         console.warn('[relay.worker]', msg.state, reason || '(no reason)');
       }
-      setRelayState(msg.state, reason);
+      const relayUrls = Array.isArray(msg.urls) ? msg.urls : (msg.url ? [msg.url] : []);
+      const relayDetails = (msg.relays && typeof msg.relays === 'object')
+        ? msg.relays
+        : ((msg.url || '')
+          ? {
+              [msg.url]: {
+                state: msg.state,
+                code: msg.code ?? null,
+                reason: msg.reason ?? '',
+              },
+            }
+          : {});
+      setRelayState(msg.state, reason, {
+        version: String(msg.version || '').trim(),
+        urls: relayUrls,
+        relays: relayDetails,
+      });
       if (clientReady && relayBridgeOwner) {
         client.call('relay.status', {
           state: msg.state,
           url: msg.url || '',
+          urls: relayUrls,
+          relays: relayDetails,
           code: msg.code ?? null,
           reason: msg.reason ?? ''
         }, { timeoutMs: 20000, priority: 'immediate' }).catch((e) => console.error('relay.status rpc failed', e));
@@ -3521,8 +3720,8 @@ function startSharedRelayPipe(client, relayUrl) {
   });
 
   startRelayBridgeHeartbeat();
-  port.postMessage({ type: 'relay.connect', url: relayUrl });
-  return port;
+  updateTargets(initialRelayUrls, 'init');
+  return { port, updateTargets };
 }
 
 (async function main() {
@@ -3570,8 +3769,9 @@ function startSharedRelayPipe(client, relayUrl) {
 
   await client.ready().catch((e) => console.error(e));
   clientReady = client.isServiceWorkerAvailable();
+  console.info('[shell.build]', SHELL_BUILD_ID, window.location.href);
   if (clientReady) {
-    startSharedRelayPipe(client, 'wss://relay.snort.social');
+    relayBridge = startSharedRelayPipe(client, desiredRelayUrls([], []));
   } else {
     setDaemonState('offline', 'sw unavailable');
   }

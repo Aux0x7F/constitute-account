@@ -310,6 +310,15 @@ button:disabled{opacity:0.5; cursor:not-allowed}
 .popoverTitle{font-weight:700; margin-bottom:0.5rem}
 .popoverTitle.small{font-weight:700; margin-bottom:0.35rem; font-size:.9rem}
 .popoverRow{display:flex; justify-content:space-between; font-size:0.9rem; margin:0.25rem 0}
+.popoverDetails{
+  display:flex;
+  flex-direction:column;
+  gap:0.18rem;
+  font-size:0.78rem;
+  margin:-0.05rem 0 0.45rem 0;
+  padding-left:0.1rem;
+  word-break:break-word;
+}
 
 /* Onboarding “radio” choice buttons */
 .choiceRow{

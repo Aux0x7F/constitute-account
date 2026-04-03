@@ -208,8 +208,17 @@ export async function handleRelayFrame(sw, raw) {
     if (recType === 'device') {
       const ok = await validateRecord(ev, 'device');
       if (!ok) return;
-      await putDeviceRecord(ev).catch(() => {});
-      log(sw, 'swarm device record stored');
+      const discoveryPayload = (() => {
+        try { return JSON.parse(ev.content || '{}'); } catch { return {}; }
+      })();
+      const result = await putDeviceRecord(ev).catch(() => ({ ok: false }));
+      if (!result?.ok) return;
+      if (result?.stale) {
+        log(sw, 'swarm device record stale (ignored)');
+        return;
+      }
+      const hostedCount = Array.isArray(discoveryPayload?.hostedServices) ? discoveryPayload.hostedServices.length : 0;
+      log(sw, hostedCount > 0 ? `swarm device record stored hosted=${hostedCount}` : 'swarm device record stored');
       pokeUi(sw);
       return;
     }

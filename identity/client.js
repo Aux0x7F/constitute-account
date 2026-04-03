@@ -19,7 +19,9 @@ export class IdentityClient {
     if ("serviceWorker" in navigator) {
       navigator.serviceWorker.addEventListener("message", (e) => this._onMessage(e));
       navigator.serviceWorker.addEventListener("controllerchange", () => {
-        this.onEvent({ type: "log", message: "service worker controllerchange" });
+        const controller = navigator.serviceWorker.controller;
+        const scriptUrl = String(controller?.scriptURL || this._reg?.active?.scriptURL || '').trim();
+        this.onEvent({ type: "log", message: `service worker controllerchange ${scriptUrl || '(unknown script)'}` });
       });
     }
   }
@@ -47,6 +49,10 @@ export class IdentityClient {
       }
 
       this._reg = reg;
+      const activeScriptUrl = String(reg?.active?.scriptURL || reg?.waiting?.scriptURL || reg?.installing?.scriptURL || '').trim();
+      if (activeScriptUrl) {
+        console.log("[client] service worker registration", activeScriptUrl);
+      }
       console.log("[client] waiting for SW ready");
       await Promise.race([
         navigator.serviceWorker.ready,
