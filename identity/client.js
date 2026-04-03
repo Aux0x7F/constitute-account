@@ -84,7 +84,11 @@ export class IdentityClient {
   /**
    * Enqueue an RPC call (serialized).
    */
-  call(method, params = {}, { timeoutMs } = {}) {
+  call(method, params = {}, { timeoutMs, priority } = {}) {
+    if (priority === 'immediate') {
+      return this._callOnce(method, params, { timeoutMs });
+    }
+
     const run = () => this._callOnce(method, params, { timeoutMs });
 
     const p = this._queue.then(run);

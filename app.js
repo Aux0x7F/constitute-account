@@ -2945,6 +2945,36 @@ btnSecWebAuthn?.addEventListener('click', () => setSecurityChoice('webauthn'));
 btnSecSkip?.addEventListener('click', () => setSecurityChoice('skip'));
 
 let client;
+let refreshAllInflight = null;
+let refreshAllQueued = false;
+let refreshAllTimer = null;
+
+async function runRefreshAll() {
+  if (refreshAllInflight) {
+    refreshAllQueued = true;
+    return await refreshAllInflight;
+  }
+  refreshAllInflight = (async () => {
+    try {
+      await refreshAll();
+    } finally {
+      refreshAllInflight = null;
+      if (refreshAllQueued) {
+        refreshAllQueued = false;
+        runRefreshAll().catch(() => {});
+      }
+    }
+  })();
+  return await refreshAllInflight;
+}
+
+function scheduleRefreshAll(delayMs = 150) {
+  clearTimeout(refreshAllTimer);
+  refreshAllTimer = setTimeout(() => {
+    refreshAllTimer = null;
+    runRefreshAll().catch(() => {});
+  }, delayMs);
+}
 
 function ensureOnboardingState(ident) {
   if (!ident?.linked) {
@@ -3470,13 +3500,13 @@ function startSharedRelayPipe(client, relayUrl) {
           url: msg.url || '',
           code: msg.code ?? null,
           reason: msg.reason ?? ''
-        }, { timeoutMs: 20000 }).catch((e) => console.error('relay.status rpc failed', e));
+        }, { timeoutMs: 20000, priority: 'immediate' }).catch((e) => console.error('relay.status rpc failed', e));
       }
       return;
     }
     if (msg.type === 'relay.rx' && typeof msg.data === 'string') {
       if (clientReady && relayBridgeOwner) {
-        client.call('relay.rx', { data: msg.data, url: msg.url || '' }, { timeoutMs: 20000 })
+        client.call('relay.rx', { data: msg.data, url: msg.url || '' }, { timeoutMs: 20000, priority: 'immediate' })
           .catch((e) => console.error('relay.rx rpc failed', e));
       }
       return;
@@ -3534,7 +3564,7 @@ function startSharedRelayPipe(client, relayUrl) {
       if (evt?.type === 'gateway_signal') {
         handleGatewaySignalRelayEvent(evt);
       }
-      if (evt?.type === 'notify') refreshAll().catch(() => {});
+      if (evt?.type === 'notify') scheduleRefreshAll();
     }
   });
 
@@ -3567,7 +3597,7 @@ function startSharedRelayPipe(client, relayUrl) {
   setSecurityChoice('webauthn');
 
   try {
-    await refreshAll();
+    await runRefreshAll();
     const linked = await ensureOnboardingFlow();
     if (linked) {
       setSettingsTab('profile');
