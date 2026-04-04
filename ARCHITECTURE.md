@@ -69,8 +69,10 @@ Browser UI
   - shell routes and appliances, launcher flow, and peer/service presentation
 - `identity/client.js`
   - window-to-Service Worker RPC bridge
+- `runtime.worker.js`
+  - same-origin shared runtime for managed launch context, cross-surface status, and gateway request brokering
 - `relay.worker.js`
-  - persistent WebSocket relay bridge
+  - persistent WebSocket relay bridge for relay pool transport only
 
 Service Worker
 - `identity/sw/daemon.js`
@@ -86,7 +88,8 @@ Service Worker
 
 ### Current Browser Authority
 - Service Worker is the cryptographic/state authority.
-- SharedWorker holds long-lived relay transport.
+- SharedWorker runtime owns same-origin launch/session/status coordination across first-party app surfaces.
+- Relay transport runs in a dedicated/shared worker bridge, separate from page rendering.
 - Windows never own long-lived secret authority directly.
 
 ### Managed-Service Direction
@@ -126,7 +129,7 @@ Used for:
 - device-level signing remains mandatory
 - Service Worker remains the cryptographic authority for shell state
 - long-lived identity secrets must not be passed in app launch URLs
-- managed app surfaces should redeem short-lived launch context
+- managed app surfaces should redeem short-lived launch context through shared runtime first, with explicit local fallback only where needed
 - relay transport remains untrusted and validation-bound
 
 ## Active Convergence Slice

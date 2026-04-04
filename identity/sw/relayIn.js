@@ -852,7 +852,14 @@ export async function handleRelayFrame(sw, raw) {
 
   if (payload.type === 'gateway_managed_launch_status') {
     const toDevicePk = String(payload.toDevicePk || '').trim();
-    if (toDevicePk && toDevicePk !== String(dev?.nostr?.pk || '').trim()) return;
+    const devicePk = String(payload.devicePk || '').trim();
+    const localPk = String(dev?.nostr?.pk || '').trim();
+    if (localPk) {
+      const directedToOtherDevice =
+        (toDevicePk && toDevicePk !== localPk)
+        && (devicePk && devicePk !== localPk);
+      if (directedToOtherDevice) return;
+    }
     emit(sw, {
       type: 'gateway_managed_launch_status',
       requestId: String(payload.requestId || '').trim(),
@@ -860,7 +867,7 @@ export async function handleRelayFrame(sw, raw) {
       gatewayPk: String(payload.gatewayPk || '').trim(),
       toDevicePk,
       identityId: String(payload.identityId || '').trim(),
-      devicePk: String(payload.devicePk || '').trim(),
+      devicePk,
       servicePk: String(payload.servicePk || '').trim(),
       service: String(payload.service || '').trim(),
       capability: String(payload.capability || '').trim(),

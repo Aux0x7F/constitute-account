@@ -15,6 +15,22 @@ function openDB() {
   });
 }
 
+async function withDbRetry(label, work, attempts = 2) {
+  let lastError = null;
+  for (let index = 0; index < attempts; index += 1) {
+    try {
+      const db = await openDB();
+      return await work(db);
+    } catch (error) {
+      lastError = error;
+      if (index < attempts - 1) {
+        await new Promise((resolve) => setTimeout(resolve, 30 * (index + 1)));
+      }
+    }
+  }
+  throw new Error(`${label}: ${String(lastError?.message || lastError || 'database failure')}`);
+}
+
 function backupRequestForKey(key) {
   return new Request(`${BACKUP_PREFIX}${encodeURIComponent(String(key || ''))}`);
 }
@@ -47,14 +63,13 @@ async function backupGet(key) {
 
 export async function kvGet(key) {
   try {
-    const db = await openDB();
-    const value = await new Promise((resolve, reject) => {
+    const value = await withDbRetry(`kvGet(${String(key || '')})`, async (db) => await new Promise((resolve, reject) => {
       const tx = db.transaction('kv', 'readonly');
       const st = tx.objectStore('kv');
       const req = st.get(key);
       req.onsuccess = () => resolve(req.result);
       req.onerror = () => reject(req.error);
-    });
+    }));
 
     if (typeof value !== 'undefined') {
       return value;
@@ -74,12 +89,11 @@ export async function kvGet(key) {
 }
 
 export async function kvSet(key, value) {
-  const db = await openDB();
-  await new Promise((resolve, reject) => {
+  await withDbRetry(`kvSet(${String(key || '')})`, async (db) => await new Promise((resolve, reject) => {
     const tx = db.transaction('kv', 'readwrite');
     tx.objectStore('kv').put(value, key);
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
-  });
+  }));
   await backupSet(key, value);
 }

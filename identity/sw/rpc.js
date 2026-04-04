@@ -920,7 +920,11 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
   }
 
   if (method === 'relay.rx') {
-    await handleRelayFrame(sw, params?.data || '');
+    try {
+      await handleRelayFrame(sw, params?.data || '');
+    } catch (err) {
+      log(sw, `relay rx degraded: ${String(err?.message || err)}`);
+    }
     return { ok: true };
   }
 

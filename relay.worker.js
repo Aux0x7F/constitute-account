@@ -1,4 +1,4 @@
-const RELAY_WORKER_BUILD_ID = '2026-04-03-relay-pool';
+const RELAY_WORKER_BUILD_ID = '2026-04-03-runtime-stage2';
 const MAX_RECENT_EVENT_IDS = 2048;
 
 const endpoints = new Set();

@@ -22,7 +22,8 @@ Browser-native management shell for the Constitution ecosystem.
 - Device identity lifecycle (software + optional WebAuthn)
 - Identity create/join + pairing approval flow
 - Notifications and pending-request management
-- Relay transport via SharedWorker + Service Worker authority
+- Relay transport via worker bridge + Service Worker authority
+- Shared runtime worker for managed launch context and cross-surface service status
 - Zone presence/list propagation and directory updates
 - Swarm record cache (identity/device) with signed record validation
 - Canonical app-channel plumbing for `swarm_record_request` and `swarm_dht_get/put`
@@ -33,6 +34,7 @@ Browser-native management shell for the Constitution ecosystem.
 - `app.js`: shell routes, appliances, launcher flow, and peer/service presentation
 - `identity/client.js`: window-to-Service Worker RPC bridge
 - `relay.worker.js`: shared relay transport worker
+- `runtime.worker.js`: shared runtime for managed app surfaces
 - `identity/sw/*`: Service Worker daemon and protocol handlers
 - `ARCHITECTURE.md`: architecture and roadmap
 
@@ -41,8 +43,9 @@ See `ARCHITECTURE.md` for system design and convergence direction.
 
 ## Running Locally
 1. Serve this repo on `http://localhost:8000` (or equivalent static host)
-2. Open in a modern browser with Service Worker support
-3. Use HTTPS or localhost for WebAuthn paths
+2. Serve built first-party app surfaces under their repo paths; for a monorepo root static host, `constitute-nvr-ui` should resolve from `/constitute-nvr-ui/dist/`
+3. Open in a modern browser with Service Worker support
+4. Use HTTPS or localhost for WebAuthn paths
 
 ## Usage
 - Create or join an identity

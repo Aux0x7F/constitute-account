@@ -298,7 +298,7 @@ button:disabled{opacity:0.5; cursor:not-allowed}
   position:absolute;
   top:20px; left:50%;
   transform:translateX(-50%);
-  width:260px;
+  width:320px;
   background:rgba(18,23,38,0.98);
   border:1px solid rgba(255,255,255,0.12);
   border-radius:14px;
