@@ -5,7 +5,7 @@
 // The Service Worker is single-threaded and uses IndexedDB; sending many
 // concurrent RPCs can cause contention and apparent hangs/timeouts.
 
-const SERVICE_WORKER_BUILD_ID = "2026-04-03-runtime-stage2";
+const SERVICE_WORKER_BUILD_ID = "2026-04-06-runtime-stage3";
 
 function currentServiceWorkerUrl() {
   const target = new URL("./sw.js", window.location.href);
@@ -251,3 +251,4 @@ export class IdentityClient {
     });
   }
 }
+

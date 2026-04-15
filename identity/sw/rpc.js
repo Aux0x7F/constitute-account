@@ -32,6 +32,7 @@ import {
 
 let presenceTimer = null;
 let swarmPublishTimer = null;
+const openRelaySubscriptionUrls = new Set();
 
 function makePairCode() {
   return (Math.floor(Math.random() * 900000) + 100000).toString();
@@ -691,6 +692,45 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
     return { ok: true, requestId, gatewayPk: targetGatewayPk, servicePk, service, signalType };
   }
 
+  if (method === 'gateway.grants.request') {
+    const ident = await getIdentity();
+    if (!ident?.linked || !ident?.id || !ident?.label) throw new Error('no linked identity');
+
+    const dev = await ensureDevice();
+    const targetGatewayPk = String(params?.gatewayPk || params?.gatewayDevicePk || params?.toDevicePk || '').trim();
+    const servicePk = String(params?.servicePk || '').trim();
+    const service = String(params?.service || 'nvr').trim() || 'nvr';
+    const action = String(params?.action || '').trim().toLowerCase();
+    if (!targetGatewayPk) throw new Error('missing gatewayPk');
+    if (!action) throw new Error('missing action');
+
+    const requestId = String(params?.requestId || '').trim() || makeSwarmRequestId('gw-grant');
+    const payload = {
+      type: 'gateway_grant_request',
+      requestId,
+      toDevicePk: targetGatewayPk,
+      identityId: String(ident.id || '').trim(),
+      devicePk: String(dev?.nostr?.pk || '').trim(),
+      servicePk,
+      service,
+      action,
+      granteeIdentityId: String(params?.granteeIdentityId || '').trim(),
+      grantId: String(params?.grantId || '').trim(),
+      viewSources: Array.isArray(params?.viewSources)
+        ? params.viewSources.map((value) => String(value || '').trim()).filter(Boolean)
+        : [],
+      controlSources: Array.isArray(params?.controlSources)
+        ? params.controlSources.map((value) => String(value || '').trim()).filter(Boolean)
+        : [],
+      ts: Date.now(),
+      ttl: 120,
+    };
+
+    const zones = await listZones(ident || {}).catch(() => []);
+    await publishAppEvent(sw, payload, pairingTags(ident.label, zones, targetGatewayPk));
+    return { ok: true, requestId, gatewayPk: targetGatewayPk, servicePk, service, action };
+  }
+
   if (method === 'identity.create') {
     // REQUIRED: must not already have a linked identity on this device
     const existing = await getIdentity();
@@ -898,14 +938,24 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
     const state = String(params?.state || '');
     const url = String(params?.url || '');
     const prevState = String(getRelayState() || '');
+    const relayMap = (params?.relays && typeof params.relays === 'object') ? params.relays : {};
+    const openRelayUrls = Object.entries(relayMap)
+      .filter(([, info]) => String(info?.state || '').trim().toLowerCase() === 'open')
+      .map(([relayUrl]) => String(relayUrl || '').trim())
+      .filter(Boolean);
+    for (const knownUrl of Array.from(openRelaySubscriptionUrls)) {
+      if (!openRelayUrls.includes(knownUrl)) openRelaySubscriptionUrls.delete(knownUrl);
+    }
     if (state && state !== prevState) {
       setRelayState(state);
       log(sw, `relay state -> ${state} ${url}`);
     }
-    if (state === 'open' && prevState !== 'open') {
+    const hasNewOpenRelay = openRelayUrls.some((relayUrl) => !openRelaySubscriptionUrls.has(relayUrl));
+    if (state === 'open' && (prevState !== 'open' || hasNewOpenRelay)) {
       const ident = await getIdentity();
       const dev = await ensureDevice();
       await subOpen(sw, ident, (m) => log(sw, m));
+      for (const relayUrl of openRelayUrls) openRelaySubscriptionUrls.add(relayUrl);
       const nbs = await listZones(ident || {});
       for (const n of nbs) {
         await addSelfToZoneList(dev, n.key).catch(() => {});

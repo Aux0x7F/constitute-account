@@ -1,11 +1,10 @@
 import { IdentityClient } from './identity/client.js';
+import { createManagedApplianceModel } from './app/managed-appliances.js';
 
 const panePathEl = document.getElementById('panePath');
 
 const connWrap = document.getElementById('connWrap');
-const connDot = document.getElementById('connDot');
 const connStateText = document.getElementById('connStateText');
-const connLog = document.getElementById('connLog');
 const connPopover = document.getElementById('connPopover');
 const bootSplashEl = document.getElementById('bootSplash');
 const bootSplashTitleEl = document.getElementById('bootSplashTitle');
@@ -13,23 +12,14 @@ const bootSplashStatusEl = document.getElementById('bootSplashStatus');
 const popConnection = document.getElementById('popConnection');
 const popConnectionReason = document.getElementById('popConnectionReason');
 const popRelay = document.getElementById('popRelay');
-const popRelayReason = document.getElementById('popRelayReason');
-const popRelayDetails = document.getElementById('popRelayDetails');
-const popDaemon = document.getElementById('popDaemon');
 const popGateway = document.getElementById('popGateway');
-const popGatewayReason = document.getElementById('popGatewayReason');
-const popGatewayMesh = document.getElementById('popGatewayMesh');
-const popGatewayMeshReason = document.getElementById('popGatewayMeshReason');
 const popServices = document.getElementById('popServices');
-const popServicesReason = document.getElementById('popServicesReason');
-const popBrowserPeerTransport = document.getElementById('popBrowserPeerTransport');
-const popBrowserPeerTransportReason = document.getElementById('popBrowserPeerTransportReason');
-const popSwarmCache = document.getElementById('popSwarmCache');
 
 const btnMenu = document.getElementById('btnMenu');
 const drawer = document.getElementById('drawer');
 const drawerBackdrop = document.getElementById('drawerBackdrop');
 const btnDrawerClose = document.getElementById('btnDrawerClose');
+const identityHandle = document.getElementById('identityHandle');
 
 const btnBell = document.getElementById('btnBell');
 const notifMenu = document.getElementById('notifMenu');
@@ -42,19 +32,11 @@ const viewOnboard = document.getElementById('viewOnboard');
 
 const tabButtons = Array.from(viewSettings.querySelectorAll('.tab'));
 const tabPanes = {
-  profile: document.getElementById('tab_profile'),
   devices: document.getElementById('tab_devices'),
-  appliances: document.getElementById('tab_appliances'),
-  peers: document.getElementById('tab_peers'),
-  pairing: document.getElementById('tab_pairing'),
-  apps: document.getElementById('tab_apps'),
-  identity: document.getElementById('tab_identity'),
+  network: document.getElementById('tab_network'),
 };
 
-const profileName = document.getElementById('profileName');
-const profileAbout = document.getElementById('profileAbout');
-const btnSaveProfile = document.getElementById('btnSaveProfile');
-
+const pendingRequestsSection = document.getElementById('pendingRequestsSection');
 const deviceDid = document.getElementById('deviceDid');
 const deviceLabel = document.getElementById('deviceLabel');
 const btnSaveDeviceLabel = document.getElementById('btnSaveDeviceLabel');
@@ -67,9 +49,11 @@ const pairCodeInput = document.getElementById('pairCodeInput');
 const btnClaimPairCode = document.getElementById('btnClaimPairCode');
 const pairCodeStatus = document.getElementById('pairCodeStatus');
 
-const identityLabelEl = document.getElementById('identityLabel');
-const identityIdEl = document.getElementById('identityId');
-const identityLinkedEl = document.getElementById('identityLinked');
+const networkStatusConnectionEl = document.getElementById('networkStatusConnection');
+const networkStatusRelayEl = document.getElementById('networkStatusRelay');
+const networkStatusGatewayMeshEl = document.getElementById('networkStatusGatewayMesh');
+const networkStatusServicesEl = document.getElementById('networkStatusServices');
+const networkStatusDetailEl = document.getElementById('networkStatusDetail');
 
 // Optional app repo settings
 const appRepoInput = document.getElementById('appRepoInput');
@@ -84,6 +68,12 @@ const gatewayInstallDetectedPlatform = document.getElementById('gatewayInstallDe
 const gatewayInstallHint = document.getElementById('gatewayInstallHint');
 const gatewayInstallCommandPreview = document.getElementById('gatewayInstallCommandPreview');
 const applianceList = document.getElementById('applianceList');
+const resourceModalBackdrop = document.getElementById('resourceModalBackdrop');
+const gatewayBasicsModal = document.getElementById('gatewayBasicsModal');
+const gatewayBasicsModalTitle = document.getElementById('gatewayBasicsModalTitle');
+const gatewayBasicsModalBody = document.getElementById('gatewayBasicsModalBody');
+const gatewayBasicsModalActions = document.getElementById('gatewayBasicsModalActions');
+const btnGatewayBasicsClose = document.getElementById('btnGatewayBasicsClose');
 
 const joinDeviceLabelEl = document.getElementById('joinDeviceLabel');
 
@@ -92,13 +82,11 @@ const deviceSecuritySummary = document.getElementById('deviceSecuritySummary');
 const identityLinkedSummary = document.getElementById('identityLinkedSummary');
 
 // Peers UI
-const zoneNameInput = document.getElementById('zoneName');
-const btnCreateZone = document.getElementById('btnCreateZone');
+const zoneCommandInput = document.getElementById('zoneCommandInput');
+const zoneCommandButton = document.getElementById('zoneCommandButton');
+const zoneCommandHelper = document.getElementById('zoneCommandHelper');
+const zoneCommandSpinner = document.getElementById('zoneCommandSpinner');
 const zonesList = document.getElementById('zonesList');
-const zoneLink = document.getElementById('zoneLink');
-const btnCopyZoneLink = document.getElementById('btnCopyZoneLink');
-const zoneJoinKey = document.getElementById('zoneJoinKey');
-const btnJoinZone = document.getElementById('btnJoinZone');
 const peersCount = document.getElementById('peersCount');
 const peersList = document.getElementById('peersList');
 
@@ -124,7 +112,7 @@ const SWARM_ICE_SERVERS = [
   // { urls: 'turn:turn.example.com:3478', username: 'user', credential: 'pass' },
 ];
 
-const SHELL_BUILD_ID = '2026-04-03-runtime-stage2';
+const SHELL_BUILD_ID = '2026-04-06-runtime-stage3';
 const PLATFORM_RUNTIME_BUILD_ID = '2026-04-03-runtime-v1';
 const DEFAULT_PUBLIC_RELAYS = Object.freeze([
   'wss://nos.lol',
@@ -135,8 +123,7 @@ const DEFAULT_PUBLIC_RELAYS = Object.freeze([
 let relayState = 'offline';
 let daemonState = 'unknown';
 let swarmState = 'offline';
-let connDerived = 'offline';
-const connStateLog = []; // newest first
+let identityHandleCopied = false;
 
 let lastDeviceState = null;
 let lastIdentity = null;
@@ -205,6 +192,27 @@ let runtimeStatusSnapshot = { buildId: '', updatedAt: 0, shell: null, services: 
 let lastManagedServiceIssue = null;
 let lastRuntimeShellStatusKey = '';
 let bootSplashDismissed = false;
+const managedAppliances = createManagedApplianceModel({
+  applyHostedSnapshot: (record) => applyGatewayHostedSnapshot(record),
+  getSwarmSeen: (pk) => (swarm ? swarm.getSwarmSeen(pk) : 0),
+  applianceDiscoveryMaxAgeMs: APPLIANCE_DISCOVERY_MAX_AGE_MS,
+});
+const {
+  applianceFreshness,
+  applianceSeenAt,
+  buildApplianceRecords,
+  findGatewayHostedServiceRecord,
+  formatAgeShort,
+  formatReleaseMeta,
+  isGatewayRecord,
+  isNvrRecord,
+  managedGatewayPkForRecord,
+  managedServicePkForRecord,
+  ownedPkSet,
+  partitionApplianceRecords,
+  renderApplianceList: renderManagedApplianceList,
+  summarizeAppliance,
+} = managedAppliances;
 
 function setBootSplash(title = 'Connecting', status = 'Bringing your identity and services online.') {
   if (bootSplashDismissed || !bootSplashEl) return;
@@ -335,9 +343,29 @@ const gatewayInventoryStableAt = new Map();
 const pendingGatewayServiceInstalls = new Map();
 const pendingGatewayZoneSyncs = new Map();
 const pendingManagedLaunches = new Map();
+const pendingGatewayGrantRequests = new Map();
 const pendingGatewaySignals = new Map();
+const sharedManagedServicesByGatewayPk = new Map();
+const ownedGatewayGrantInventoryByServiceKey = new Map();
+const managedServiceActionStates = new Map();
+const managedServiceActionTimers = new Map();
+let gatewayBasicsModalState = null;
 let gatewayExtraZonesByPk = {};
 let managedAppChannel = null;
+const ZONE_KEY_RE = /^[A-Za-z0-9_-]{20}$/;
+const ZONE_COMMAND_DEBOUNCE_MS = 500;
+const MANAGED_SERVICE_RESOLVE_TIMEOUT_MS = 6_000;
+const MANAGED_SERVICE_RESOLVE_POLL_MS = 400;
+
+const zoneCommandState = {
+  draft: '',
+  resolvedKey: '',
+  resolvedName: '',
+  mode: 'idle',
+  helper: '',
+  busy: false,
+};
+let zoneCommandDebounce = 0;
 
 class SwarmTransport {
   constructor({ client, onState }) {
@@ -718,7 +746,12 @@ function summarizeRelayNetwork() {
 }
 
 function ownedApplianceRecords() {
-  return buildApplianceRecords(lastIdentity?.devices || [], lastSwarmDevices || []);
+  const owned = ownedPkSet(lastIdentity?.devices || []);
+  return buildApplianceRecords(lastIdentity?.devices || [], lastSwarmDevices || []).filter((rec) => {
+    const pk = String(rec?.devicePk || rec?.pk || '').trim();
+    const hostGatewayPk = String(rec?.hostGatewayPk || rec?.host_gateway_pk || '').trim();
+    return owned.has(pk) || owned.has(hostGatewayPk);
+  });
 }
 
 function freshestOwnedGatewayRecord() {
@@ -903,38 +936,32 @@ function connectionSummary() {
   return { code, label, reason, relay, gateway, gatewayMesh, services, browserPeerTransport };
 }
 
-function connectionDotClass(code) {
-  if (code === 'connected' || code === 'healthy') return 'conn-open';
-  if (code === 'connected-limited' || code === 'degraded') return 'conn-conn';
-  if (code === 'connecting') return 'conn-conn';
-  if (code === 'error') return 'conn-err';
-  return 'conn-off';
+function connectionTextClass(code) {
+  if (code === 'connected' || code === 'healthy') return 'connStateText-connected';
+  if (code === 'connected-limited' || code === 'degraded' || code === 'connecting') return 'connStateText-limited';
+  return 'connStateText-error';
 }
 
 function renderConnectionModel(reason = '') {
   const summary = connectionSummary();
-  connStateText.textContent = summary.label;
-  connDot.classList.remove('conn-off', 'conn-open', 'conn-err', 'conn-conn');
-  connDot.classList.add(connectionDotClass(summary.code));
+  if (connStateText) {
+    connStateText.textContent = summary.label;
+    connStateText.classList.remove('connStateText-connected', 'connStateText-limited', 'connStateText-error');
+    connStateText.classList.add(connectionTextClass(summary.code));
+  }
+  if (networkStatusConnectionEl) networkStatusConnectionEl.textContent = summary.label;
+  if (networkStatusRelayEl) networkStatusRelayEl.textContent = summary.relay.label;
+  if (networkStatusGatewayMeshEl) networkStatusGatewayMeshEl.textContent = summary.gateway.label;
+  if (networkStatusServicesEl) networkStatusServicesEl.textContent = summary.services.label;
+  if (networkStatusDetailEl) {
+    networkStatusDetailEl.textContent = summary.reason;
+  }
 
   if (popConnection) popConnection.textContent = summary.label;
   if (popConnectionReason) popConnectionReason.textContent = summary.reason;
   if (popRelay) popRelay.textContent = summary.relay.label;
-  if (popRelayReason) popRelayReason.textContent = summary.relay.reason;
-  if (popDaemon) popDaemon.textContent = daemonState;
   if (popGateway) popGateway.textContent = summary.gateway.label;
-  if (popGatewayReason) popGatewayReason.textContent = summary.gateway.reason;
-  if (popGatewayMesh) popGatewayMesh.textContent = summary.gatewayMesh.label;
-  if (popGatewayMeshReason) popGatewayMeshReason.textContent = summary.gatewayMesh.reason;
   if (popServices) popServices.textContent = summary.services.label;
-  if (popServicesReason) popServicesReason.textContent = summary.services.reason;
-  if (popBrowserPeerTransport) popBrowserPeerTransport.textContent = summary.browserPeerTransport.label;
-  if (popBrowserPeerTransportReason) popBrowserPeerTransportReason.textContent = summary.browserPeerTransport.reason;
-  if (popSwarmCache && swarm) {
-    const ages = swarm.getCacheAges();
-    const oldest = Math.max(ages.identity || 0, ages.device || 0);
-    popSwarmCache.textContent = oldest ? `${formatAge(oldest)} old` : 'n/a';
-  }
 
   const runtimeShellStatus = buildRuntimeShellStatus(summary);
   const runtimeShellStatusKey = JSON.stringify(runtimeShellStatus);
@@ -942,12 +969,6 @@ function renderConnectionModel(reason = '') {
     lastRuntimeShellStatusKey = runtimeShellStatusKey;
     runtimeBridge?.pushStatus?.(runtimeShellStatus).catch(() => {});
   }
-
-  if (summary.code === connDerived && connStateLog.length > 0) return;
-  connDerived = summary.code;
-  connStateLog.unshift({ ts: Date.now(), state: summary.label, reason: String(reason || summary.reason || '') });
-  while (connStateLog.length > 25) connStateLog.pop();
-  renderConnLog();
 }
 
 function buildRuntimeShellStatus(summary = connectionSummary()) {
@@ -988,49 +1009,6 @@ function buildRuntimeShellStatus(summary = connectionSummary()) {
   };
 }
 
-function renderConnLog() {
-  connLog.innerHTML = '';
-  for (const e of connStateLog) {
-    const row = document.createElement('div');
-    row.className = 'connLogItem';
-    const t = new Date(e.ts);
-    const hh = String(t.getHours()).padStart(2, '0');
-    const mm = String(t.getMinutes()).padStart(2, '0');
-    const ss = String(t.getSeconds()).padStart(2, '0');
-    row.title = String(e.reason || '');
-    row.innerHTML = `
-      <span>${hh}:${mm}:${ss}</span>
-      <span class="connLogState">${escapeHtml(e.state)}</span>
-    `;
-    connLog.appendChild(row);
-  }
-}
-
-function renderRelayDetails() {
-  if (!popRelayDetails) return;
-  const relayUrls = Array.isArray(relayPoolSnapshot?.urls) ? relayPoolSnapshot.urls : [];
-  const relays = relayPoolSnapshot?.relays && typeof relayPoolSnapshot.relays === 'object'
-    ? relayPoolSnapshot.relays
-    : {};
-  popRelayDetails.innerHTML = '';
-  const lines = [`shell ${SHELL_BUILD_ID}${relayPoolSnapshot?.version ? ` • relay ${relayPoolSnapshot.version}` : ''}`];
-  if (relayUrls.length > 0) lines.push(`targets ${relayUrls.length}: ${relayUrls.join(', ')}`);
-  for (const entry of lines) {
-    const line = document.createElement('div');
-    line.textContent = entry;
-    popRelayDetails.appendChild(line);
-  }
-  for (const relayUrl of relayUrls) {
-    const info = relays[relayUrl] || {};
-    const parts = [String(info.state || 'offline')];
-    if (info.code != null && info.code !== '') parts.push(`code=${info.code}`);
-    if (info.reason) parts.push(String(info.reason));
-    const line = document.createElement('div');
-    line.textContent = `${relayUrl} — ${parts.join(' • ')}`;
-    popRelayDetails.appendChild(line);
-  }
-}
-
 function setRelayState(s, reason = '', meta = null) {
   relayState = String(s || 'offline');
   if (meta && typeof meta === 'object') {
@@ -1044,24 +1022,17 @@ function setRelayState(s, reason = '', meta = null) {
   } else {
     relayPoolSnapshot = { ...relayPoolSnapshot, state: relayState, reason: String(reason || '').trim() };
   }
+  window.__constituteRelayUrls = Array.isArray(relayPoolSnapshot?.urls) ? relayPoolSnapshot.urls.slice() : [];
+  window.__constituteRelayStates = (relayPoolSnapshot?.relays && typeof relayPoolSnapshot.relays === 'object')
+    ? { ...relayPoolSnapshot.relays }
+    : {};
   const relayUrls = Array.isArray(relayPoolSnapshot.urls) ? relayPoolSnapshot.urls : [];
   const openCount = relayUrls.filter((relayUrl) => String(relayPoolSnapshot?.relays?.[relayUrl]?.state || '') === 'open').length;
-  popRelay.textContent = relayUrls.length > 0 ? `${relayState} (${openCount}/${relayUrls.length})` : relayState;
-  renderRelayDetails();
+  if (popRelay) {
+    popRelay.textContent = relayUrls.length > 0 ? `${relayState} (${openCount}/${relayUrls.length})` : relayState;
+  }
   updateBootSplash(reason);
   renderConnectionModel(reason);
-}
-
-function formatAge(ms) {
-  if (!ms || ms < 0) return 'n/a';
-  const s = Math.floor(ms / 1000);
-  if (s < 60) return `${s}s`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m`;
-  const h = Math.floor(m / 60);
-  if (h < 48) return `${h}h`;
-  const d = Math.floor(h / 24);
-  return `${d}d`;
 }
 
 function formatRelativeTime(ts) {
@@ -1070,7 +1041,6 @@ function formatRelativeTime(ts) {
 
 function setDaemonState(s, reason = '') {
   daemonState = String(s || 'unknown');
-  popDaemon.textContent = daemonState;
   updateBootSplash(reason);
   renderConnectionModel(reason);
 }
@@ -1081,12 +1051,18 @@ function setSwarmState(s, reason = '') {
   renderConnectionModel(reason);
 }
 
-function showConnPopover() { connPopover.classList.remove('hidden'); }
-function hideConnPopover() { connPopover.classList.add('hidden'); }
-connWrap.addEventListener('mouseenter', showConnPopover);
-connWrap.addEventListener('mouseleave', hideConnPopover);
-connWrap.addEventListener('focusin', showConnPopover);
-connWrap.addEventListener('focusout', hideConnPopover);
+function showConnPopover() {
+  if (connPopover) connPopover.classList.remove('hidden');
+}
+function hideConnPopover() {
+  if (connPopover) connPopover.classList.add('hidden');
+}
+if (connWrap) {
+  connWrap.addEventListener('mouseenter', showConnPopover);
+  connWrap.addEventListener('mouseleave', hideConnPopover);
+  connWrap.addEventListener('focusin', showConnPopover);
+  connWrap.addEventListener('focusout', hideConnPopover);
+}
 
 // drawer
 function openDrawer() {
@@ -1126,9 +1102,44 @@ function showActivity(name) {
   panePathEl.textContent = target === 'home' ? '' : target;
 }
 
+function normalizeSettingsTabName(name) {
+  const raw = String(name || '').trim().toLowerCase();
+  if (raw === 'network') return 'network';
+  return 'devices';
+}
+
 function setSettingsTab(name) {
-  for (const b of tabButtons) b.classList.toggle('active', b.dataset.tab === name);
-  for (const [k, el] of Object.entries(tabPanes)) el.classList.toggle('hidden', k !== name);
+  const active = normalizeSettingsTabName(name);
+  for (const b of tabButtons) b.classList.toggle('active', b.dataset.tab === active);
+  for (const [k, el] of Object.entries(tabPanes)) {
+    if (!el) continue;
+    el.classList.toggle('hidden', k !== active);
+  }
+}
+
+function currentIdentityHandle() {
+  const label = String(lastIdentity?.label || '').trim();
+  if (label) return `@${label}`;
+  return '@unlinked';
+}
+
+function updateIdentityChrome(ident = lastIdentity) {
+  if (!identityHandle) return;
+  const linked = Boolean(ident?.linked && String(ident?.id || '').trim());
+  const rawId = String(ident?.id || '').trim();
+  identityHandle.textContent = linked ? currentIdentityHandle() : '@unlinked';
+  identityHandle.classList.toggle('identityHandle-linked', linked);
+  identityHandle.classList.toggle('identityHandle-unlinked', !linked);
+  identityHandle.title = rawId
+    ? (identityHandleCopied ? 'Copied!' : 'Click to copy ID')
+    : 'Identity not linked yet';
+  identityHandle.setAttribute('aria-label', rawId ? `Identity ${rawId}` : 'Identity not linked');
+}
+
+function resetIdentityHandleCopyHint() {
+  if (!identityHandleCopied) return;
+  identityHandleCopied = false;
+  updateIdentityChrome(lastIdentity);
 }
 
 
@@ -1146,7 +1157,9 @@ function setPairCodeStatus(msg, error = false) {
 
 function setGatewayInstallStatus(msg, error = false) {
   if (!gatewayInstallStatus) return;
-  gatewayInstallStatus.textContent = String(msg || '');
+  const text = String(msg || '').trim();
+  gatewayInstallStatus.textContent = text;
+  gatewayInstallStatus.classList.toggle('hidden', !text);
   gatewayInstallStatus.classList.toggle('warn', !!error);
 }
 
@@ -1309,9 +1322,17 @@ async function resolveManagedAppSurfaceBaseUrl(repoName) {
   }
 }
 
-async function buildManagedAppSurfaceUrl(repoName, launchId) {
+async function buildManagedAppSurfaceUrl(repoName, launchId, opts = {}) {
   const target = new URL(await resolveManagedAppSurfaceBaseUrl(repoName));
-  target.hash = `launch=${encodeURIComponent(String(launchId || '').trim())}`;
+  const params = new URLSearchParams();
+  params.set('launch', String(launchId || '').trim());
+  const activity = String(opts?.activity || '').trim();
+  const settingsTab = String(opts?.settingsTab || '').trim();
+  const camera = String(opts?.camera || '').trim();
+  if (activity) params.set('activity', activity);
+  if (settingsTab) params.set('settings', settingsTab);
+  if (camera) params.set('camera', camera);
+  target.hash = params.toString();
   return target.toString();
 }
 
@@ -1402,6 +1423,11 @@ function startPlatformRuntimeBridge() {
   bridge.pushStatus = async (status) => {
     await runtimeCall('status.update', { role: 'shell', status }, 5_000).catch((err) => {
       console.warn('[runtime] status.update failed', err);
+    });
+  };
+  bridge.putProjection = async (category, key, value) => {
+    await runtimeCall('projection.put', { category, key, value }, 5_000).catch((err) => {
+      console.warn('[runtime] projection.put failed', err);
     });
   };
 
@@ -1544,6 +1570,51 @@ async function handleManagedAppChannelMessage(message) {
     return;
   }
 
+  if (type === 'gateway.launch.request') {
+    const requestId = String(message?.requestId || '').trim() || randomOpaqueId('gw-launch-ui');
+    const launchId = String(message?.launchId || '').trim();
+    const context = readManagedLaunchContext(launchId);
+    const record = (message?.record && typeof message.record === 'object')
+      ? message.record
+      : (context ? {
+          devicePk: context.servicePk,
+          pk: context.servicePk,
+          hostGatewayPk: context.gatewayPk,
+          service: context.service || 'nvr',
+        } : null);
+    const options = (message?.options && typeof message.options === 'object') ? message.options : {};
+    if (!record) {
+      channel.postMessage({
+        type: 'gateway.launch.response',
+        launchId,
+        requestId,
+        ok: false,
+        error: 'launch refresh context unavailable',
+      });
+      return;
+    }
+
+    try {
+      const result = await requestGatewayManagedLaunch(record, options);
+      channel.postMessage({
+        type: 'gateway.launch.response',
+        launchId,
+        requestId,
+        ok: true,
+        result,
+      });
+    } catch (err) {
+      channel.postMessage({
+        type: 'gateway.launch.response',
+        launchId,
+        requestId,
+        ok: false,
+        error: String(err?.message || err),
+      });
+    }
+    return;
+  }
+
   if (type === 'gateway.signal.request') {
     const requestId = String(message?.requestId || '').trim() || randomOpaqueId('gw-signal-ui');
     const launchId = String(message?.launchId || '').trim();
@@ -1585,6 +1656,54 @@ async function handleManagedAppChannelMessage(message) {
         error: String(err?.message || err),
       });
     }
+    return;
+  }
+
+  if (type === 'gateway.grant.request') {
+    const requestId = String(message?.requestId || '').trim() || randomOpaqueId('gw-grant-ui');
+    const launchId = String(message?.launchId || '').trim();
+    const context = readManagedLaunchContext(launchId);
+    if (!context) {
+      channel.postMessage({
+        type: 'gateway.grant.response',
+        launchId,
+        requestId,
+        ok: false,
+        error: 'launch context unavailable',
+      });
+      return;
+    }
+
+    try {
+      const record = {
+        devicePk: context.servicePk,
+        hostGatewayPk: context.gatewayPk,
+        service: context.service || 'nvr',
+      };
+      const result = await requestGatewayGrantAction(record, {
+        action: String(message?.action || '').trim(),
+        granteeIdentityId: String(message?.granteeIdentityId || '').trim(),
+        grantId: String(message?.grantId || '').trim(),
+        viewSources: Array.isArray(message?.viewSources) ? message.viewSources : [],
+        controlSources: Array.isArray(message?.controlSources) ? message.controlSources : [],
+      });
+      channel.postMessage({
+        type: 'gateway.grant.response',
+        launchId,
+        requestId,
+        ok: true,
+        result,
+      });
+    } catch (err) {
+      channel.postMessage({
+        type: 'gateway.grant.response',
+        launchId,
+        requestId,
+        ok: false,
+        error: String(err?.message || err),
+      });
+    }
+    return;
   }
 }
 
@@ -1677,7 +1796,48 @@ function handleGatewayManagedLaunchStatusEvent(evt) {
       updatedAt: Date.now(),
     };
     renderConnectionModel(detail);
+    requestGatewayInventoryRefresh(String(evt?.gatewayPk || '').trim(), { force: true }).catch(() => false);
+    refreshManagedApplianceProjection({ refreshGrantViews: false }).catch(() => {});
     settlePending(pendingManagedLaunches, requestId, new Error(detail || 'managed launch failed'));
+  }
+}
+
+function handleGatewayGrantStatusEvent(evt) {
+  const requestId = String(evt?.requestId || '').trim();
+  const status = String(evt?.status || '').trim().toLowerCase();
+  if (!requestId) return;
+
+  if (status === 'failed' || status === 'rejected') {
+    const detail = String(evt?.detail || evt?.reason || 'gateway grant request failed').trim();
+    settlePending(pendingGatewayGrantRequests, requestId, new Error(detail || 'gateway grant request failed'));
+    if (evt?.action && evt?.action !== 'list_shared' && evt?.action !== 'list_grants') {
+      setGatewayInstallStatus(`Sharing ${String(evt.action)} failed: ${detail || 'request rejected'}`, true);
+    }
+    return;
+  }
+
+  if (status === 'complete') {
+    const result = {
+      requestId,
+      gatewayPk: String(evt?.gatewayPk || '').trim(),
+      servicePk: String(evt?.servicePk || '').trim(),
+      service: String(evt?.service || '').trim(),
+      action: String(evt?.action || '').trim().toLowerCase(),
+      grant: evt?.grant ?? null,
+      grants: Array.isArray(evt?.grants) ? evt.grants : [],
+      sharedResources: Array.isArray(evt?.sharedResources) ? evt.sharedResources : [],
+      availableCameras: Array.isArray(evt?.availableCameras) ? evt.availableCameras : [],
+      ts: Number(evt?.ts || Date.now()),
+    };
+    settlePending(pendingGatewayGrantRequests, requestId, null, result);
+
+    if (result.action === 'upsert') {
+      const grantee = String(result?.grant?.granteeIdentityId || '').trim();
+      setGatewayInstallStatus(`Shared Security Cameras${grantee ? ` with ${grantee}` : ''}.`, false);
+    } else if (result.action === 'revoke') {
+      const grantee = String(result?.grant?.granteeIdentityId || '').trim();
+      setGatewayInstallStatus(`Revoked Security Cameras access${grantee ? ` for ${grantee}` : ''}.`, false);
+    }
   }
 }
 
@@ -1785,6 +1945,10 @@ function handleGatewayRelayPayload(payload) {
   if (!type) return false;
   if (type === 'gateway_managed_launch_status') {
     handleGatewayManagedLaunchStatusEvent(payload);
+    return true;
+  }
+  if (type === 'gateway_grant_status') {
+    handleGatewayGrantStatusEvent(payload);
     return true;
   }
   if (type === 'gateway_signal_status') {
@@ -2091,7 +2255,7 @@ function updateGatewayInstallHint() {
   const hintParts = [
     'Download the native operator utility from releases.',
     'Installer generates a one-time pairing code during first install when identity pairing is configured.',
-    'Copy that code into Settings > Pairing > Add Device to claim and approve.',
+    'Copy that code into Settings > Devices > Add Device to claim and approve.',
     'This path installs/updates gateway services only (no OS image/media generation).',
     info.hint,
   ].filter(Boolean);
@@ -2103,101 +2267,6 @@ function updateGatewayInstallHint() {
   } else {
     setGatewayInstallCommandPreview('# click "Download Installer Utility" to generate install command');
   }
-}
-
-function isGatewayRecord(rec) {
-  const role = normalizeRole(rec?.role || rec?.nodeType || rec?.type || '');
-  const service = normalizeRole(rec?.service || '');
-  return role === 'gateway' || service === 'gateway';
-}
-
-function isNvrRecord(rec) {
-  const role = normalizeRole(rec?.role || rec?.nodeType || rec?.type || '');
-  const service = normalizeRole(rec?.service || '');
-  return role === 'nvr' || service === 'nvr';
-}
-
-function ownedPkSet(identityDevices) {
-  return new Set(
-    (Array.isArray(identityDevices) ? identityDevices : [])
-      .map((d) => String(d?.pk || d?.devicePk || '').trim())
-      .filter(Boolean)
-  );
-}
-
-
-function applianceSeenAt(rec) {
-  const pk = String(rec?.devicePk || rec?.pk || '').trim();
-  const nostrSeen = Number(rec?.updatedAt || rec?.updated_at || rec?.ts || rec?.lastSeen || 0);
-  const swarmSeen = (swarm && pk) ? Number(swarm.getSwarmSeen(pk) || 0) : 0;
-  return Math.max(0, nostrSeen, swarmSeen);
-}
-
-function summarizeAppliance(rec, owned) {
-  const pk = String(rec?.devicePk || rec?.pk || '').trim();
-  const label = String(rec?.deviceLabel || rec?.label || '').trim();
-  const deviceKind = normalizeRole(rec?.deviceKind || rec?.device_kind || '') || 'user';
-  const role = normalizeRole(rec?.role || rec?.nodeType || rec?.type || '') || 'unknown';
-  const service = normalizeRole(rec?.service || '') || 'none';
-  const version = String(rec?.serviceVersion || rec?.service_version || '').trim();
-  const hostPlatform = normalizeRole(rec?.hostPlatform || rec?.host_platform || rec?.platform || '');
-  const releaseChannel = String(rec?.releaseChannel || rec?.release_channel || '').trim();
-  const releaseTrack = String(rec?.releaseTrack || rec?.release_track || '').trim();
-  const releaseBranch = String(rec?.releaseBranch || rec?.release_branch || '').trim();
-  const hostGatewayPk = String(rec?.hostGatewayPk || rec?.host_gateway_pk || '').trim();
-  const hostedServices = Array.isArray(rec?.hostedServices || rec?.hosted_services)
-    ? (rec.hostedServices || rec.hosted_services)
-    : [];
-  const updatedAt = Number(rec?.updatedAt || rec?.updated_at || rec?.ts || rec?.lastSeen || 0);
-  return {
-    pk,
-    title: label || `${role}:${pk.slice(0, 12)}`,
-    deviceKind,
-    role,
-    service,
-    version,
-    hostPlatform,
-    releaseChannel,
-    releaseTrack,
-    releaseBranch,
-    hostGatewayPk,
-    hostedServices,
-    updatedAt,
-    owned,
-  };
-}
-
-
-function formatAgeShort(ts) {
-  const at = Number(ts || 0);
-  if (!at) return 'unknown';
-  const ageSec = Math.max(0, Math.floor((Date.now() - at) / 1000));
-  if (ageSec < 60) return `${ageSec}s ago`;
-  const ageMin = Math.floor(ageSec / 60);
-  if (ageMin < 60) return `${ageMin}m ago`;
-  const ageHr = Math.floor(ageMin / 60);
-  if (ageHr < 24) return `${ageHr}h ago`;
-  const ageDay = Math.floor(ageHr / 24);
-  return `${ageDay}d ago`;
-}
-
-function applianceFreshness(updatedAt) {
-  const at = Number(updatedAt || 0);
-  if (!at) return { label: 'unknown', css: 'freshness-unknown' };
-  const ageMs = Math.max(0, Date.now() - at);
-  if (ageMs <= 2 * 60 * 1000) return { label: 'live', css: 'freshness-live' };
-  if (ageMs <= 15 * 60 * 1000) return { label: 'recent', css: 'freshness-recent' };
-  if (ageMs <= 2 * 60 * 60 * 1000) return { label: 'stale', css: 'freshness-stale' };
-  return { label: 'offline', css: 'freshness-offline' };
-}
-
-function formatReleaseMeta(channel, track, branch) {
-  const ch = String(channel || '').trim();
-  const tr = String(track || '').trim();
-  const br = String(branch || '').trim();
-  if (!ch && !tr && !br) return '';
-  const left = [ch, tr].filter(Boolean).join('/');
-  return br ? `${left || 'release'} @ ${br}` : (left || 'release');
 }
 
 async function ensureNvrAppEnabledFromRecord(record) {
@@ -2232,17 +2301,6 @@ async function ensureNvrAppEnabledFromRecord(record) {
     String(entry?.owner || '').toLowerCase() === String(hint.owner || '').toLowerCase() &&
     String(entry?.repo || '').toLowerCase() === String(hint.repo || '').toLowerCase()
   ) || null;
-}
-
-function managedGatewayPkForRecord(record) {
-  const gatewayPk = String(record?.hostGatewayPk || record?.host_gateway_pk || '').trim();
-  if (gatewayPk) return gatewayPk;
-  if (isGatewayRecord(record)) return String(record?.devicePk || record?.pk || '').trim();
-  return '';
-}
-
-function managedServicePkForRecord(record) {
-  return String(record?.devicePk || record?.pk || '').trim();
 }
 
 async function requestGatewayManagedLaunch(record, opts = {}) {
@@ -2297,6 +2355,191 @@ async function requestGatewaySignal(req) {
     throw err;
   }
   return await pending;
+}
+
+function managedServiceProjectionKey(record) {
+  const gatewayPk = managedGatewayPkForRecord(record);
+  const servicePk = managedServicePkForRecord(record);
+  const service = String(record?.service || 'nvr').trim().toLowerCase() || 'nvr';
+  return [gatewayPk, servicePk, service].filter(Boolean).join('|');
+}
+
+function managedServiceActionKey(record) {
+  const gatewayPk = managedGatewayPkForRecord(record);
+  const service = String(record?.service || 'nvr').trim().toLowerCase() || 'nvr';
+  return [gatewayPk, service].filter(Boolean).join('|');
+}
+
+function rerenderManagedDevices() {
+  if (!lastIdentity) return;
+  renderApplianceList(lastIdentity?.devices || [], lastSwarmDevices || []);
+}
+
+function clearManagedServiceActionTimer(key) {
+  const timer = managedServiceActionTimers.get(key);
+  if (timer) {
+    clearTimeout(timer);
+    managedServiceActionTimers.delete(key);
+  }
+}
+
+function setManagedServiceActionState(record, state = null, ttlMs = 0) {
+  const key = managedServiceActionKey(record);
+  if (!key) return;
+  clearManagedServiceActionTimer(key);
+  if (!state) {
+    managedServiceActionStates.delete(key);
+  } else {
+    managedServiceActionStates.set(key, {
+      ...state,
+      updatedAt: Date.now(),
+    });
+    if (ttlMs > 0) {
+      const timer = window.setTimeout(() => {
+        managedServiceActionTimers.delete(key);
+        managedServiceActionStates.delete(key);
+        rerenderManagedDevices();
+      }, ttlMs);
+      managedServiceActionTimers.set(key, timer);
+    }
+  }
+  rerenderManagedDevices();
+}
+
+function managedServiceActionStateForRecord(record) {
+  const key = managedServiceActionKey(record);
+  if (!key) return null;
+  return managedServiceActionStates.get(key) || null;
+}
+
+function grantedManagedServiceRecords() {
+  const out = [];
+  for (const records of sharedManagedServicesByGatewayPk.values()) {
+    if (!Array.isArray(records)) continue;
+    for (const record of records) out.push(record);
+  }
+  return out;
+}
+
+function getGrantInventoryForService(record) {
+  const key = managedServiceProjectionKey(record);
+  if (!key) return null;
+  return ownedGatewayGrantInventoryByServiceKey.get(key) || null;
+}
+
+function buildGrantedManagedServiceRecord(shared, fallbackGatewayPk = '') {
+  if (!shared || typeof shared !== 'object') return null;
+  const gatewayPk = String(shared.gatewayPk || fallbackGatewayPk || '').trim();
+  const servicePk = String(shared.servicePk || '').trim();
+  if (!gatewayPk || !servicePk) return null;
+  const service = String(shared.service || 'nvr').trim() || 'nvr';
+  const viewSources = Array.isArray(shared.viewSources)
+    ? shared.viewSources.map((value) => String(value || '').trim()).filter(Boolean)
+    : [];
+  const controlSources = Array.isArray(shared.controlSources)
+    ? shared.controlSources.map((value) => String(value || '').trim()).filter(Boolean)
+    : [];
+  return {
+    devicePk: servicePk,
+    deviceLabel: String(shared.serviceLabel || 'Security Cameras').trim() || 'Security Cameras',
+    deviceKind: 'service',
+    role: service,
+    service,
+    hostGatewayPk: gatewayPk,
+    serviceVersion: String(shared.serviceVersion || '').trim(),
+    updatedAt: Date.now(),
+    status: String(shared.status || 'shared').trim() || 'shared',
+    sharedProjection: true,
+    grantedScope: {
+      viewSources,
+      controlSources,
+      cameras: Array.isArray(shared.cameras) ? shared.cameras : [],
+    },
+  };
+}
+
+async function requestGatewayGrantAction(record, opts = {}) {
+  const gatewayPk = managedGatewayPkForRecord(record);
+  const servicePk = String(opts?.servicePk ?? managedServicePkForRecord(record) ?? '').trim();
+  const service = String(opts?.service || record?.service || 'nvr').trim() || 'nvr';
+  const action = String(opts?.action || '').trim().toLowerCase();
+  if (!gatewayPk) throw new Error('host gateway is not known for this service yet');
+  if (!action) throw new Error('missing grant action');
+  const requestId = String(opts?.requestId || '').trim() || randomOpaqueId('gw-grant');
+  const pending = createPendingRequest(pendingGatewayGrantRequests, requestId, `gateway ${action}`, 12_000);
+  try {
+    await client.call('gateway.grants.request', {
+      requestId,
+      gatewayPk,
+      servicePk,
+      service,
+      action,
+      granteeIdentityId: String(opts?.granteeIdentityId || '').trim(),
+      grantId: String(opts?.grantId || '').trim(),
+      viewSources: Array.isArray(opts?.viewSources) ? opts.viewSources : [],
+      controlSources: Array.isArray(opts?.controlSources) ? opts.controlSources : [],
+    }, { timeoutMs: 20_000 });
+  } catch (err) {
+    settlePending(pendingGatewayGrantRequests, requestId, err);
+    throw err;
+  }
+  return await pending;
+}
+
+async function refreshGatewayGrantViews(identityDevices, swarmDevices) {
+  const owned = ownedPkSet(identityDevices);
+  const applianceRecords = buildApplianceRecords(identityDevices, swarmDevices);
+  const nextShared = new Map();
+  const nextGrantInventory = new Map();
+
+  for (const rec of applianceRecords) {
+    if (!isGatewayRecord(rec)) continue;
+    const gatewayPk = managedGatewayPkForRecord(rec);
+    if (!gatewayPk) continue;
+    const seenAt = Number(applianceSeenAt(rec) || 0);
+    const isFreshEnough = seenAt && (Date.now() - seenAt) <= APPLIANCE_DISCOVERY_MAX_AGE_MS;
+
+    try {
+      if (isFreshEnough) {
+        const sharedResult = await requestGatewayGrantAction(rec, {
+          action: 'list_shared',
+          service: 'nvr',
+        });
+        const sharedRecords = Array.isArray(sharedResult?.sharedResources)
+          ? sharedResult.sharedResources
+              .map((entry) => buildGrantedManagedServiceRecord(entry, gatewayPk))
+              .filter(Boolean)
+          : [];
+        nextShared.set(gatewayPk, sharedRecords);
+      }
+    } catch {}
+
+    const isOwnedGateway = owned.has(gatewayPk) || owned.has(String(rec?.devicePk || rec?.pk || '').trim());
+    if (!isOwnedGateway) continue;
+    const hostedNvr = findGatewayHostedServiceRecord(gatewayPk, applianceRecords, 'nvr');
+    if (!hostedNvr) continue;
+    try {
+      const grantsResult = await requestGatewayGrantAction(hostedNvr, {
+        action: 'list_grants',
+        service: 'nvr',
+      });
+      nextGrantInventory.set(managedServiceProjectionKey(hostedNvr), {
+        grants: Array.isArray(grantsResult?.grants) ? grantsResult.grants : [],
+        availableCameras: Array.isArray(grantsResult?.availableCameras) ? grantsResult.availableCameras : [],
+        updatedAt: Date.now(),
+      });
+    } catch {}
+  }
+
+  sharedManagedServicesByGatewayPk.clear();
+  for (const [gatewayPk, records] of nextShared.entries()) {
+    sharedManagedServicesByGatewayPk.set(gatewayPk, records);
+  }
+
+  ownedGatewayGrantInventoryByServiceKey.clear();
+  for (const [key, value] of nextGrantInventory.entries()) {
+    ownedGatewayGrantInventoryByServiceKey.set(key, value);
+  }
 }
 
 function launchAppWindow(app) {
@@ -2393,18 +2636,33 @@ function managedPopupSplashHtml(title = 'Connecting', status = 'Preparing your S
 </html>`;
 }
 
-async function launchNvrControlPanel(record) {
+async function launchNvrControlPanel(record, opts = {}) {
   let popup = null;
   try {
     lastManagedServiceIssue = null;
+    setManagedServiceActionState(record, {
+      state: 'resolving',
+      message: 'Resolving current Security Cameras availability…',
+    });
     popup = window.open('', '_blank');
+    if (popup && !popup.closed) {
+      popup.document.open();
+      popup.document.write(managedPopupSplashHtml('Connecting', 'Resolving current Security Cameras availability.'));
+      popup.document.close();
+    }
+
+    const resolvedRecord = await resolveManagedServiceForLaunch(record, { serviceLabel: 'Security Cameras' });
+    setManagedServiceActionState(record, {
+      state: 'launching',
+      message: 'Opening Security Cameras…',
+    });
     if (popup && !popup.closed) {
       popup.document.open();
       popup.document.write(managedPopupSplashHtml('Connecting', 'Preparing your Security Cameras view.'));
       popup.document.close();
     }
 
-    const launch = await requestGatewayManagedLaunch(record, {
+    const launch = await requestGatewayManagedLaunch(resolvedRecord, {
       service: 'nvr',
       capability: 'nvr.view',
     });
@@ -2416,8 +2674,8 @@ async function launchNvrControlPanel(record) {
       repo: managedAppSurfaceRepoForService('nvr'),
       identityId: String(lastIdentity?.id || '').trim(),
       devicePk: String(lastDeviceState?.pk || '').trim(),
-      gatewayPk: String(launch?.gatewayPk || managedGatewayPkForRecord(record) || '').trim(),
-      servicePk: String(launch?.servicePk || managedServicePkForRecord(record) || '').trim(),
+      gatewayPk: String(launch?.gatewayPk || managedGatewayPkForRecord(resolvedRecord) || '').trim(),
+      servicePk: String(launch?.servicePk || managedServicePkForRecord(resolvedRecord) || '').trim(),
       service: 'nvr',
       launchToken: String(launch?.launchToken || '').trim(),
       display: launch?.display ?? {},
@@ -2426,13 +2684,18 @@ async function launchNvrControlPanel(record) {
     });
     await runtimeBridge?.putLaunchContext?.(context);
 
-    const url = await buildManagedAppSurfaceUrl(managedAppSurfaceRepoForService('nvr'), launchId);
+    const url = await buildManagedAppSurfaceUrl(
+      managedAppSurfaceRepoForService('nvr'),
+      launchId,
+      opts,
+    );
     if (popup && !popup.closed) {
       popup.location.replace(url);
     } else {
       window.open(url, '_blank', 'noopener,noreferrer');
     }
     setGatewayInstallStatus('Opened Security Cameras.', false);
+    setManagedServiceActionState(record, null);
   } catch (err) {
     lastManagedServiceIssue = {
       service: 'nvr',
@@ -2443,6 +2706,10 @@ async function launchNvrControlPanel(record) {
     };
     setGatewayInstallStatus(`NVR control panel failed: ${String(err?.message || err)}`, true);
     runtimeBridge?.pushStatus?.(buildRuntimeShellStatus()).catch(() => {});
+    setManagedServiceActionState(record, {
+      state: 'error',
+      message: String(err?.message || err),
+    }, 7_500);
     if (popup && !popup.closed) {
       popup.document.title = 'Security Cameras Launch Failed';
       popup.document.body.innerHTML = `<pre style="font:14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; padding:16px; color:#fca5a5; background:#0b1220;">Launch failed: ${escapeHtml(String(err?.message || err))}</pre>`;
@@ -2450,68 +2717,93 @@ async function launchNvrControlPanel(record) {
   }
 }
 
-function buildApplianceRecords(identityDevices, swarmDevices) {
-  const owned = ownedPkSet(identityDevices);
-  const actual = [];
-  const seen = new Set();
-  const sourceRecords = Array.isArray(swarmDevices) ? swarmDevices : [];
-  for (const rawRec of sourceRecords) {
-    const rec = applyGatewayHostedSnapshot(rawRec);
-    const pk = String(rec?.devicePk || rec?.pk || '').trim();
-    if (!pk || seen.has(pk)) continue;
-    if (!(isGatewayRecord(rec) || isNvrRecord(rec))) continue;
-    const ownedRec = owned.has(pk) || owned.has(String(rec?.hostGatewayPk || rec?.host_gateway_pk || '').trim());
-    const seenAt = applianceSeenAt(rec);
-    const ageMs = seenAt ? Math.max(0, Date.now() - seenAt) : Number.POSITIVE_INFINITY;
-    if (!ownedRec && ageMs > APPLIANCE_DISCOVERY_MAX_AGE_MS) continue;
-    seen.add(pk);
-    actual.push(rec);
-  }
-
-  const recs = [...actual];
-  const actualPkSet = new Set(actual.map((rec) => String(rec?.devicePk || rec?.pk || '').trim()).filter(Boolean));
-  for (const rec of actual) {
-    if (!isGatewayRecord(rec)) continue;
-    const hostedServices = Array.isArray(rec?.hostedServices || rec?.hosted_services)
-      ? (rec.hostedServices || rec.hosted_services)
-      : [];
-    for (const hosted of hostedServices) {
-      const pk = String(hosted?.devicePk || hosted?.device_pk || '').trim();
-      if (!pk || actualPkSet.has(pk)) continue;
-      recs.push({
-        devicePk: pk,
-        deviceLabel: String(hosted?.deviceLabel || hosted?.device_label || hosted?.service || 'service').trim(),
-        deviceKind: String(hosted?.deviceKind || hosted?.device_kind || 'service').trim() || 'service',
-        role: String(hosted?.service || '').trim(),
-        service: String(hosted?.service || '').trim(),
-        hostGatewayPk: String(hosted?.hostGatewayPk || hosted?.host_gateway_pk || rec?.devicePk || rec?.pk || '').trim(),
-        serviceVersion: String(hosted?.serviceVersion || hosted?.service_version || '').trim(),
-        updatedAt: Number(hosted?.updatedAt || hosted?.updated_at || rec?.updatedAt || 0),
-        freshnessMs: Number(hosted?.freshnessMs || hosted?.freshness_ms || 0),
-        hostedSynthetic: true,
-      });
-      actualPkSet.add(pk);
-    }
-  }
-
-  recs.sort((a, b) => {
-    const aa = applianceSeenAt(a);
-    const bb = applianceSeenAt(b);
-    return Number(bb || 0) - Number(aa || 0);
-  });
-  return recs;
+function closeGatewayBasicsModal() {
+  gatewayBasicsModalState = null;
+  gatewayBasicsModal?.classList.add('hidden');
+  resourceModalBackdrop?.classList.add('hidden');
+  if (gatewayBasicsModalActions) gatewayBasicsModalActions.innerHTML = '';
+  if (gatewayBasicsModalBody) gatewayBasicsModalBody.innerHTML = '';
 }
 
-function findGatewayHostedServiceRecord(gatewayPk, applianceRecords, serviceName = 'nvr') {
-  const targetGatewayPk = String(gatewayPk || '').trim();
-  const targetService = normalizeRole(serviceName || '');
-  if (!targetGatewayPk || !targetService) return null;
-  const records = Array.isArray(applianceRecords) ? applianceRecords : [];
-  return records.find((rec) => {
-    const service = normalizeRole(rec?.service || '');
-    const hostGatewayPk = String(rec?.hostGatewayPk || rec?.host_gateway_pk || '').trim();
-    return service === targetService && hostGatewayPk === targetGatewayPk;
-  }) || null;
+function addGatewayBasicsAction(label, onClick, extraClass = '') {
+  if (typeof onClick !== 'function' || !gatewayBasicsModalActions) return;
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.textContent = label;
+  if (extraClass) button.className = extraClass;
+  button.addEventListener('click', () => {
+    Promise.resolve(onClick()).catch((err) => {
+      setGatewayInstallStatus(`Gateway action failed: ${String(err?.message || err)}`, true);
+    });
+  });
+  gatewayBasicsModalActions.appendChild(button);
+}
+
+function openGatewayBasicsModal(spec = {}) {
+  gatewayBasicsModalState = spec;
+  if (!gatewayBasicsModal || !resourceModalBackdrop || !gatewayBasicsModalTitle || !gatewayBasicsModalBody || !gatewayBasicsModalActions) {
+    return;
+  }
+  const info = spec.info || {};
+  const hostedNvr = spec.hostedNvr || null;
+  const freshness = spec.freshness || {};
+  const last = String(spec.last || '').trim() || 'n/a';
+  const hostedServices = Array.isArray(info.hostedServices) ? info.hostedServices : [];
+  const hostedSummary = hostedServices.length > 0
+    ? hostedServices.map((service) => String(service?.service || 'service')).join(', ')
+    : 'none detected';
+  gatewayBasicsModalTitle.textContent = String(info.title || 'Gateway').trim() || 'Gateway';
+  gatewayBasicsModalBody.innerHTML = `
+    <section class="modalSection">
+      <div class="modalSectionTitle">Status</div>
+      <div class="kv">
+        <div class="k">Freshness</div>
+        <div class="v">${escapeHtml(String(freshness.label || 'unknown'))} • ${escapeHtml(formatRelativeTime(spec.seenAt || 0))}</div>
+      </div>
+      <div class="kv">
+        <div class="k">Last update</div>
+        <div class="v">${escapeHtml(last)}</div>
+      </div>
+      <div class="kv">
+        <div class="k">Platform</div>
+        <div class="v">${escapeHtml(String(info.hostPlatform || 'unknown'))}</div>
+      </div>
+      <div class="kv">
+        <div class="k">Release</div>
+        <div class="v">${escapeHtml(formatReleaseMeta(info.releaseChannel, info.releaseTrack, info.releaseBranch) || 'unknown')}</div>
+      </div>
+    </section>
+
+    <section class="modalSection">
+      <div class="modalSectionTitle">Hosted Services</div>
+      <div class="kv">
+        <div class="k">Detected</div>
+        <div class="v">${escapeHtml(hostedSummary)}</div>
+      </div>
+      <div class="kv">
+        <div class="k">Security Cameras</div>
+        <div class="v">${hostedNvr ? 'Installed and discoverable.' : 'Not installed yet.'}</div>
+      </div>
+    </section>
+
+    <section class="modalSection">
+      <div class="modalSectionTitle">Gateway Scope</div>
+      <div class="small muted">Gateway settings stay gateway-specific here. NVR and camera settings live on the Security Cameras surface.</div>
+      <div class="small muted" style="margin-top:0.55rem;">Roadmap: a dedicated Gateway Management app will own richer configuration, statistics, graphs, service lifecycle, and host OS management later.</div>
+    </section>
+  `;
+  gatewayBasicsModalActions.innerHTML = '';
+  addGatewayBasicsAction('Configure Zones', spec.onConfigureZones);
+  if (hostedNvr && typeof spec.onOpenNvr === 'function') {
+    addGatewayBasicsAction('Open Security Cameras', async () => {
+      closeGatewayBasicsModal();
+      await spec.onOpenNvr();
+    }, 'ok');
+  } else if (!hostedNvr && typeof spec.onInstallNvr === 'function') {
+    addGatewayBasicsAction('Install NVR Service', spec.onInstallNvr);
+  }
+  gatewayBasicsModal.classList.remove('hidden');
+  resourceModalBackdrop.classList.remove('hidden');
 }
 
 function shouldRefreshGatewayInventory(gatewayPk) {
@@ -2525,10 +2817,12 @@ function shouldRefreshGatewayInventory(gatewayPk) {
   return (Date.now() - lastAt) >= GATEWAY_INVENTORY_REFRESH_TTL_MS;
 }
 
-async function requestGatewayInventoryRefresh(gatewayPk) {
+async function requestGatewayInventoryRefresh(gatewayPk, opts = {}) {
   const pk = String(gatewayPk || '').trim();
-  if (!pk || !shouldRefreshGatewayInventory(pk)) return false;
+  const force = opts?.force === true;
+  if (!pk || (!force && !shouldRefreshGatewayInventory(pk))) return false;
   gatewayInventoryRefreshAt.set(pk, Date.now());
+  if (force) gatewayInventoryStableAt.delete(pk);
   try {
     await client.call('swarm.record.request', {
       want: ['device'],
@@ -2541,175 +2835,135 @@ async function requestGatewayInventoryRefresh(gatewayPk) {
   }
 }
 
+async function refreshManagedApplianceProjection(opts = {}) {
+  if (!client) return [];
+  const refreshGrantViews = opts?.refreshGrantViews === true;
+  const swarmDevices = await client.call('swarm.device.list', {}, { timeoutMs: 20_000 }).catch(() => lastSwarmDevices || []);
+  lastSwarmDevices = Array.isArray(swarmDevices) ? swarmDevices : [];
+  if (refreshGrantViews) {
+    await refreshGatewayGrantViews(lastIdentity?.devices || [], lastSwarmDevices).catch(() => {});
+  }
+  renderApplianceList(lastIdentity?.devices || [], lastSwarmDevices);
+  pushRuntimeApplianceProjections(lastIdentity?.devices || [], lastSwarmDevices);
+  renderConnectionModel('managed inventory refresh');
+  return lastSwarmDevices;
+}
+
+function isFreshManagedServiceRecord(record) {
+  const freshness = applianceFreshness(applianceSeenAt(record));
+  return freshness.label === 'live' || freshness.label === 'recent';
+}
+
+function resolvedManagedServiceRecord(record, applianceRecords = []) {
+  const records = Array.isArray(applianceRecords) ? applianceRecords : [];
+  const gatewayPk = managedGatewayPkForRecord(record);
+  const requestedServicePk = managedServicePkForRecord(record);
+  const service = String(record?.service || 'nvr').trim().toLowerCase() || 'nvr';
+  let direct = null;
+  if (requestedServicePk) {
+    direct = records.find((candidate) => {
+      if (String(candidate?.service || '').trim().toLowerCase() !== service) return false;
+      if (managedServicePkForRecord(candidate) !== requestedServicePk) return false;
+      const candidateGatewayPk = managedGatewayPkForRecord(candidate);
+      return !gatewayPk || !candidateGatewayPk || candidateGatewayPk === gatewayPk;
+    }) || null;
+  }
+  if (direct && isFreshManagedServiceRecord(direct)) return direct;
+  if (gatewayPk) {
+    const hosted = findGatewayHostedServiceRecord(gatewayPk, records, service);
+    if (hosted && isFreshManagedServiceRecord(hosted)) return hosted;
+    return hosted || direct;
+  }
+  return direct;
+}
+
+function isGatewayAuthoritativeManagedServiceRecord(record) {
+  return String(record?.managedAvailabilityAuthority || '').trim().toLowerCase() === 'gateway';
+}
+
+async function resolveManagedServiceForLaunch(record, opts = {}) {
+  const gatewayPk = managedGatewayPkForRecord(record);
+  const serviceLabel = String(opts?.serviceLabel || 'Security Cameras').trim() || 'Security Cameras';
+  if (!gatewayPk) {
+    throw new Error(`${serviceLabel} is not attached to a gateway yet.`);
+  }
+  let candidate = resolvedManagedServiceRecord(
+    record,
+    buildApplianceRecords(lastIdentity?.devices || [], lastSwarmDevices || [], grantedManagedServiceRecords()),
+  );
+  if (candidate && isFreshManagedServiceRecord(candidate) && isGatewayAuthoritativeManagedServiceRecord(candidate)) {
+    return candidate;
+  }
+
+  await requestGatewayInventoryRefresh(gatewayPk, { force: true }).catch(() => false);
+  const startedAt = Date.now();
+  while ((Date.now() - startedAt) < MANAGED_SERVICE_RESOLVE_TIMEOUT_MS) {
+    await refreshManagedApplianceProjection({ refreshGrantViews: false }).catch(() => {});
+    candidate = resolvedManagedServiceRecord(
+      record,
+      buildApplianceRecords(lastIdentity?.devices || [], lastSwarmDevices || [], grantedManagedServiceRecords()),
+    );
+    if (candidate && isFreshManagedServiceRecord(candidate) && isGatewayAuthoritativeManagedServiceRecord(candidate)) {
+      return candidate;
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, MANAGED_SERVICE_RESOLVE_POLL_MS));
+  }
+
+  if (candidate && isGatewayAuthoritativeManagedServiceRecord(candidate)) {
+    return candidate;
+  }
+
+  if (candidate && !isGatewayAuthoritativeManagedServiceRecord(candidate)) {
+    throw new Error(`${serviceLabel} is not published as a gateway-hosted service yet.`);
+  }
+
+  const seenAt = candidate ? applianceSeenAt(candidate) : 0;
+  const detail = candidate && seenAt
+    ? `Last update ${formatRelativeTime(seenAt)}.`
+    : 'The gateway has not refreshed this service yet.';
+  throw new Error(`${serviceLabel} is not available right now. ${detail}`.trim());
+}
+
 function renderApplianceList(identityDevices, swarmDevices) {
-  if (!applianceList) return;
-  clear(applianceList);
+  renderManagedApplianceList({
+    applianceList,
+    identityDevices,
+    swarmDevices,
+    gatewayInventoryStableAt,
+    showActivity,
+    setSettingsTab,
+    setPairCodeStatus,
+    gatewayExtraZonesForPk,
+    parseZoneKeyList,
+    setGatewayExtraZonesForPk,
+    requestGatewayZoneSync,
+    setGatewayInstallStatus,
+    requestRemoteNvrInstall,
+    launchNvrControlPanel,
+    openGatewayBasicsModal,
+    escapeHtml,
+    getManagedServiceActionState: managedServiceActionStateForRecord,
+    grantedRecords: grantedManagedServiceRecords(),
+    getGrantInventoryForService,
+    requestGatewayGrantAction,
+    isGrantedRecord: (record) => record?.sharedProjection === true || record?.grantedRecord === true,
+  });
+}
 
+function pushRuntimeApplianceProjections(identityDevices, swarmDevices) {
+  if (!runtimeBridge?.putProjection) return;
+  const grantedRecords = grantedManagedServiceRecords();
+  const combinedRecords = buildApplianceRecords(identityDevices, swarmDevices, grantedRecords);
   const owned = ownedPkSet(identityDevices);
-  const recs = buildApplianceRecords(identityDevices, swarmDevices);
-
-  if (recs.length === 0) {
-    const empty = document.createElement('div');
-    empty.className = 'item';
-    empty.textContent = 'No gateway or NVR appliances discovered yet.';
-    applianceList.appendChild(empty);
-    return;
-  }
-
-  for (const rec of recs) {
-    const info = summarizeAppliance(rec, owned.has(String(rec?.devicePk || rec?.pk || '').trim()));
-    const seenAt = applianceSeenAt(rec);
-    const hostedNvr = isGatewayRecord(rec) ? findGatewayHostedServiceRecord(info.pk, recs, 'nvr') : null;
-    if (isGatewayRecord(rec) && hostedNvr && info.owned) {
-      gatewayInventoryStableAt.set(info.pk, Date.now());
-    }
-
-    const item = document.createElement('div');
-    item.className = 'item';
-
-    const meta = document.createElement('div');
-    const freshness = applianceFreshness(seenAt);
-    const last = seenAt ? new Date(seenAt).toLocaleString() : 'n/a';
-    const suffix = info.version ? ` (${info.version})` : '';
-    const host = info.hostPlatform ? ` • host ${info.hostPlatform}` : '';
-    const kind = info.deviceKind ? `type ${info.deviceKind}` : '';
-    const releaseMeta = formatReleaseMeta(info.releaseChannel, info.releaseTrack, info.releaseBranch);
-    const releaseLine = releaseMeta ? `<div class="itemMeta">release ${escapeHtml(releaseMeta)}</div>` : '';
-    const hostGatewayLine = info.hostGatewayPk
-      ? `<div class="itemMeta">host gateway ${escapeHtml(info.hostGatewayPk.slice(0, 16))}…</div>`
-      : '';
-    const hostedServicesLine = Array.isArray(info.hostedServices) && info.hostedServices.length > 0
-      ? `<div class="itemMeta">hosted services ${escapeHtml(info.hostedServices.map((svc) => String(svc?.service || 'service')).join(', '))}</div>`
-      : '';
-    meta.innerHTML = `
-      <div class="itemTitle">${escapeHtml(info.title)}</div>
-      <div class="itemMeta">pk ${escapeHtml(info.pk.slice(0, 16))}…</div>
-      <div class="itemMeta">${escapeHtml([kind, `role ${info.role}`, `service ${info.service}${suffix}`, host ? host.replace(/^ • /, '') : ''].filter(Boolean).join(' • '))}</div>
-      ${hostGatewayLine}
-      ${hostedServicesLine}
-      ${releaseLine}
-      <div class="itemMeta"><span class="freshnessDot ${escapeHtml(freshness.css)}" title="${escapeHtml(last)}"></span>${escapeHtml(freshness.label)} • ${escapeHtml(formatAgeShort(seenAt))}</div>
-      <div class="itemMeta">${info.owned ? 'owned by this identity' : 'discovered in zone'} • updated ${escapeHtml(last)}</div>
-    `;
-
-    const actions = document.createElement('div');
-    actions.className = 'itemActions';
-
-    if (isGatewayRecord(rec)) {
-      if (!info.owned) {
-        const pair = document.createElement('button');
-        pair.type = 'button';
-        pair.textContent = 'Pair Existing Gateway';
-        pair.onclick = () => {
-          showActivity('settings');
-          setSettingsTab('pairing');
-          setPairCodeStatus('Enter the pairing code shown by the gateway installer utility.');
-        };
-        actions.appendChild(pair);
-      }
-
-      const configureZones = document.createElement('button');
-      configureZones.type = 'button';
-      configureZones.textContent = 'Configure Zones';
-      if (!info.owned) {
-        configureZones.disabled = true;
-        configureZones.title = 'Pair this gateway to your identity before configuring zones.';
-      } else {
-        configureZones.onclick = async () => {
-          try {
-            const currentExtra = gatewayExtraZonesForPk(info.pk);
-            const entered = window.prompt(
-              'Extra gateway zone keys (comma or space separated). Identity zones are always synced automatically.',
-              currentExtra.join(', '),
-            );
-            if (entered === null) return;
-            const extras = parseZoneKeyList(entered);
-            setGatewayExtraZonesForPk(info.pk, extras);
-            setGatewayInstallStatus('Submitting gateway zone sync request...');
-            const submitted = await requestGatewayZoneSync(rec, extras);
-            if (submitted?.requestId) {
-              setGatewayInstallStatus(`Gateway zone sync requested (${submitted.requestId.slice(0, 12)}...).`, false);
-            } else {
-              setGatewayInstallStatus('Gateway zone sync request submitted.', false);
-            }
-          } catch (err) {
-            setGatewayInstallStatus(`Could not sync gateway zones: ${String(err?.message || err)}`, true);
-          }
-        };
-      }
-      actions.appendChild(configureZones);
-
-      const gatewaySupportsServices = info.hostPlatform
-        ? (info.hostPlatform === 'linux' || info.hostPlatform === 'fcos')
-        : true;
-      if (gatewaySupportsServices) {
-        const installNvr = document.createElement('button');
-        installNvr.type = 'button';
-        installNvr.textContent = hostedNvr ? 'Open Security Cameras' : 'Install NVR Service';
-        if (!info.owned) {
-          installNvr.disabled = true;
-          installNvr.title = 'Pair this gateway to your identity before installing services.';
-        } else if (hostedNvr) {
-          installNvr.onclick = () => {
-            launchNvrControlPanel(hostedNvr).catch((err) => {
-              setGatewayInstallStatus(`NVR launch failed: ${String(err?.message || err)}`, true);
-            });
-          };
-        } else {
-          installNvr.onclick = async () => {
-            try {
-              setGatewayInstallStatus('Submitting NVR install request to gateway...');
-              const submitted = await requestRemoteNvrInstall(rec);
-              const until = submitted?.enrollment?.expiresAt
-                ? new Date(submitted.enrollment.expiresAt).toLocaleTimeString()
-                : '';
-              if (submitted?.requestId) {
-                setGatewayInstallStatus(
-                  until
-                    ? `NVR install requested (request ${submitted.requestId.slice(0, 12)}...). Pair claim armed until ${until}.`
-                    : `NVR install requested (request ${submitted.requestId.slice(0, 12)}...).`,
-                  false,
-                );
-              } else {
-                setGatewayInstallStatus('NVR install request submitted.', false);
-              }
-            } catch (err) {
-              setGatewayInstallStatus(`Could not submit NVR install request: ${String(err?.message || err)}`, true);
-            }
-          };
-        }
-        actions.appendChild(installNvr);
-      } else {
-        const unsupported = document.createElement('button');
-        unsupported.type = 'button';
-        unsupported.disabled = true;
-        unsupported.textContent = 'NVR Unsupported';
-        unsupported.title = 'Gateway-hosted services are currently supported on Linux hosts only.';
-        actions.appendChild(unsupported);
-      }
-    }
-
-    if (isNvrRecord(rec)) {
-      const open = document.createElement('button');
-      open.type = 'button';
-      open.textContent = 'Open Security Cameras';
-      if (!info.owned) {
-        open.disabled = true;
-        open.title = 'Only services owned by this identity can be launched.';
-      } else {
-        open.onclick = () => {
-          launchNvrControlPanel(rec).catch((err) => {
-            setGatewayInstallStatus(`NVR launch failed: ${String(err?.message || err)}`, true);
-          });
-        };
-      }
-      actions.appendChild(open);
-    }
-
-    item.appendChild(meta);
-    item.appendChild(actions);
-    applianceList.appendChild(item);
-  }
+  const partitions = partitionApplianceRecords(
+    combinedRecords,
+    owned,
+    (record) => record?.sharedProjection === true || record?.grantedRecord === true,
+  );
+  runtimeBridge.putProjection('owned', 'appliances', partitions.ownedRecords);
+  runtimeBridge.putProjection('granted', 'appliances', partitions.grantedRecords);
+  runtimeBridge.putProjection('discoverable', 'appliances', partitions.discoverableRecords);
+  runtimeBridge.putProjection('session', 'managed-service-issue', lastManagedServiceIssue || null);
 }
 
 function loadAppPrefs() {
@@ -3316,18 +3570,18 @@ function renderHomeApps() {
   if (!homeAppsList) return;
 
   const apps = enabledAppManifests().filter((app) => !isManagedFirstPartyApp(app));
-  const managedServices = buildApplianceRecords(lastIdentity?.devices || [], lastSwarmDevices)
+  const managedServices = buildApplianceRecords(lastIdentity?.devices || [], lastSwarmDevices, grantedManagedServiceRecords())
     .filter((rec) => isNvrRecord(rec))
     .filter((rec) => {
       const pk = String(rec?.devicePk || rec?.pk || '').trim();
       const hostGatewayPk = String(rec?.hostGatewayPk || rec?.host_gateway_pk || '').trim();
       const owned = ownedPkSet(lastIdentity?.devices || []);
-      return owned.has(pk) || owned.has(hostGatewayPk);
+      return owned.has(pk) || owned.has(hostGatewayPk) || rec?.sharedProjection === true || rec?.grantedRecord === true;
     });
   if (!apps.length && !managedServices.length) {
     const d = document.createElement('div');
     d.className = 'small muted';
-    d.textContent = 'No apps available yet. Install or pair a managed service from Appliances.';
+    d.textContent = 'No apps available yet. Install or pair a managed service from Devices.';
     homeAppsList.appendChild(d);
   }
 
@@ -3378,7 +3632,10 @@ function renderHomeApps() {
 
     const meta = document.createElement('div');
     meta.className = 'small muted';
-    const parts = ['Managed service', `service ${info.service || 'nvr'}`];
+    const parts = [
+      rec?.sharedProjection === true || rec?.grantedRecord === true ? 'Shared service' : 'Managed service',
+      `service ${info.service || 'nvr'}`,
+    ];
     if (info.hostGatewayPk) parts.push(`gateway ${info.hostGatewayPk.slice(0, 12)}...`);
     meta.textContent = parts.join(' - ');
 
@@ -3519,12 +3776,12 @@ function renderNotifications(notifs) {
       if (n.kind === 'pairing') {
         notifMenu.classList.add('hidden');
         showActivity('settings');
-        setSettingsTab('pairing');
+        setSettingsTab('devices');
       }
       await refreshAll();
       if (n.kind === 'pairing') {
         showActivity('settings');
-        setSettingsTab('pairing');
+        setSettingsTab('devices');
       }
     };
     notifList.appendChild(it);
@@ -3550,7 +3807,9 @@ function renderPairRequests(reqs, identityDevices) {
   const pending = filterPendingPairRequests(reqs, identityDevices);
 
   clear(pairingList);
-  pairingEmpty.classList.toggle('hidden', pending.length !== 0);
+  if (pairingEmpty) pairingEmpty.textContent = 'No pending pairing requests.';
+  if (pendingRequestsSection) pendingRequestsSection.classList.toggle('hidden', pending.length === 0);
+  if (pairingEmpty) pairingEmpty.classList.toggle('hidden', pending.length !== 0);
 
   for (const r of pending) {
     const item = document.createElement('div');
@@ -3587,8 +3846,7 @@ function renderPairRequests(reqs, identityDevices) {
         await refreshAll();
       } catch (e) {
         console.error(e);
-        pairingEmpty.textContent = `Approve failed: ${String(e?.message || e)}`;
-        pairingEmpty.classList.remove('hidden');
+        setPairCodeStatus(`Approve failed: ${String(e?.message || e)}`, true);
       } finally {
         btnApprove.disabled = false;
         btnApprove.textContent = 'Approve';
@@ -3603,8 +3861,7 @@ function renderPairRequests(reqs, identityDevices) {
         await refreshAll();
       } catch (e) {
         console.error(e);
-        pairingEmpty.textContent = `Reject failed: ${String(e?.message || e)}`;
-        pairingEmpty.classList.remove('hidden');
+        setPairCodeStatus(`Reject failed: ${String(e?.message || e)}`, true);
       } finally {
         btnReject.disabled = false;
         btnReject.textContent = 'Reject';
@@ -3739,10 +3996,39 @@ function renderBlockedList(list) {
   }
 }
 
+function shortPk(value, head = 12, tail = 6) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  if (raw.length <= head + tail + 1) return raw;
+  return `${raw.slice(0, head)}…${raw.slice(-tail)}`;
+}
+
+function titleCaseWords(value) {
+  return String(value || '')
+    .trim()
+    .split(/[\s_-]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ');
+}
+
+function peerSummaryTitle(entry) {
+  const label = String(entry?.deviceLabel || entry?.label || entry?.identityLabel || entry?.name || '').trim();
+  if (label) return label;
+  const role = String(entry?.role || '').trim().toLowerCase();
+  const service = String(entry?.service || '').trim().toLowerCase();
+  const summary = service && service !== 'none'
+    ? titleCaseWords(service)
+    : (role ? titleCaseWords(role) : 'Device');
+  const pk = shortPk(entry?.devicePk || '', 10, 4);
+  return pk ? `${summary} • ${pk}` : summary;
+}
+
 function renderZones(list) {
   clear(zonesList);
   const arr = Array.isArray(list) ? list : [];
   if (arr.length === 0) {
+    activeZoneKey = '';
     const d = document.createElement('div');
     d.className = 'item';
     d.textContent = 'No zones yet.';
@@ -3782,8 +4068,10 @@ function renderZones(list) {
         const roleLine = serviceVersion ? `${role || 'unknown'} (${serviceVersion})` : (role || 'unknown');
         const releaseMeta = formatReleaseMeta(e.releaseChannel, e.releaseTrack, e.releaseBranch);
         const releaseLine = releaseMeta ? `<div class="itemMeta">Release: ${escapeHtml(releaseMeta)}</div>` : '';
+        const pkMeta = shortPk(e.devicePk || '', 12, 6);
         row.innerHTML = `
-          <div class="itemTitle">${escapeHtml(e.devicePk || '')}</div>
+          <div class="itemTitle">${escapeHtml(peerSummaryTitle(e))}</div>
+          <div class="itemMeta">pk ${escapeHtml(pkMeta || String(e.devicePk || ''))}</div>
           <div class="itemMeta">Source: ${escapeHtml(sources)}</div>
           <div class="itemMeta">Role: ${escapeHtml(roleLine)}</div>
           ${releaseLine}
@@ -3795,23 +4083,16 @@ function renderZones(list) {
     }
     item.onclick = () => {
       activeZoneKey = key;
-      setZoneLink(key);
       renderPeers(lastDirectory);
     };
     zonesList.appendChild(item);
   }
+  if (activeZoneKey && !arr.some((zone) => String(zone?.key || '').trim() === activeZoneKey)) {
+    activeZoneKey = '';
+  }
   if (!activeZoneKey && arr[0]?.key) {
     activeZoneKey = arr[0].key;
-    setZoneLink(activeZoneKey);
   }
-}
-
-function setZoneLink(key) {
-  if (!zoneLink) return;
-  if (!key) { zoneLink.textContent = ''; return; }
-  const base = `${window.location.origin}${window.location.pathname}`;
-  const url = `${base}?zone=${encodeURIComponent(key)}`;
-  zoneLink.textContent = url;
 }
 
 function renderPeers(list) {
@@ -3841,8 +4122,10 @@ function renderPeers(list) {
     const roleLine = serviceVersion ? `${role || 'unknown'} (${serviceVersion})` : (role || 'unknown');
     const releaseMeta = formatReleaseMeta(e.releaseChannel, e.releaseTrack, e.releaseBranch);
     const releaseLine = releaseMeta ? `<div class="itemMeta">Release: ${escapeHtml(releaseMeta)}</div>` : '';
+    const pkMeta = shortPk(e.devicePk || '', 12, 6);
     item.innerHTML = `
-      <div class="itemTitle">${escapeHtml(e.devicePk || '')}</div>
+      <div class="itemTitle">${escapeHtml(peerSummaryTitle(e))}</div>
+      <div class="itemMeta">pk ${escapeHtml(pkMeta || String(e.devicePk || ''))}</div>
       <div class="itemMeta">Source: ${escapeHtml(sources)}</div>
       <div class="itemMeta">Role: ${escapeHtml(roleLine)}</div>
       ${releaseLine}
@@ -3910,7 +4193,6 @@ async function refreshAll() {
   // SEQUENTIAL (not Promise.all) to avoid SW starvation/timeouts.
   const st = await client.call('device.getState', {}, { timeoutMs: 20000 });
   const ident = await client.call('identity.get', {}, { timeoutMs: 20000 });
-  const prof = await client.call('profile.get', {}, { timeoutMs: 20000 });
   const reqs = await client.call('pairing.list', {}, { timeoutMs: 20000 });
   const blocked = await client.call('blocked.list', {}, { timeoutMs: 20000 });
   const directory = await client.call('directory.list', {}, { timeoutMs: 20000 });
@@ -3928,6 +4210,7 @@ async function refreshAll() {
   lastDirectory = directory || [];
   lastZones = zones || [];
   lastSwarmDevices = swarmDevices || [];
+  await refreshGatewayGrantViews(ident?.devices || [], lastSwarmDevices).catch(() => {});
   relayBridge?.updateTargets(desiredRelayUrls(ident?.devices || [], lastSwarmDevices), 'refresh');
 
   // If we only have a key, try to resolve the human name via peers.
@@ -3945,13 +4228,7 @@ async function refreshAll() {
   deviceDidSummary.textContent = st.did || '(none)';
   deviceSecuritySummary.textContent = st.didMethod === 'webauthn' ? 'platform-backed' : 'software-only';
   identityLinkedSummary.textContent = ident?.linked ? 'yes' : 'no';
-
-  identityLabelEl.textContent = ident?.label || '';
-  identityIdEl.textContent = ident?.id || '';
-  identityLinkedEl.textContent = ident?.linked ? 'yes' : 'no';
-
-  profileName.value = ident?.label || '';
-  profileAbout.value = prof?.about || '';
+  updateIdentityChrome(ident);
 
   deviceLabel.value = myLabel?.label || '';
   updateGatewayInstallHint();
@@ -3960,7 +4237,9 @@ async function refreshAll() {
   renderBlockedList(blocked || []);
   renderZones(lastZones);
   renderPeers(lastDirectory);
+  updateZoneCommandUi();
   renderApplianceList(ident?.devices || [], lastSwarmDevices);
+  pushRuntimeApplianceProjections(ident?.devices || [], lastSwarmDevices);
   renderHomeApps();
   renderPairRequests(reqs || [], ident?.devices || []);
   renderNotifications(notifs || []);
@@ -4035,7 +4314,7 @@ async function applyPendingZone() {
   await refreshAll();
   if (pendingZoneNav) {
     showActivity('settings');
-    setSettingsTab('peers');
+    setSettingsTab('network');
     pendingZoneNav = false;
     return true;
   }
@@ -4051,6 +4330,214 @@ function normalizeZoneKey(input) {
     return u.searchParams.get('zone') || '';
   } catch {
     return '';
+  }
+}
+
+function zoneRecordByKey(key) {
+  const target = String(key || '').trim();
+  if (!target) return null;
+  return (Array.isArray(lastZones) ? lastZones : []).find((zone) => String(zone?.key || '').trim() === target) || null;
+}
+
+function zoneNameExists(name) {
+  const target = String(name || '').trim().toLowerCase();
+  if (!target) return false;
+  return (Array.isArray(lastZones) ? lastZones : []).some((zone) => String(zone?.name || '').trim().toLowerCase() === target);
+}
+
+function syntheticZoneName(key) {
+  const raw = String(key || '').trim();
+  if (!raw) return 'Zone';
+  return `Zone ${raw.slice(0, 8)}`;
+}
+
+function zoneCommandResolvedShareName(key) {
+  const zone = zoneRecordByKey(key);
+  return String(zone?.name || '').trim() || syntheticZoneName(key);
+}
+
+function updateZoneCommandUi() {
+  if (!zoneCommandInput || !zoneCommandButton || !zoneCommandHelper) return;
+  const mode = String(zoneCommandState.mode || 'idle');
+  const busy = Boolean(zoneCommandState.busy);
+  zoneCommandSpinner?.classList.toggle('hidden', !busy);
+  zoneCommandButton.disabled = busy || mode === 'idle';
+  zoneCommandButton.textContent = busy
+    ? 'Checking...'
+    : (mode === 'join' ? 'Join' : (mode === 'copy' ? 'Copy ID' : 'Create'));
+  zoneCommandHelper.textContent = zoneCommandState.helper || 'Type a name to create a zone, or paste a zone ID to join one.';
+  zoneCommandHelper.classList.toggle('warn', Boolean(zoneCommandState.error));
+}
+
+async function evaluateZoneCommandInput(rawInput) {
+  zoneCommandState.draft = String(rawInput || '');
+  zoneCommandState.resolvedKey = '';
+  zoneCommandState.resolvedName = '';
+  zoneCommandState.mode = 'idle';
+  zoneCommandState.helper = '';
+  zoneCommandState.busy = false;
+  zoneCommandState.error = false;
+
+  const raw = String(rawInput || '').trim();
+  if (!raw) {
+    updateZoneCommandUi();
+    return;
+  }
+
+  const normalizedKey = normalizeZoneKey(raw);
+  if (ZONE_KEY_RE.test(normalizedKey)) {
+    zoneCommandState.mode = 'resolving';
+    zoneCommandState.busy = true;
+    zoneCommandState.helper = 'Checking zone ID…';
+    updateZoneCommandUi();
+
+    const existingZone = zoneRecordByKey(normalizedKey);
+    if (!existingZone) {
+      await client.call('zones.meta.request', { key: normalizedKey }, { timeoutMs: 20_000 }).catch(() => {});
+      await client.call('zones.list.request', { key: normalizedKey }, { timeoutMs: 20_000 }).catch(() => {});
+      await new Promise((resolve) => window.setTimeout(resolve, 250));
+    }
+
+    const resolvedZone = zoneRecordByKey(normalizedKey);
+    const resolvedName = String(resolvedZone?.name || '').trim() || syntheticZoneName(normalizedKey);
+    zoneCommandState.busy = false;
+    zoneCommandState.resolvedKey = normalizedKey;
+    zoneCommandState.resolvedName = resolvedName;
+    zoneCommandState.mode = resolvedZone ? 'copy' : 'join';
+    zoneCommandState.helper = resolvedZone
+      ? 'Already joined here. Click Copy ID to share it again.'
+      : 'Ready to join this zone. The name may update after join.';
+    zoneCommandInput.value = resolvedName;
+    updateZoneCommandUi();
+    return;
+  }
+
+  if (zoneNameExists(raw)) {
+    zoneCommandState.error = true;
+    zoneCommandState.helper = 'That zone name is already in use on this device.';
+    updateZoneCommandUi();
+    return;
+  }
+
+  zoneCommandState.mode = 'create';
+  zoneCommandState.helper = 'Ready to create and join this zone.';
+  updateZoneCommandUi();
+}
+
+function scheduleZoneCommandEvaluation() {
+  if (!zoneCommandInput) return;
+  if (zoneCommandDebounce) {
+    clearTimeout(zoneCommandDebounce);
+    zoneCommandDebounce = 0;
+  }
+  zoneCommandState.busy = false;
+  zoneCommandState.error = false;
+  zoneCommandState.mode = 'idle';
+  zoneCommandState.helper = '';
+  zoneCommandState.resolvedKey = '';
+  zoneCommandState.resolvedName = '';
+  updateZoneCommandUi();
+  zoneCommandDebounce = window.setTimeout(() => {
+    zoneCommandDebounce = 0;
+    evaluateZoneCommandInput(zoneCommandInput.value).catch((err) => {
+      zoneCommandState.busy = false;
+      zoneCommandState.mode = 'idle';
+      zoneCommandState.error = true;
+      zoneCommandState.helper = `Zone validation failed: ${String(err?.message || err)}`;
+      updateZoneCommandUi();
+    });
+  }, ZONE_COMMAND_DEBOUNCE_MS);
+}
+
+async function submitZoneCommand() {
+  if (!zoneCommandInput || !zoneCommandButton || zoneCommandState.busy) return;
+  if (zoneCommandDebounce) {
+    clearTimeout(zoneCommandDebounce);
+    zoneCommandDebounce = 0;
+  }
+  let mode = String(zoneCommandState.mode || 'idle');
+  if (mode === 'idle') {
+    await evaluateZoneCommandInput(zoneCommandInput.value);
+    mode = String(zoneCommandState.mode || 'idle');
+  }
+  if (mode === 'idle' || zoneCommandState.busy) return;
+
+  if (mode === 'copy') {
+    const key = String(zoneCommandState.resolvedKey || '').trim();
+    if (!key) return;
+    try {
+      await navigator.clipboard.writeText(key);
+      zoneCommandState.helper = 'Copied zone ID.';
+      zoneCommandState.error = false;
+      updateZoneCommandUi();
+    } catch (err) {
+      zoneCommandState.helper = `Copy failed: ${String(err?.message || err)}`;
+      zoneCommandState.error = true;
+      updateZoneCommandUi();
+    }
+    return;
+  }
+
+  if (mode === 'create') {
+    const name = String(zoneCommandInput.value || zoneCommandState.draft || '').trim();
+    if (!name) return;
+    zoneCommandState.busy = true;
+    zoneCommandState.helper = 'Creating zone…';
+    zoneCommandState.error = false;
+    updateZoneCommandUi();
+    try {
+      const created = await client.call('zones.add', { name }, { timeoutMs: 20_000 });
+      const key = normalizeZoneKey(created?.key || '');
+      await refreshAll();
+      zoneCommandState.busy = false;
+      zoneCommandState.mode = 'copy';
+      zoneCommandState.resolvedKey = key;
+      zoneCommandState.resolvedName = name;
+      zoneCommandState.helper = 'Zone created. Click Copy ID to share it.';
+      zoneCommandInput.value = key;
+      activeZoneKey = key || activeZoneKey;
+      renderPeers(lastDirectory);
+      updateZoneCommandUi();
+      return;
+    } catch (err) {
+      zoneCommandState.busy = false;
+      zoneCommandState.mode = 'idle';
+      zoneCommandState.error = true;
+      zoneCommandState.helper = `Create failed: ${String(err?.message || err)}`;
+      updateZoneCommandUi();
+      return;
+    }
+  }
+
+  if (mode === 'join') {
+    const key = String(zoneCommandState.resolvedKey || '').trim();
+    if (!key) return;
+    zoneCommandState.busy = true;
+    zoneCommandState.helper = 'Joining zone…';
+    zoneCommandState.error = false;
+    updateZoneCommandUi();
+    try {
+      const existing = zoneRecordByKey(key);
+      const shareName = existing ? String(existing?.name || '').trim() : '';
+      await client.call('zones.join', { key, name: shareName }, { timeoutMs: 20_000 });
+      await refreshAll();
+      zoneCommandState.busy = false;
+      zoneCommandState.mode = 'copy';
+      zoneCommandState.resolvedKey = key;
+      zoneCommandState.resolvedName = zoneCommandResolvedShareName(key);
+      zoneCommandState.helper = 'Joined this zone. Click Copy ID to share it again.';
+      zoneCommandInput.value = zoneCommandState.resolvedName;
+      activeZoneKey = key;
+      renderPeers(lastDirectory);
+      updateZoneCommandUi();
+      return;
+    } catch (err) {
+      zoneCommandState.busy = false;
+      zoneCommandState.mode = 'idle';
+      zoneCommandState.error = true;
+      zoneCommandState.helper = `Join failed: ${String(err?.message || err)}`;
+      updateZoneCommandUi();
+    }
   }
 }
 
@@ -4073,7 +4560,7 @@ async function applyUrlParams() {
     await refreshAll();
     try { await client.call('zones.pending.clear', {}, { timeoutMs: 20000 }); } catch {}
     showActivity('settings');
-    setSettingsTab('peers');
+    setSettingsTab('network');
     return true;
   }
   return false;
@@ -4118,6 +4605,22 @@ async function runWebAuthnSetup() {
 }
 
 function wireUi() {
+  if (identityHandle) {
+    identityHandle.addEventListener('click', async () => {
+      const rawId = String(lastIdentity?.id || '').trim();
+      if (!rawId) return;
+      try {
+        await navigator.clipboard.writeText(rawId);
+        identityHandleCopied = true;
+        updateIdentityChrome(lastIdentity);
+      } catch {}
+    });
+    identityHandle.addEventListener('mouseleave', resetIdentityHandleCopyHint);
+  }
+
+  if (btnGatewayBasicsClose) btnGatewayBasicsClose.addEventListener('click', closeGatewayBasicsModal);
+  if (resourceModalBackdrop) resourceModalBackdrop.addEventListener('click', closeGatewayBasicsModal);
+
   // drawer nav
   for (const b of drawer.querySelectorAll('.navbtn')) {
     b.addEventListener('click', () => {
@@ -4211,17 +4714,6 @@ function wireUi() {
     };
   }
 
-  btnSaveProfile.onclick = async () => {
-    try {
-      const label = profileName.value.trim();
-      if (label) {
-        await client.call('identity.setLabel', { identityLabel: label }, { timeoutMs: 20000 });
-      }
-      await client.call('profile.set', { name: label, about: profileAbout.value }, { timeoutMs: 20000 });
-      await refreshAll();
-    } catch (e) { console.error(e); }
-  };
-
   btnSaveDeviceLabel.onclick = async () => {
     try {
       await client.call('device.setLabel', { label: deviceLabel.value }, { timeoutMs: 20000 });
@@ -4234,27 +4726,36 @@ function wireUi() {
     await refreshAll();
   };
 
-  btnCreateZone.onclick = async () => {
-    const name = String(zoneNameInput.value || '').trim();
-    if (!name) return;
-    try { await client.call('zones.add', { name }, { timeoutMs: 20000 }); } catch (e) { console.error(e); }
-    zoneNameInput.value = '';
-    await refreshAll();
-  };
-
-  btnCopyZoneLink.onclick = async () => {
-    const link = String(zoneLink.textContent || '').trim();
-    if (!link) return;
-    try { await navigator.clipboard.writeText(link); } catch {}
-  };
-
-  btnJoinZone.onclick = async () => {
-    const key = normalizeZoneKey(zoneJoinKey.value);
-    if (!key) return;
-    try { await client.call('zones.join', { key }, { timeoutMs: 20000 }); } catch (e) { console.error(e); }
-    zoneJoinKey.value = '';
-    await refreshAll();
-  };
+  if (zoneCommandInput) {
+    zoneCommandInput.addEventListener('input', () => {
+      zoneCommandState.draft = String(zoneCommandInput.value || '');
+      scheduleZoneCommandEvaluation();
+    });
+    zoneCommandInput.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        submitZoneCommand().catch((err) => {
+          zoneCommandState.busy = false;
+          zoneCommandState.mode = 'idle';
+          zoneCommandState.error = true;
+          zoneCommandState.helper = `Zone action failed: ${String(err?.message || err)}`;
+          updateZoneCommandUi();
+        });
+      }
+    });
+  }
+  if (zoneCommandButton) {
+    zoneCommandButton.addEventListener('click', () => {
+      submitZoneCommand().catch((err) => {
+        zoneCommandState.busy = false;
+        zoneCommandState.mode = 'idle';
+        zoneCommandState.error = true;
+        zoneCommandState.helper = `Zone action failed: ${String(err?.message || err)}`;
+        updateZoneCommandUi();
+      });
+    });
+  }
+  updateZoneCommandUi();
 
   // onboarding mode tabs
   let mode = 'new';
@@ -4331,7 +4832,7 @@ function wireUi() {
 
       const usedCode = String(res?.code || code || '').trim();
       existingInfo.textContent = usedCode
-        ? `Pairing code: ${usedCode}. Ask the owner to enter this in Settings > Pairing > Add Device, then approve.`
+        ? `Pairing code: ${usedCode}. Ask the owner to enter this in Settings > Devices > Add Device, then approve.`
         : 'Waiting for owner claim and approval…';
       const ok = await waitForPairAcceptance({ identityLabel: ilabel, myDevicePk, timeoutMs: 90000 });
 
@@ -4584,6 +5085,9 @@ function startSharedRelayPipe(client, initialRelayUrls) {
       if (evt?.type === 'gateway_managed_launch_status') {
         handleGatewayManagedLaunchStatusEvent(evt);
       }
+      if (evt?.type === 'gateway_grant_status') {
+        handleGatewayGrantStatusEvent(evt);
+      }
       if (evt?.type === 'gateway_signal_status') {
         handleGatewaySignalStatusRelayEvent(evt);
       }
@@ -4627,7 +5131,7 @@ function startSharedRelayPipe(client, initialRelayUrls) {
     await runRefreshAll();
     const linked = await ensureOnboardingFlow();
     if (linked) {
-      setSettingsTab('profile');
+      setSettingsTab('devices');
       await postIdentityLinkedFlow();
     } else {
       await applyUrlParams();
@@ -4653,3 +5157,4 @@ function startSharedRelayPipe(client, initialRelayUrls) {
     }
   }, 10000);
 })();
+

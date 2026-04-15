@@ -1,6 +1,6 @@
 import { startDaemon } from './identity/sw/daemon.js';
 
-const SERVICE_WORKER_BUILD_ID = '2026-04-03-runtime-stage2';
+const SERVICE_WORKER_BUILD_ID = '2026-04-06-runtime-stage3';
 
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));
@@ -12,3 +12,4 @@ try {
 } catch (e) {
   console.error('[SW] startDaemon failed', e);
 }
+

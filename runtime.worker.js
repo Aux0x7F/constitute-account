@@ -4,6 +4,12 @@ const CONTEXT_TTL_FALLBACK_MS = 2 * 60 * 1000;
 const endpoints = new Map();
 const launchContexts = new Map();
 const pendingBrokerRequests = new Map();
+const projectionStore = {
+  discoverable: new Map(),
+  owned: new Map(),
+  granted: new Map(),
+  session: new Map(),
+};
 const runtimeStatus = {
   buildId: RUNTIME_WORKER_BUILD_ID,
   updatedAt: 0,
@@ -27,6 +33,19 @@ function safeClone(value) {
   }
 }
 
+function projectionCategoryMap(category) {
+  const key = String(category || '').trim().toLowerCase();
+  return projectionStore[key] || null;
+}
+
+function cloneProjectionStore() {
+  const out = {};
+  for (const [category, store] of Object.entries(projectionStore)) {
+    out[category] = Object.fromEntries(Array.from(store.entries()).map(([key, value]) => [key, safeClone(value)]));
+  }
+  return out;
+}
+
 function cleanupLaunchContexts() {
   const now = nowMs();
   for (const [launchId, context] of launchContexts.entries()) {
@@ -46,6 +65,7 @@ function runtimeSnapshot() {
     shell: safeClone(runtimeStatus.shell),
     services: safeClone(runtimeStatus.services),
     launchContextCount: launchContexts.size,
+    projections: cloneProjectionStore(),
   };
 }
 
@@ -145,6 +165,26 @@ function handleLaunchContextGet(message) {
   const launchId = String(message.launchId || '').trim();
   if (!launchId) return { ok: false, error: 'missing launchId' };
   return { ok: true, result: launchContexts.get(launchId) || null };
+}
+
+function handleProjectionPut(message) {
+  const category = String(message.category || '').trim().toLowerCase();
+  const key = String(message.key || '').trim();
+  const store = projectionCategoryMap(category);
+  if (!store) return { ok: false, error: 'unsupported projection category' };
+  if (!key) return { ok: false, error: 'missing projection key' };
+  store.set(key, safeClone(message.value));
+  broadcastSnapshot();
+  return { ok: true };
+}
+
+function handleProjectionGet(message) {
+  const category = String(message.category || '').trim().toLowerCase();
+  const key = String(message.key || '').trim();
+  const store = projectionCategoryMap(category);
+  if (!store) return { ok: false, error: 'unsupported projection category' };
+  if (!key) return { ok: false, error: 'missing projection key' };
+  return { ok: true, result: safeClone(store.get(key) || null) };
 }
 
 function forwardBrokerRequest(kind, message, endpoint) {
@@ -261,6 +301,24 @@ function handleControlMessage(message, endpoint) {
         requestId: String(message.requestId || '').trim(),
         kind: 'launchContext.get',
         ...handleLaunchContextGet(message),
+      };
+      break;
+    }
+    case 'projection.put': {
+      response = {
+        type: 'runtime.response',
+        requestId: String(message.requestId || '').trim(),
+        kind: 'projection.put',
+        ...handleProjectionPut(message),
+      };
+      break;
+    }
+    case 'projection.get': {
+      response = {
+        type: 'runtime.response',
+        requestId: String(message.requestId || '').trim(),
+        kind: 'projection.get',
+        ...handleProjectionGet(message),
       };
       break;
     }

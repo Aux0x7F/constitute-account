@@ -1,4 +1,4 @@
-const RELAY_WORKER_BUILD_ID = '2026-04-03-runtime-stage2';
+const RELAY_WORKER_BUILD_ID = '2026-04-06-runtime-stage3';
 const MAX_RECENT_EVENT_IDS = 2048;
 
 const endpoints = new Set();
@@ -285,3 +285,4 @@ self.addEventListener('message', (event) => {
   const endpoint = ensureDedicatedEndpoint();
   handleControlMessage(event.data || {}, endpoint);
 });
+
