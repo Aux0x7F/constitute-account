@@ -1,0 +1,30 @@
+{
+  "$schema": "../node_modules/nx/schemas/project-schema.json",
+  "name": "constitute",
+  "projectType": "application",
+  "root": "constitute",
+  "sourceRoot": "constitute",
+  "targets": {
+    "build": {
+      "executor": "nx:run-commands",
+      "options": {
+        "cwd": "constitute",
+        "command": "npm run build"
+      }
+    },
+    "dev": {
+      "executor": "nx:run-commands",
+      "options": {
+        "cwd": "constitute",
+        "command": "npm run dev"
+      }
+    },
+    "test": {
+      "executor": "nx:run-commands",
+      "options": {
+        "cwd": "constitute",
+        "command": "npm run test"
+      }
+    }
+  }
+}

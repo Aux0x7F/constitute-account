@@ -54,6 +54,27 @@ function parseContent(ev) {
   try { return JSON.parse(ev?.content || ''); } catch { return null; }
 }
 
+function recordFreshnessTuple(ev, payload) {
+  const p = payload || parseContent(ev) || {};
+  const updatedAt = Number(p?.updatedAt || 0);
+  const expiresAt = Number(p?.expiresAt || 0);
+  const createdAt = Number(ev?.created_at || 0);
+  return [updatedAt, createdAt, expiresAt];
+}
+
+function isIncomingRecordNewer(currentEv, incomingEv) {
+  if (!currentEv) return true;
+  const currentPayload = parseContent(currentEv) || {};
+  const incomingPayload = parseContent(incomingEv) || {};
+  const currentTuple = recordFreshnessTuple(currentEv, currentPayload);
+  const incomingTuple = recordFreshnessTuple(incomingEv, incomingPayload);
+  for (let i = 0; i < incomingTuple.length; i += 1) {
+    if (incomingTuple[i] > currentTuple[i]) return true;
+    if (incomingTuple[i] < currentTuple[i]) return false;
+  }
+  return false;
+}
+
 function clockOk(createdAt) {
   const now = nowSec();
   if (!createdAt) return false;
@@ -145,7 +166,10 @@ export async function putIdentityRecord(ev) {
   const ok = await validateRecord(ev, 'identity');
   if (!ok) return { ok: false };
   const payload = parseContent(ev);
-  await kvSet(recordKey('identity', payload.identityId), ev);
+  const key = recordKey('identity', payload.identityId);
+  const current = await kvGet(key);
+  if (!isIncomingRecordNewer(current, ev)) return { ok: true, stale: true };
+  await kvSet(key, ev);
   await addToIndex(ID_INDEX_KEY, payload.identityId);
   return { ok: true };
 }
@@ -154,7 +178,10 @@ export async function putDeviceRecord(ev) {
   const ok = await validateRecord(ev, 'device');
   if (!ok) return { ok: false };
   const payload = parseContent(ev);
-  await kvSet(recordKey('device', payload.devicePk), ev);
+  const key = recordKey('device', payload.devicePk);
+  const current = await kvGet(key);
+  if (!isIncomingRecordNewer(current, ev)) return { ok: true, stale: true };
+  await kvSet(key, ev);
   await addToIndex(DEV_INDEX_KEY, payload.devicePk);
   return { ok: true };
 }
@@ -164,7 +191,10 @@ export async function putDhtRecord(ev) {
   if (!ok) return { ok: false };
   const payload = parseContent(ev);
   const id = dhtIndexId(payload.scope, payload.key);
-  await kvSet(recordKey('dht', id), ev);
+  const key = recordKey('dht', id);
+  const current = await kvGet(key);
+  if (!isIncomingRecordNewer(current, ev)) return { ok: true, stale: true };
+  await kvSet(key, ev);
   await addToIndex(DHT_INDEX_KEY, id);
   return { ok: true };
 }

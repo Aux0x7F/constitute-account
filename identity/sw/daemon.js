@@ -40,7 +40,8 @@ export function startDaemon(sw) {
   (async () => {
     await ensureDevice();
     const ident = await getIdentity();
-    log(sw, `boot ok (linked=${!!ident?.linked})`);
+    const buildId = String(globalThis.__CONSTITUTE_SW_BUILD_ID__ || '').trim();
+    log(sw, `boot ok (linked=${!!ident?.linked})${buildId ? ` build=${buildId}` : ''}`);
     pokeUi(sw);
   })();
 }

@@ -5,6 +5,19 @@
 // The Service Worker is single-threaded and uses IndexedDB; sending many
 // concurrent RPCs can cause contention and apparent hangs/timeouts.
 
+const SERVICE_WORKER_BUILD_ID = "2026-04-06-runtime-stage3";
+
+function currentServiceWorkerUrl() {
+  const target = new URL("./sw.js", window.location.href);
+  target.searchParams.set("v", SERVICE_WORKER_BUILD_ID);
+  return target.toString();
+}
+
+function isLocalDevHost() {
+  const host = String(window.location.hostname || "").toLowerCase();
+  return host === "localhost" || host === "127.0.0.1";
+}
+
 export class IdentityClient {
   constructor({ onEvent } = {}) {
     this.onEvent = onEvent || (() => {});
@@ -19,7 +32,9 @@ export class IdentityClient {
     if ("serviceWorker" in navigator) {
       navigator.serviceWorker.addEventListener("message", (e) => this._onMessage(e));
       navigator.serviceWorker.addEventListener("controllerchange", () => {
-        this.onEvent({ type: "log", message: "service worker controllerchange" });
+        const controller = navigator.serviceWorker.controller;
+        const scriptUrl = String(controller?.scriptURL || this._reg?.active?.scriptURL || '').trim();
+        this.onEvent({ type: "log", message: `service worker controllerchange ${scriptUrl || '(unknown script)'}` });
       });
     }
   }
@@ -33,20 +48,42 @@ export class IdentityClient {
       }
 
       console.log("[client] ready: checking SW registration");
+      const desiredScriptUrl = currentServiceWorkerUrl();
+
+      if (isLocalDevHost() && "serviceWorker" in navigator) {
+        const regs = await navigator.serviceWorker.getRegistrations().catch(() => []);
+        for (const reg of regs) {
+          const activeUrl = String(reg?.active?.scriptURL || reg?.waiting?.scriptURL || reg?.installing?.scriptURL || "").trim();
+          if (!activeUrl) continue;
+          if (!activeUrl.includes("/constitute/sw.js")) continue;
+          if (activeUrl === desiredScriptUrl) continue;
+          try {
+            console.log("[client] unregister stale SW", activeUrl);
+            await reg.unregister();
+          } catch {}
+        }
+      }
+
       // Ensure SW is registered. sw.js is an ES module.
       let reg = await navigator.serviceWorker.getRegistration("./");
       if (!reg) reg = await navigator.serviceWorker.getRegistration();
 
-      if (!reg) {
+      const activeScriptUrl = String(reg?.active?.scriptURL || reg?.waiting?.scriptURL || reg?.installing?.scriptURL || '').trim();
+      const needsRegister = !reg || !activeScriptUrl || activeScriptUrl !== desiredScriptUrl;
+      if (needsRegister) {
         this.onEvent({ type: "log", message: "registering service worker ./sw.js (module)" });
-        console.log("[client] registering SW ./sw.js");
-        reg = await navigator.serviceWorker.register("./sw.js", {
+        console.log("[client] registering SW", desiredScriptUrl);
+        reg = await navigator.serviceWorker.register(desiredScriptUrl, {
           scope: "./",
           type: "module",
         });
       }
 
       this._reg = reg;
+      const registeredScriptUrl = String(reg?.active?.scriptURL || reg?.waiting?.scriptURL || reg?.installing?.scriptURL || '').trim();
+      if (registeredScriptUrl) {
+        console.log("[client] service worker registration", registeredScriptUrl);
+      }
       console.log("[client] waiting for SW ready");
       await Promise.race([
         navigator.serviceWorker.ready,
@@ -84,7 +121,11 @@ export class IdentityClient {
   /**
    * Enqueue an RPC call (serialized).
    */
-  call(method, params = {}, { timeoutMs } = {}) {
+  call(method, params = {}, { timeoutMs, priority } = {}) {
+    if (priority === 'immediate') {
+      return this._callOnce(method, params, { timeoutMs });
+    }
+
     const run = () => this._callOnce(method, params, { timeoutMs });
 
     const p = this._queue.then(run);
@@ -210,3 +251,4 @@ export class IdentityClient {
     });
   }
 }
+

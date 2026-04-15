@@ -32,6 +32,7 @@ import {
 
 let presenceTimer = null;
 let swarmPublishTimer = null;
+const openRelaySubscriptionUrls = new Set();
 
 function makePairCode() {
   return (Math.floor(Math.random() * 900000) + 100000).toString();
@@ -622,6 +623,114 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
     return { ok: true, requestId, targetGatewayPk, zoneKeys, extraZoneKeys };
   }
 
+  if (method === 'gateway.managedLaunch.request') {
+    const ident = await getIdentity();
+    if (!ident?.linked || !ident?.id || !ident?.label) throw new Error('no linked identity');
+
+    const dev = await ensureDevice();
+    const targetGatewayPk = String(params?.gatewayPk || params?.gatewayDevicePk || params?.toDevicePk || '').trim();
+    const servicePk = String(params?.servicePk || '').trim();
+    const service = String(params?.service || 'nvr').trim() || 'nvr';
+    const capability = String(params?.capability || `${service}.view`).trim() || `${service}.view`;
+    if (!targetGatewayPk) throw new Error('missing gatewayPk');
+    if (!servicePk) throw new Error('missing servicePk');
+
+    const requestId = String(params?.requestId || '').trim() || makeSwarmRequestId('gw-launch');
+    const payload = {
+      type: 'gateway_managed_launch_request',
+      requestId,
+      toDevicePk: targetGatewayPk,
+      identityId: String(ident.id || '').trim(),
+      devicePk: String(dev?.nostr?.pk || '').trim(),
+      servicePk,
+      service,
+      capability,
+      appRepo: String(params?.appRepo || '').trim(),
+      display: params?.display && typeof params.display === 'object' ? params.display : {},
+      ts: Date.now(),
+      ttl: 120,
+    };
+
+    const zones = await listZones(ident || {}).catch(() => []);
+    await publishAppEvent(sw, payload, pairingTags(ident.label, zones, targetGatewayPk));
+    return { ok: true, requestId, gatewayPk: targetGatewayPk, servicePk, service, capability };
+  }
+
+  if (method === 'gateway.signal.request') {
+    const ident = await getIdentity();
+    if (!ident?.linked || !ident?.id || !ident?.label) throw new Error('no linked identity');
+
+    const dev = await ensureDevice();
+    const targetGatewayPk = String(params?.gatewayPk || params?.gatewayDevicePk || params?.toDevicePk || '').trim();
+    const servicePk = String(params?.servicePk || '').trim();
+    const service = String(params?.service || 'nvr').trim() || 'nvr';
+    const signalType = String(params?.signalType || '').trim().toLowerCase();
+    const launchToken = String(params?.launchToken || '').trim();
+    if (!targetGatewayPk) throw new Error('missing gatewayPk');
+    if (!servicePk) throw new Error('missing servicePk');
+    if (!signalType) throw new Error('missing signalType');
+    if (!launchToken) throw new Error('missing launchToken');
+
+    const requestId = String(params?.requestId || '').trim() || makeSwarmRequestId('gw-signal');
+    const payload = {
+      type: 'gateway_signal_request',
+      requestId,
+      toDevicePk: targetGatewayPk,
+      identityId: String(ident.id || '').trim(),
+      devicePk: String(dev?.nostr?.pk || '').trim(),
+      servicePk,
+      service,
+      signalType,
+      payload: params?.payload ?? {},
+      launchToken,
+      ts: Date.now(),
+      ttl: 120,
+    };
+
+    const zones = await listZones(ident || {}).catch(() => []);
+    await publishAppEvent(sw, payload, pairingTags(ident.label, zones, targetGatewayPk));
+    return { ok: true, requestId, gatewayPk: targetGatewayPk, servicePk, service, signalType };
+  }
+
+  if (method === 'gateway.grants.request') {
+    const ident = await getIdentity();
+    if (!ident?.linked || !ident?.id || !ident?.label) throw new Error('no linked identity');
+
+    const dev = await ensureDevice();
+    const targetGatewayPk = String(params?.gatewayPk || params?.gatewayDevicePk || params?.toDevicePk || '').trim();
+    const servicePk = String(params?.servicePk || '').trim();
+    const service = String(params?.service || 'nvr').trim() || 'nvr';
+    const action = String(params?.action || '').trim().toLowerCase();
+    if (!targetGatewayPk) throw new Error('missing gatewayPk');
+    if (!action) throw new Error('missing action');
+
+    const requestId = String(params?.requestId || '').trim() || makeSwarmRequestId('gw-grant');
+    const payload = {
+      type: 'gateway_grant_request',
+      requestId,
+      toDevicePk: targetGatewayPk,
+      identityId: String(ident.id || '').trim(),
+      devicePk: String(dev?.nostr?.pk || '').trim(),
+      servicePk,
+      service,
+      action,
+      granteeIdentityId: String(params?.granteeIdentityId || '').trim(),
+      grantId: String(params?.grantId || '').trim(),
+      viewSources: Array.isArray(params?.viewSources)
+        ? params.viewSources.map((value) => String(value || '').trim()).filter(Boolean)
+        : [],
+      controlSources: Array.isArray(params?.controlSources)
+        ? params.controlSources.map((value) => String(value || '').trim()).filter(Boolean)
+        : [],
+      ts: Date.now(),
+      ttl: 120,
+    };
+
+    const zones = await listZones(ident || {}).catch(() => []);
+    await publishAppEvent(sw, payload, pairingTags(ident.label, zones, targetGatewayPk));
+    return { ok: true, requestId, gatewayPk: targetGatewayPk, servicePk, service, action };
+  }
+
   if (method === 'identity.create') {
     // REQUIRED: must not already have a linked identity on this device
     const existing = await getIdentity();
@@ -828,14 +937,25 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
   if (method === 'relay.status') {
     const state = String(params?.state || '');
     const url = String(params?.url || '');
-    if (state && state !== getRelayState()) {
+    const prevState = String(getRelayState() || '');
+    const relayMap = (params?.relays && typeof params.relays === 'object') ? params.relays : {};
+    const openRelayUrls = Object.entries(relayMap)
+      .filter(([, info]) => String(info?.state || '').trim().toLowerCase() === 'open')
+      .map(([relayUrl]) => String(relayUrl || '').trim())
+      .filter(Boolean);
+    for (const knownUrl of Array.from(openRelaySubscriptionUrls)) {
+      if (!openRelayUrls.includes(knownUrl)) openRelaySubscriptionUrls.delete(knownUrl);
+    }
+    if (state && state !== prevState) {
       setRelayState(state);
       log(sw, `relay state -> ${state} ${url}`);
     }
-    if (state === 'open') {
+    const hasNewOpenRelay = openRelayUrls.some((relayUrl) => !openRelaySubscriptionUrls.has(relayUrl));
+    if (state === 'open' && (prevState !== 'open' || hasNewOpenRelay)) {
       const ident = await getIdentity();
       const dev = await ensureDevice();
       await subOpen(sw, ident, (m) => log(sw, m));
+      for (const relayUrl of openRelayUrls) openRelaySubscriptionUrls.add(relayUrl);
       const nbs = await listZones(ident || {});
       for (const n of nbs) {
         await addSelfToZoneList(dev, n.key).catch(() => {});
@@ -850,7 +970,11 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
   }
 
   if (method === 'relay.rx') {
-    await handleRelayFrame(sw, params?.data || '');
+    try {
+      await handleRelayFrame(sw, params?.data || '');
+    } catch (err) {
+      log(sw, `relay rx degraded: ${String(err?.message || err)}`);
+    }
     return { ok: true };
   }
 

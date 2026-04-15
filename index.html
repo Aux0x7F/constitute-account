@@ -7,30 +7,18 @@
   <link rel="icon" href="data:," />
   <link rel="stylesheet" href="app.css" />
 </head>
-<body>
+<body class="booting">
+<div id="bootSplash" aria-live="polite" role="status">
+  <div class="bootSplashCard">
+    <div class="bootSpinner" aria-hidden="true"></div>
+    <p id="bootSplashTitle" class="bootSplashTitle">Connecting</p>
+    <p id="bootSplashStatus" class="bootSplashStatus">Bringing your identity and services online.</p>
+  </div>
+</div>
 <header class="topbar">
   <div class="left">
     <div class="title">
-      <div class="appname">
-        Constitute
-
-        <span id="connWrap" class="connWrap">
-          <span id="connDot" class="connDot conn-off" aria-label="Connection status"></span>
-          <span id="connStateText" class="connStateText">offline</span>
-
-          <div id="connPopover" class="popover hidden" role="status" aria-live="polite">
-            <div class="popoverTitle">Status</div>
-            <div class="popoverRow"><span class="muted">Relay</span><span id="popRelay">offline</span></div>
-            <div class="popoverRow"><span class="muted">Identity</span><span id="popDaemon">unknown</span></div>
-            <div class="popoverRow"><span class="muted">Swarm</span><span id="popSwarm">offline</span></div>
-            <div class="popoverRow"><span class="muted">Swarm cache</span><span id="popSwarmCache">n/a</span></div>
-            <div class="popoverDivider"></div>
-            <div class="popoverTitle small">Recent</div>
-            <div id="connLog" class="connLog" aria-label="Connection state log"></div>
-          </div>
-        </span>
-
-      </div>
+      <div class="appname">Constitute</div>
       <div id="panePath" class="small muted"></div>
     </div>
   </div>
@@ -67,7 +55,23 @@
   </nav>
 
   <div class="drawerFooter small muted">
-    Minimal browser-native identity prototype.
+    <div class="drawerStatusRail">
+      <div class="drawerStatusInline">
+        <span id="identityHandle" class="identityHandle identityHandle-unlinked" title="Identity not linked yet">@unlinked</span>
+        <span id="connWrap" class="connWrap">
+          <span id="connStateText" class="connStateText connStateText-offline">Offline</span>
+
+          <div id="connPopover" class="popover hidden" role="status" aria-live="polite">
+            <div class="popoverTitle">Connection Status</div>
+            <div class="popoverRow"><span class="muted">Overall</span><span id="popConnection">offline</span></div>
+            <div class="popoverRow"><span class="muted">Relay</span><span id="popRelay">offline</span></div>
+            <div class="popoverRow"><span class="muted">Gateway</span><span id="popGateway">unknown</span></div>
+            <div class="popoverRow"><span class="muted">Services</span><span id="popServices">unknown</span></div>
+            <div id="popConnectionReason" class="popoverDetails muted">Waiting for local identity service.</div>
+          </div>
+        </span>
+      </div>
+    </div>
   </div>
 </aside>
 
@@ -97,94 +101,98 @@
 
   <section id="viewSettings" class="activity hidden">
     <div class="tabs">
-      <button class="tab" data-tab="profile">Profile</button>
       <button class="tab" data-tab="devices">Devices</button>
-      <button class="tab" data-tab="appliances">Appliances</button>
-      <button class="tab" data-tab="peers">Peers</button>
-      <button class="tab" data-tab="pairing">Pairing</button>
-      <button class="tab" data-tab="apps">Apps</button>
-      <button class="tab" data-tab="identity">Identity</button>
-    </div>
-
-    <div id="tab_profile" class="tabpane hidden">
-      <h2>Profile</h2>
-
-      <label for="profileName">Name</label>
-      <input id="profileName" type="text" placeholder="display name" />
-
-      <label for="profileAbout">About</label>
-      <textarea id="profileAbout" placeholder="short bio"></textarea>
-
-      <div class="row">
-        <button id="btnSaveProfile" type="button">Save Profile</button>
-      </div>
+      <button class="tab" data-tab="network">Network</button>
     </div>
 
     <div id="tab_devices" class="tabpane hidden">
-      <h2>Devices</h2>
+      <section id="pendingRequestsSection" class="hidden">
+        <h2>Pending Requests</h2>
+        <div id="pairingList" class="list"></div>
+        <div id="pairingEmpty" class="small muted">No pending pairing requests.</div>
+      </section>
 
-      <div class="kv">
-        <div class="k">This device DID</div>
-        <div class="v" id="deviceDid"></div>
-      </div>
+      <section>
+        <h2>Add Device</h2>
+        <div class="card">
+          <div class="cardTitle">Add Device</div>
+          <div class="small muted">Enter the pairing code from a device you want to claim and link to this identity.</div>
+          <div class="row u-mt-sm">
+            <input id="pairCodeInput" type="text" placeholder="Enter code from new device" />
+            <button id="btnClaimPairCode" type="button">Claim Code</button>
+          </div>
+          <div id="pairCodeStatus" class="small muted u-mt-sm"></div>
+        </div>
+      </section>
 
-      <label for="deviceLabel">This device label</label>
-      <input id="deviceLabel" type="text" placeholder="device label" />
+      <section>
+        <h2>This Device</h2>
 
-      <div class="row">
-        <button id="btnSaveDeviceLabel" type="button">Save Device Label</button>
-      </div>
+        <div class="kv">
+          <div class="k">This device DID</div>
+          <div class="v" id="deviceDid"></div>
+        </div>
 
-      <h3>Known devices</h3>
-      <div id="deviceList" class="list"></div>
+        <label for="deviceLabel">This device label</label>
+        <input id="deviceLabel" type="text" placeholder="device label" />
 
-      <h3>Blocked devices</h3>
-      <div id="blockedList" class="list"></div>
+        <div class="row">
+          <button id="btnSaveDeviceLabel" type="button">Save Device Label</button>
+        </div>
+
+        <h3>Linked Devices</h3>
+        <div id="deviceList" class="list"></div>
+
+        <h3>Blocked Devices</h3>
+        <div id="blockedList" class="list"></div>
+      </section>
+
+      <section>
+        <h2>Devices and Services</h2>
+        <div class="small muted">Owned resources, shared access, and discoverable infrastructure.</div>
+        <div id="gatewayInstallStatus" class="small muted hidden u-mt-sm"></div>
+        <div class="card">
+          <div class="cardTitle">Connected Devices and Services</div>
+          <div id="applianceList" class="list"></div>
+        </div>
+      </section>
+      <!-- Roadmap: gateways graduate into a dedicated Gateway Management app surface. -->
+      <!-- Roadmap: the operator/install flow becomes a project-site information page instead of an in-app card. -->
     </div>
 
-    <div id="tab_appliances" class="tabpane hidden">
-      <h2>Appliances</h2>
+    <div id="tab_network" class="tabpane hidden">
+      <h2>Network</h2>
 
       <div class="card">
-        <div class="cardTitle">Add Gateway</div>
-        <div class="small muted">Install: download the native installer utility for this operator platform. The generated command passes your identity label to the installer.</div>
-        <div class="small muted" style="margin-top:.35rem;">On first install, the installer generates and prints a one-time pairing code. Use that code in Settings → Pairing → Add Device.</div>
-        <div class="row" style="margin-top:.6rem;">
-          <button id="btnGatewayInstallOpen" type="button">Download Installer Utility</button>
+        <div class="cardTitle">Connection Summary</div>
+        <div class="kv">
+          <div class="k">Connection</div>
+          <div class="v" id="networkStatusConnection">offline</div>
         </div>
-        <div id="gatewayInstallDetectedPlatform" class="small muted" style="margin-top:.5rem;"></div>
-        <div id="gatewayInstallHint" class="small muted" style="margin-top:.25rem;"></div>
-        <pre id="gatewayInstallCommandPreview" class="commandPreview"></pre>
-        <div id="gatewayInstallStatus" class="small muted" style="margin-top:.35rem;"></div>
+        <div class="kv">
+          <div class="k">Relay</div>
+          <div class="v" id="networkStatusRelay">offline</div>
+        </div>
+        <div class="kv">
+          <div class="k">Gateway</div>
+          <div class="v" id="networkStatusGatewayMesh">unknown</div>
+        </div>
+        <div class="kv">
+          <div class="k">Services</div>
+          <div class="v" id="networkStatusServices">unknown</div>
+        </div>
+        <div class="small muted" id="networkStatusDetail">Connection details also live in the drawer footer.</div>
       </div>
 
       <div class="card">
-        <div class="cardTitle">Connected Appliances</div>
-        <div id="applianceList" class="list"></div>
-      </div>
-    </div>
-
-    <div id="tab_peers" class="tabpane hidden">
-      <h2>Peers</h2>
-      <div class="card">
-        <div class="cardTitle">Create Zone</div>
-        <div class="row">
-          <input id="zoneName" type="text" placeholder="Zone name (required)" />
-          <button id="btnCreateZone" type="button">Create</button>
+        <div class="cardTitle">Zones</div>
+        <div class="small muted">Type a new zone name to create one, or paste a zone ID to join it.</div>
+        <div class="row u-mt-sm">
+          <input id="zoneCommandInput" type="text" placeholder="New zone name or zone ID" autocomplete="off" />
+          <button id="zoneCommandButton" type="button" disabled>Create</button>
+          <span id="zoneCommandSpinner" class="inlineSpinner hidden" aria-hidden="true"></span>
         </div>
-        <div class="small muted">Share the link below to invite others.</div>
-        <div class="row">
-          <div id="zoneLink" class="mono"></div>
-          <button id="btnCopyZoneLink" type="button">Copy link</button>
-        </div>
-      </div>
-
-      <div class="card">
-        <div class="cardTitle">Join Zone</div>
-        <div class="row">
-          <input id="zoneJoinKey" type="text" placeholder="Paste zone key" />
-          <button id="btnJoinZone" type="button">Join</button>
-        </div>
+        <div id="zoneCommandHelper" class="small muted u-mt-sm">Type a name to create a zone, or paste a zone ID to join one.</div>
       </div>
 
       <div id="zonesList" class="list"></div>
@@ -192,63 +200,6 @@
       <div class="card">
         <div class="cardTitle">Zone Devices <span id="peersCount" class="small muted"></span></div>
         <div id="peersList" class="list"></div>
-      </div>
-    </div>
-
-
-    <div id="tab_pairing" class="tabpane hidden">
-      <h2>Pairing</h2>
-
-      <div class="card">
-        <div class="cardTitle">Add Device</div>
-        <div class="small muted">On the new device, finish onboarding (or run gateway installer) and note its pairing code. Enter that code here to claim and start pairing when manual claim is required.</div>
-        <div class="row" style="margin-top:.5rem;">
-          <input id="pairCodeInput" type="text" placeholder="Enter code from new device" />
-          <button id="btnClaimPairCode" type="button">Claim Code</button>
-        </div>
-        <div id="pairCodeStatus" class="small muted" style="margin-top:.5rem;"></div>
-      </div>
-
-      <h3>Pending requests</h3>
-      <div id="pairingList" class="list"></div>
-      <div id="pairingEmpty" class="small muted">No pending pairing requests.</div>
-    </div>
-
-
-    <div id="tab_apps" class="tabpane hidden">
-      <h2>Apps</h2>
-      <div class="card">
-        <div class="cardTitle">Optional Repos</div>
-        <div class="small muted">Add GitHub repos with <code>app.manifest.json</code>. Enabled apps are stored locally as capabilities.</div>
-        <div class="row" style="margin-top:.5rem;">
-          <input id="appRepoInput" type="text" placeholder="https://github.com/owner/repo" />
-          <button id="btnAddAppRepo" type="button">Add Repo</button>
-        </div>
-        <div id="appRepoStatus" class="small muted" style="margin-top:.5rem;"></div>
-      </div>
-
-      <div class="card" style="margin-top:.75rem;">
-        <div class="cardTitle">Capabilities</div>
-        <div id="appCapabilityList" class="list"></div>
-      </div>
-    </div>
-
-    <div id="tab_identity" class="tabpane hidden">
-      <h2>Identity</h2>
-
-      <div class="kv">
-        <div class="k">Identity label</div>
-        <div class="v" id="identityLabel"></div>
-      </div>
-
-      <div class="kv">
-        <div class="k">Identity ID</div>
-        <div class="v" id="identityId"></div>
-      </div>
-
-      <div class="kv">
-        <div class="k">Linked</div>
-        <div class="v" id="identityLinked"></div>
       </div>
     </div>
   </section>
@@ -272,9 +223,9 @@
         </button>
       </div>
 
-      <div id="obDeviceStatus" class="small muted" style="margin-top:.5rem;"></div>
+      <div id="obDeviceStatus" class="small muted u-mt-sm"></div>
 
-      <div class="row" style="margin-top:.75rem;">
+      <div class="row u-mt-md">
         <button id="btnObDeviceContinue" type="button">Continue</button>
       </div>
     </div>
@@ -289,25 +240,38 @@
       <label for="obIdentityLabel">Identity label</label>
       <input id="obIdentityLabel" type="text" placeholder="e.g. some-unique-username" />
 
-      <div class="tabs" style="margin-top:.5rem;">
+      <div class="tabs u-mt-sm">
         <button type="button" class="tab tab-active" data-mode="new">Create</button>
         <button type="button" class="tab" data-mode="existing">Join existing</button>
       </div>
 
-      <div id="obPairCodeWrap" class="hidden" style="margin-top:.5rem;">
+      <div id="obPairCodeWrap" class="hidden u-mt-sm">
         <label for="obPairCode">Pairing code (recommended)</label>
         <input id="obPairCode" type="text" placeholder="Paste code from owner device" />
         <div class="small muted">If blank, a random code is generated and shown after request.</div>
       </div>
 
-      <div class="row" style="margin-top:.75rem;">
+      <div class="row u-mt-md">
         <button id="btnObIdentityContinue" type="button">Continue</button>
       </div>
 
-      <div id="existingInfo" class="small muted hidden" style="margin-top:.75rem;"></div>
+      <div id="existingInfo" class="small muted hidden u-mt-md"></div>
     </div>
   </section>
 </main>
+
+<div id="resourceModalBackdrop" class="backdrop hidden"></div>
+<section id="gatewayBasicsModal" class="modal hidden" aria-label="Gateway basics" aria-modal="true" role="dialog">
+  <div class="modalHeader">
+    <div>
+      <div class="modalEyebrow">Gateway Basics</div>
+      <div id="gatewayBasicsModalTitle" class="modalTitle">Gateway</div>
+    </div>
+    <button id="btnGatewayBasicsClose" class="iconbtn" type="button" aria-label="Close gateway basics">×</button>
+  </div>
+  <div id="gatewayBasicsModalBody" class="modalBody"></div>
+  <div id="gatewayBasicsModalActions" class="modalActions"></div>
+</section>
 
 <script type="module" src="./app.js"></script>
 </body>
