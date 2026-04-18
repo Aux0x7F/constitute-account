@@ -346,6 +346,8 @@ export function createManagedApplianceModel({
     applianceList,
     identityDevices,
     swarmDevices,
+    applianceRecords = null,
+    ownedDevicePks = null,
     gatewayInventoryStableAt,
     showActivity,
     setSettingsTab,
@@ -359,6 +361,7 @@ export function createManagedApplianceModel({
     launchNvrControlPanel,
     openGatewayBasicsModal,
     escapeHtml,
+    describeResourceName = null,
     getManagedServiceActionState = () => null,
     grantedRecords: providedGrantedRecords = [],
     getGrantInventoryForService = () => null,
@@ -368,8 +371,12 @@ export function createManagedApplianceModel({
     if (!applianceList) return;
     while (applianceList.firstChild) applianceList.firstChild.remove();
 
-    const owned = ownedPkSet(identityDevices);
-    const recs = buildApplianceRecords(identityDevices, swarmDevices, providedGrantedRecords);
+    const owned = Array.isArray(ownedDevicePks)
+      ? new Set(ownedDevicePks.map((value) => String(value || '').trim()).filter(Boolean))
+      : ownedPkSet(identityDevices);
+    const recs = Array.isArray(applianceRecords)
+      ? applianceRecords.slice()
+      : buildApplianceRecords(identityDevices, swarmDevices, providedGrantedRecords);
     const { ownedRecords, grantedRecords, discoverableRecords } = partitionApplianceRecords(
       recs,
       owned,
@@ -406,8 +413,19 @@ export function createManagedApplianceModel({
       const kind = info.deviceKind ? `type ${info.deviceKind}` : '';
       const releaseMeta = formatReleaseMeta(info.releaseChannel, info.releaseTrack, info.releaseBranch);
       const releaseLine = releaseMeta ? `<div class="itemMeta">release ${escapeHtml(releaseMeta)}</div>` : '';
+      const gatewayDescriptor = typeof describeResourceName === 'function'
+        ? describeResourceName(info.hostGatewayPk, shortPk(info.hostGatewayPk))
+        : null;
       const hostGatewayLine = info.hostGatewayPk
-        ? `<div class="itemMeta">host gateway ${escapeHtml(info.hostGatewayPk.slice(0, 16))}…</div>`
+        ? (() => {
+            if (gatewayDescriptor?.loading) {
+              return '<div class="itemMeta">host gateway name loading…</div>';
+            }
+            if (gatewayDescriptor?.raw) {
+              return `<div class="itemMeta">host gateway id ${escapeHtml(gatewayDescriptor.text)}</div>`;
+            }
+            return `<div class="itemMeta">host gateway ${escapeHtml(gatewayDescriptor?.text || shortPk(info.hostGatewayPk))}</div>`;
+          })()
         : '';
       const hostedServicesLine = canSeeHostedServiceDetail && Array.isArray(info.hostedServices) && info.hostedServices.length > 0
         ? `<div class="itemMeta">hosted services ${escapeHtml(info.hostedServices.map((svc) => String(svc?.service || 'service')).join(', '))}</div>`
@@ -427,7 +445,7 @@ export function createManagedApplianceModel({
         : '';
       meta.innerHTML = `
         <div class="itemTitle">${escapeHtml(info.title)}</div>
-        <div class="itemMeta">pk ${escapeHtml(info.pk.slice(0, 16))}…</div>
+        <div class="itemMeta">id ${escapeHtml(shortPk(info.pk))}</div>
         <div class="itemMeta">${escapeHtml([kind, `role ${info.role}`, `service ${info.service}${suffix}`, host ? host.replace(/^ • /, '') : ''].filter(Boolean).join(' • '))}</div>
         ${hostGatewayLine}
         ${hostedServicesLine}

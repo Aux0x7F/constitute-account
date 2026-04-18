@@ -61,6 +61,15 @@ async function backupGet(key) {
   }
 }
 
+async function backupDelete(key) {
+  try {
+    const cache = await caches.open(BACKUP_CACHE);
+    await cache.delete(backupRequestForKey(key));
+  } catch {
+    // backup is best-effort only
+  }
+}
+
 export async function kvGet(key) {
   try {
     const value = await withDbRetry(`kvGet(${String(key || '')})`, async (db) => await new Promise((resolve, reject) => {
@@ -96,4 +105,14 @@ export async function kvSet(key, value) {
     tx.onerror = () => reject(tx.error);
   }));
   await backupSet(key, value);
+}
+
+export async function kvDelete(key) {
+  await withDbRetry(`kvDelete(${String(key || '')})`, async (db) => await new Promise((resolve, reject) => {
+    const tx = db.transaction('kv', 'readwrite');
+    tx.objectStore('kv').delete(key);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  }));
+  await backupDelete(key);
 }
