@@ -113,7 +113,12 @@ const SWARM_ICE_SERVERS = [
 ];
 
 const SHELL_BUILD_ID = '2026-04-06-runtime-stage3';
-const PLATFORM_RUNTIME_BUILD_ID = '2026-04-03-runtime-v1';
+const PLATFORM_RUNTIME_VERSION = Object.freeze({ major: 2, minor: 8 });
+const PLATFORM_RUNTIME_BUILD_ID = `runtime-${PLATFORM_RUNTIME_VERSION.major}.${PLATFORM_RUNTIME_VERSION.minor}`;
+const RUNTIME_ATTACH_TIMEOUT_MS = 15_000;
+const RUNTIME_WRITE_TIMEOUT_MS = 12_000;
+const MANAGED_LAUNCH_REQUEST_TIMEOUT_MS = 90_000;
+const GATEWAY_SIGNAL_REQUEST_TIMEOUT_MS = 135_000;
 const DEFAULT_PUBLIC_RELAYS = Object.freeze([
   'wss://nos.lol',
   'wss://relay.primal.net',
@@ -124,6 +129,7 @@ let relayState = 'offline';
 let daemonState = 'unknown';
 let swarmState = 'offline';
 let identityHandleCopied = false;
+let bootRefreshSettled = false;
 
 let lastDeviceState = null;
 let lastIdentity = null;
@@ -148,12 +154,9 @@ window.__constituteEnabledApps = [];
 const MANAGED_APP_SURFACES = Object.freeze({
   nvr: 'constitute-nvr-ui',
 });
-const MANAGED_LAUNCH_STORAGE_PREFIX = 'constitute.launch.';
 const MANAGED_LAUNCH_TTL_MS = 2 * 60 * 1000;
-const MANAGED_APP_CHANNEL_NAME = 'constitute.app.launch';
 const GATEWAY_INVENTORY_REFRESH_TTL_MS = 15_000;
 const GATEWAY_INVENTORY_STABLE_TTL_MS = 2 * 60 * 1000;
-const GATEWAY_HOSTED_SNAPSHOT_KEY = 'constitute.gatewayHostedSnapshots';
 const RELAY_BRIDGE_LEASE_KEY = 'constitute.relayBridge.owner';
 const RELAY_BRIDGE_LEASE_MS = 12_000;
 const RELAY_BRIDGE_HEARTBEAT_MS = 4_000;
@@ -185,13 +188,22 @@ const APPLIANCE_DISCOVERY_MAX_AGE_MS = 60 * 60 * 1000;
 
 let relayBridge = null;
 let relayPoolSnapshot = { version: '', urls: [], relays: {}, state: 'offline', reason: '' };
-const gatewayHostedSnapshotCache = loadGatewayHostedSnapshotCache();
 let runtimeBridge = null;
 let runtimeAttached = false;
-let runtimeStatusSnapshot = { buildId: '', updatedAt: 0, shell: null, services: {}, launchContextCount: 0 };
+let runtimeStatusSnapshot = {
+  buildId: '',
+  updatedAt: 0,
+  shell: null,
+  services: {},
+  managedAppliances: { owned: [], granted: [], discoverable: [] },
+  resourceNames: {},
+  managedServiceIssue: null,
+  launchContextCount: 0,
+};
 let lastManagedServiceIssue = null;
 let lastRuntimeShellStatusKey = '';
 let bootSplashDismissed = false;
+const resolvedResourceNames = new Map();
 const managedAppliances = createManagedApplianceModel({
   applyHostedSnapshot: (record) => applyGatewayHostedSnapshot(record),
   getSwarmSeen: (pk) => (swarm ? swarm.getSwarmSeen(pk) : 0),
@@ -214,10 +226,38 @@ const {
   summarizeAppliance,
 } = managedAppliances;
 
-function setBootSplash(title = 'Connecting', status = 'Bringing your identity and services online.') {
+function runtimeManagedApplianceBucket(scope) {
+  const key = String(scope || '').trim();
+  const bucket = runtimeStatusSnapshot?.managedAppliances?.[key];
+  return Array.isArray(bucket) ? bucket : [];
+}
+
+function runtimeManagedApplianceRecords() {
+  return [
+    ...runtimeManagedApplianceBucket('owned'),
+    ...runtimeManagedApplianceBucket('granted'),
+    ...runtimeManagedApplianceBucket('discoverable'),
+  ];
+}
+
+function identityOwnedDevicePks() {
+  return Array.from(ownedPkSet(lastIdentity?.devices || []));
+}
+
+function currentManagedApplianceRecords(identityDevices = lastIdentity?.devices || [], swarmDevices = lastSwarmDevices || []) {
+  const runtimeRecords = runtimeManagedApplianceRecords();
+  if (runtimeRecords.length > 0) return runtimeRecords;
+  return buildApplianceRecords(identityDevices, swarmDevices, grantedManagedServiceRecords());
+}
+
+function setBootSplash(title = 'Loading', status = '') {
   if (bootSplashDismissed || !bootSplashEl) return;
   if (bootSplashTitleEl) bootSplashTitleEl.textContent = title;
-  if (bootSplashStatusEl) bootSplashStatusEl.textContent = status;
+  if (bootSplashStatusEl) {
+    const text = String(status || '').trim();
+    bootSplashStatusEl.textContent = text;
+    bootSplashStatusEl.hidden = !text;
+  }
   document.body.classList.add('booting');
 }
 
@@ -231,35 +271,74 @@ function dismissBootSplash() {
 }
 
 function bootSplashCopy(reason = '') {
-  const detail = String(reason || '').trim();
   if (daemonState === 'online') {
     return {
       title: 'Loading',
-      status: detail || 'Restoring your devices, apps, and services.',
+      status: '',
     };
   }
   if (relayState === 'connecting') {
     return {
       title: 'Connecting',
-      status: 'Opening relay connections…',
+      status: '',
     };
   }
   if (relayState === 'open') {
     return {
-      title: 'Connecting',
-      status: detail || 'Loading your devices and services…',
+      title: 'Loading',
+      status: '',
     };
   }
   if (!clientReady) {
     return {
       title: 'Starting',
-      status: detail || 'Connecting to the local identity service…',
+      status: '',
     };
   }
   return {
-    title: 'Connecting',
-    status: detail || 'Bringing your identity and services online.',
+    title: 'Loading',
+    status: '',
   };
+}
+
+function conciseConnectionReason(summary) {
+  if (summary.code === 'connected') return 'Everything is available.';
+  if (summary.code === 'connected-limited') return 'Connected. Some services are still warming up.';
+  if (summary.code === 'degraded') return 'Connected with limited reachability.';
+  if (summary.code === 'connecting') return 'Starting local and network services.';
+  return 'Waiting for local services.';
+}
+
+function describeShellResourceName(pk, fallback = '') {
+  const key = String(pk || '').trim();
+  const raw = String(fallback || shortPk(key)).trim() || '—';
+  if (!key) {
+    return { text: raw, loading: false, raw: false };
+  }
+  const resolved = resolvedResourceNames.get(key);
+  if (resolved) {
+    return { text: resolved, loading: false, raw: false };
+  }
+  if (!bootRefreshSettled || !runtimeAttached) {
+    return { text: 'Loading name…', loading: true, raw: false };
+  }
+  return { text: raw, loading: false, raw: true };
+}
+
+function rememberResolvedResourceName(pk, label) {
+  const key = String(pk || '').trim();
+  const text = String(label || '').trim();
+  if (!key || !text) return;
+  resolvedResourceNames.set(key, text);
+}
+
+function absorbRuntimeSnapshot(snapshot) {
+  runtimeStatusSnapshot = (snapshot && typeof snapshot === 'object') ? snapshot : runtimeStatusSnapshot;
+  const names = runtimeStatusSnapshot?.resourceNames;
+  if (!names || typeof names !== 'object') return;
+  for (const [pk, label] of Object.entries(names)) {
+    rememberResolvedResourceName(pk, label);
+  }
 }
 
 function updateBootSplash(reason = '') {
@@ -351,7 +430,6 @@ const managedServiceActionStates = new Map();
 const managedServiceActionTimers = new Map();
 let gatewayBasicsModalState = null;
 let gatewayExtraZonesByPk = {};
-let managedAppChannel = null;
 const ZONE_KEY_RE = /^[A-Za-z0-9_-]{20}$/;
 const ZONE_COMMAND_DEBOUNCE_MS = 500;
 const MANAGED_SERVICE_RESOLVE_TIMEOUT_MS = 6_000;
@@ -747,7 +825,8 @@ function summarizeRelayNetwork() {
 
 function ownedApplianceRecords() {
   const owned = ownedPkSet(lastIdentity?.devices || []);
-  return buildApplianceRecords(lastIdentity?.devices || [], lastSwarmDevices || []).filter((rec) => {
+  const records = currentManagedApplianceRecords(lastIdentity?.devices || [], lastSwarmDevices || []);
+  return records.filter((rec) => {
     const pk = String(rec?.devicePk || rec?.pk || '').trim();
     const hostGatewayPk = String(rec?.hostGatewayPk || rec?.host_gateway_pk || '').trim();
     return owned.has(pk) || owned.has(hostGatewayPk);
@@ -837,11 +916,11 @@ function summarizeServices(gatewaySummary) {
       usable: ['online', 'live', 'connected', 'healthy'].includes(String(runtimeNvr.state || '').trim().toLowerCase()),
     };
   }
-  if (lastManagedServiceIssue?.service === 'nvr') {
+  if (runtimeStatusSnapshot?.managedServiceIssue?.service === 'nvr') {
     return {
       code: 'degraded',
       label: 'degraded',
-      reason: String(lastManagedServiceIssue.reason || 'Managed NVR launch failed.').trim(),
+      reason: String(runtimeStatusSnapshot.managedServiceIssue.reason || 'Managed NVR launch failed.').trim(),
       usable: false,
     };
   }
@@ -944,6 +1023,7 @@ function connectionTextClass(code) {
 
 function renderConnectionModel(reason = '') {
   const summary = connectionSummary();
+  const conciseReason = conciseConnectionReason(summary);
   if (connStateText) {
     connStateText.textContent = summary.label;
     connStateText.classList.remove('connStateText-connected', 'connStateText-limited', 'connStateText-error');
@@ -954,11 +1034,11 @@ function renderConnectionModel(reason = '') {
   if (networkStatusGatewayMeshEl) networkStatusGatewayMeshEl.textContent = summary.gateway.label;
   if (networkStatusServicesEl) networkStatusServicesEl.textContent = summary.services.label;
   if (networkStatusDetailEl) {
-    networkStatusDetailEl.textContent = summary.reason;
+    networkStatusDetailEl.textContent = conciseReason;
   }
 
   if (popConnection) popConnection.textContent = summary.label;
-  if (popConnectionReason) popConnectionReason.textContent = summary.reason;
+  if (popConnectionReason) popConnectionReason.textContent = conciseReason;
   if (popRelay) popRelay.textContent = summary.relay.label;
   if (popGateway) popGateway.textContent = summary.gateway.label;
   if (popServices) popServices.textContent = summary.services.label;
@@ -1196,65 +1276,6 @@ function browserPrefersDedicatedRelayWorker() {
   }
 }
 
-function managedLaunchStorageKey(launchId) {
-  return `${MANAGED_LAUNCH_STORAGE_PREFIX}${String(launchId || '').trim()}`;
-}
-
-function cleanupManagedLaunchContexts() {
-  try {
-    const now = Date.now();
-    const keys = [];
-    for (let i = 0; i < localStorage.length; i += 1) {
-      const key = localStorage.key(i);
-      if (key && key.startsWith(MANAGED_LAUNCH_STORAGE_PREFIX)) keys.push(key);
-    }
-    for (const key of keys) {
-      try {
-        const raw = localStorage.getItem(key);
-        const parsed = raw ? JSON.parse(raw) : null;
-        const expiresAt = Number(parsed?.expiresAt || parsed?.createdAt || 0);
-        if (!parsed || !expiresAt || expiresAt < now) {
-          localStorage.removeItem(key);
-        }
-      } catch {
-        localStorage.removeItem(key);
-      }
-    }
-  } catch {}
-}
-
-function readManagedLaunchContext(launchId) {
-  const id = String(launchId || '').trim();
-  if (!id) return null;
-  cleanupManagedLaunchContexts();
-  try {
-    const raw = localStorage.getItem(managedLaunchStorageKey(id));
-    if (!raw) return null;
-    const parsed = JSON.parse(raw);
-    const expiresAt = Number(parsed?.expiresAt || 0);
-    if (expiresAt && expiresAt < Date.now()) {
-      localStorage.removeItem(managedLaunchStorageKey(id));
-      return null;
-    }
-    return parsed && typeof parsed === 'object' ? parsed : null;
-  } catch {
-    return null;
-  }
-}
-
-function writeManagedLaunchContext(context) {
-  const launchId = String(context?.launchId || '').trim();
-  if (!launchId) throw new Error('launch context missing launchId');
-  cleanupManagedLaunchContexts();
-  const payload = {
-    ...context,
-    createdAt: Number(context?.createdAt || Date.now()),
-    expiresAt: Number(context?.expiresAt || (Date.now() + MANAGED_LAUNCH_TTL_MS)),
-  };
-  localStorage.setItem(managedLaunchStorageKey(launchId), JSON.stringify(payload));
-  return payload;
-}
-
 function runtimeWorkerScriptUrl() {
   const target = new URL('./runtime.worker.js', window.location.href);
   target.searchParams.set('v', PLATFORM_RUNTIME_BUILD_ID);
@@ -1371,7 +1392,7 @@ function isManagedFirstPartyApp(app) {
 
 function startPlatformRuntimeBridge() {
   if (typeof SharedWorker === 'undefined') {
-    console.warn('[runtime] SharedWorker unavailable; using legacy managed app channel only');
+    console.warn('[runtime] SharedWorker unavailable; managed app surfaces require the shared runtime');
     return null;
   }
 
@@ -1380,7 +1401,7 @@ function startPlatformRuntimeBridge() {
   try {
     worker = new SharedWorker(runtimeWorkerScriptUrl());
   } catch (err) {
-    console.warn('[runtime] SharedWorker attach failed; using legacy managed app channel only', err);
+    console.warn('[runtime] SharedWorker attach failed', err);
     return null;
   }
   const port = worker.port;
@@ -1392,14 +1413,39 @@ function startPlatformRuntimeBridge() {
     requestId: 1,
     pending: new Map(),
     snapshot: null,
+    ready: false,
+    readyPromise: null,
+    resolveReady: null,
+    rejectReady: null,
     close() {
       try {
-        port.postMessage({ type: 'runtime.detach', clientId });
-      } catch {}
-      try {
-        port.close();
+      port.postMessage({ type: 'runtime.detach', clientId });
+    } catch {}
+    try {
+      port.close();
       } catch {}
     },
+  };
+  bridge.readyPromise = new Promise((resolve, reject) => {
+    bridge.resolveReady = resolve;
+    bridge.rejectReady = reject;
+  });
+  try {
+    worker.onerror = (event) => {
+      bridge.rejectReady?.(new Error(String(event?.message || 'shared worker failure')));
+      bridge.rejectReady = null;
+      bridge.resolveReady = null;
+      console.error('[runtime] SharedWorker error', event?.message || event);
+    };
+  } catch {}
+  bridge.whenReady = async (timeoutMs = RUNTIME_ATTACH_TIMEOUT_MS) => {
+    if (bridge.ready) return bridge.snapshot;
+    return await Promise.race([
+      bridge.readyPromise,
+      new Promise((_, reject) => {
+        window.setTimeout(() => reject(new Error('runtime.attach timed out')), timeoutMs);
+      }),
+    ]);
   };
 
   function runtimeCall(type, payload = {}, timeoutMs = 20_000) {
@@ -1416,18 +1462,25 @@ function startPlatformRuntimeBridge() {
 
   bridge.call = runtimeCall;
   bridge.putLaunchContext = async (context) => {
-    await runtimeCall('launchContext.put', { context }, 5_000).catch((err) => {
-      console.warn('[runtime] launchContext.put failed', err);
-    });
+    await bridge.whenReady();
+    return await runtimeCall('launchContext.put', { context }, RUNTIME_WRITE_TIMEOUT_MS);
   };
   bridge.pushStatus = async (status) => {
-    await runtimeCall('status.update', { role: 'shell', status }, 5_000).catch((err) => {
-      console.warn('[runtime] status.update failed', err);
+    await bridge.whenReady().catch((err) => {
+      console.warn('[runtime] runtime attach failed', err);
+    });
+    if (!bridge.ready) return;
+    await runtimeCall('runtime.status.put', { role: 'shell', status }, RUNTIME_WRITE_TIMEOUT_MS).catch((err) => {
+      console.warn('[runtime] runtime.status.put failed', err);
     });
   };
-  bridge.putProjection = async (category, key, value) => {
-    await runtimeCall('projection.put', { category, key, value }, 5_000).catch((err) => {
-      console.warn('[runtime] projection.put failed', err);
+  bridge.putManagedApplianceSourceSnapshot = async (sourceSnapshot) => {
+    await bridge.whenReady().catch((err) => {
+      console.warn('[runtime] runtime attach failed', err);
+    });
+    if (!bridge.ready) return;
+    await runtimeCall('managedAppliances.sourceSnapshot.put', { sourceSnapshot }, RUNTIME_WRITE_TIMEOUT_MS).catch((err) => {
+      console.warn('[runtime] managedAppliances.sourceSnapshot.put failed', err);
     });
   };
 
@@ -1435,20 +1488,39 @@ function startPlatformRuntimeBridge() {
     const msg = event?.data || {};
     if (msg.type === 'runtime.attached') {
       runtimeAttached = true;
+      bridge.ready = true;
       bridge.snapshot = msg.snapshot || null;
-      runtimeStatusSnapshot = msg.snapshot || runtimeStatusSnapshot;
+      absorbRuntimeSnapshot(msg.snapshot || null);
+      lastManagedServiceIssue = runtimeStatusSnapshot?.managedServiceIssue || null;
+      bridge.resolveReady?.(bridge.snapshot);
+      bridge.resolveReady = null;
+      bridge.rejectReady = null;
+      renderConnectionModel();
+      renderHomeApps();
+      if (lastIdentity) renderApplianceList(lastIdentity?.devices || [], lastSwarmDevices || []);
       return;
     }
-    if (msg.type === 'status.snapshot') {
+    if (msg.type === 'runtime.snapshot') {
+      if (!bridge.ready) {
+        bridge.ready = true;
+        bridge.resolveReady?.(msg.snapshot || null);
+        bridge.resolveReady = null;
+        bridge.rejectReady = null;
+      }
       bridge.snapshot = msg.snapshot || null;
-      runtimeStatusSnapshot = msg.snapshot || runtimeStatusSnapshot;
+      absorbRuntimeSnapshot(msg.snapshot || null);
+      lastManagedServiceIssue = runtimeStatusSnapshot?.managedServiceIssue || null;
       renderConnectionModel();
+      renderHomeApps();
+      if (lastIdentity) renderApplianceList(lastIdentity?.devices || [], lastSwarmDevices || []);
       return;
     }
     if (msg.type === 'runtime.broker.request') {
       handleRuntimeBrokerRequest(msg).catch((err) => {
         const kind = String(msg?.kind || '').trim();
-        const responseType = kind === 'gateway.launch.request' ? 'gateway.launch.response' : 'gateway.signal.response';
+        const responseType = kind === 'gateway.launch.request'
+          ? 'gateway.launch.response'
+          : (kind === 'gateway.grant.request' ? 'gateway.grant.response' : 'gateway.signal.response');
         port.postMessage({
           type: responseType,
           clientId,
@@ -1482,7 +1554,6 @@ function startPlatformRuntimeBridge() {
     surface: 'shell',
     broker: true,
   });
-  port.postMessage({ type: 'status.snapshot', clientId });
   return bridge;
 }
 
@@ -1492,31 +1563,7 @@ async function handleRuntimeBrokerRequest(message) {
   if (!runtimeBridge || !requestId || !kind) return;
   const payload = message?.payload && typeof message.payload === 'object' ? message.payload : {};
   if (kind === 'gateway.signal.request') {
-    const signalRequestId = String(payload?.requestId || '').trim();
-    let result;
-    try {
-      result = await requestGatewaySignal(payload);
-    } catch (err) {
-      const channel = ensureManagedAppChannel();
-      if (channel && signalRequestId) {
-        channel.postMessage({
-          type: 'gateway.signal.response',
-          requestId: signalRequestId,
-          ok: false,
-          error: String(err?.message || err),
-        });
-      }
-      throw err;
-    }
-    const channel = ensureManagedAppChannel();
-    if (channel && signalRequestId) {
-      channel.postMessage({
-        type: 'gateway.signal.response',
-        requestId: signalRequestId,
-        ok: true,
-        result,
-      });
-    }
+    const result = await requestGatewaySignal(payload);
     runtimeBridge.port.postMessage({
       type: 'gateway.signal.response',
       clientId: runtimeBridge.clientId,
@@ -1537,174 +1584,29 @@ async function handleRuntimeBrokerRequest(message) {
     });
     return;
   }
+  if (kind === 'gateway.grant.request') {
+    const record = {
+      devicePk: String(payload?.servicePk || '').trim(),
+      hostGatewayPk: String(payload?.gatewayPk || '').trim(),
+      service: String(payload?.service || 'nvr').trim() || 'nvr',
+    };
+    const result = await requestGatewayGrantAction(record, {
+      action: String(payload?.action || '').trim(),
+      granteeIdentityId: String(payload?.granteeIdentityId || '').trim(),
+      grantId: String(payload?.grantId || '').trim(),
+      viewSources: Array.isArray(payload?.viewSources) ? payload.viewSources : [],
+      controlSources: Array.isArray(payload?.controlSources) ? payload.controlSources : [],
+    });
+    runtimeBridge.port.postMessage({
+      type: 'gateway.grant.response',
+      clientId: runtimeBridge.clientId,
+      requestId,
+      ok: true,
+      result,
+    });
+    return;
+  }
   throw new Error(`unsupported broker request: ${kind}`);
-}
-
-function ensureManagedAppChannel() {
-  if (managedAppChannel || typeof BroadcastChannel === 'undefined') return managedAppChannel;
-  managedAppChannel = new BroadcastChannel(MANAGED_APP_CHANNEL_NAME);
-  managedAppChannel.onmessage = (event) => {
-    handleManagedAppChannelMessage(event?.data || {}).catch((err) => {
-      console.error('managed app channel message failed', err);
-    });
-  };
-  return managedAppChannel;
-}
-
-async function handleManagedAppChannelMessage(message) {
-  const type = String(message?.type || '').trim();
-  const channel = ensureManagedAppChannel();
-  if (!type || !channel) return;
-
-  if (type === 'launch-context.request') {
-    const launchId = String(message?.launchId || '').trim();
-    if (!launchId) return;
-    const context = readManagedLaunchContext(launchId);
-    channel.postMessage({
-      type: 'launch-context.response',
-      launchId,
-      ok: !!context,
-      context,
-      error: context ? '' : 'launch context unavailable',
-    });
-    return;
-  }
-
-  if (type === 'gateway.launch.request') {
-    const requestId = String(message?.requestId || '').trim() || randomOpaqueId('gw-launch-ui');
-    const launchId = String(message?.launchId || '').trim();
-    const context = readManagedLaunchContext(launchId);
-    const record = (message?.record && typeof message.record === 'object')
-      ? message.record
-      : (context ? {
-          devicePk: context.servicePk,
-          pk: context.servicePk,
-          hostGatewayPk: context.gatewayPk,
-          service: context.service || 'nvr',
-        } : null);
-    const options = (message?.options && typeof message.options === 'object') ? message.options : {};
-    if (!record) {
-      channel.postMessage({
-        type: 'gateway.launch.response',
-        launchId,
-        requestId,
-        ok: false,
-        error: 'launch refresh context unavailable',
-      });
-      return;
-    }
-
-    try {
-      const result = await requestGatewayManagedLaunch(record, options);
-      channel.postMessage({
-        type: 'gateway.launch.response',
-        launchId,
-        requestId,
-        ok: true,
-        result,
-      });
-    } catch (err) {
-      channel.postMessage({
-        type: 'gateway.launch.response',
-        launchId,
-        requestId,
-        ok: false,
-        error: String(err?.message || err),
-      });
-    }
-    return;
-  }
-
-  if (type === 'gateway.signal.request') {
-    const requestId = String(message?.requestId || '').trim() || randomOpaqueId('gw-signal-ui');
-    const launchId = String(message?.launchId || '').trim();
-    const context = readManagedLaunchContext(launchId);
-    if (!context) {
-      channel.postMessage({
-        type: 'gateway.signal.response',
-        launchId,
-        requestId,
-        ok: false,
-        error: 'launch context unavailable',
-      });
-      return;
-    }
-
-    try {
-      const result = await requestGatewaySignal({
-        requestId,
-        gatewayPk: context.gatewayPk,
-        servicePk: context.servicePk,
-        service: context.service || 'nvr',
-        launchToken: context.launchToken,
-        signalType: String(message?.signalType || '').trim(),
-        payload: message?.payload ?? {},
-      });
-      channel.postMessage({
-        type: 'gateway.signal.response',
-        launchId,
-        requestId,
-        ok: true,
-        result,
-      });
-    } catch (err) {
-      channel.postMessage({
-        type: 'gateway.signal.response',
-        launchId,
-        requestId,
-        ok: false,
-        error: String(err?.message || err),
-      });
-    }
-    return;
-  }
-
-  if (type === 'gateway.grant.request') {
-    const requestId = String(message?.requestId || '').trim() || randomOpaqueId('gw-grant-ui');
-    const launchId = String(message?.launchId || '').trim();
-    const context = readManagedLaunchContext(launchId);
-    if (!context) {
-      channel.postMessage({
-        type: 'gateway.grant.response',
-        launchId,
-        requestId,
-        ok: false,
-        error: 'launch context unavailable',
-      });
-      return;
-    }
-
-    try {
-      const record = {
-        devicePk: context.servicePk,
-        hostGatewayPk: context.gatewayPk,
-        service: context.service || 'nvr',
-      };
-      const result = await requestGatewayGrantAction(record, {
-        action: String(message?.action || '').trim(),
-        granteeIdentityId: String(message?.granteeIdentityId || '').trim(),
-        grantId: String(message?.grantId || '').trim(),
-        viewSources: Array.isArray(message?.viewSources) ? message.viewSources : [],
-        controlSources: Array.isArray(message?.controlSources) ? message.controlSources : [],
-      });
-      channel.postMessage({
-        type: 'gateway.grant.response',
-        launchId,
-        requestId,
-        ok: true,
-        result,
-      });
-    } catch (err) {
-      channel.postMessage({
-        type: 'gateway.grant.response',
-        launchId,
-        requestId,
-        ok: false,
-        error: String(err?.message || err),
-      });
-    }
-    return;
-  }
 }
 
 function summarizeInstallDetail(detail) {
@@ -1772,6 +1674,7 @@ function handleGatewayManagedLaunchStatusEvent(evt) {
 
   if (status === 'complete') {
     lastManagedServiceIssue = null;
+    publishRuntimeManagedApplianceState();
     settlePending(pendingManagedLaunches, requestId, null, {
       requestId,
       gatewayPk: String(evt?.gatewayPk || '').trim(),
@@ -1795,6 +1698,7 @@ function handleGatewayManagedLaunchStatusEvent(evt) {
       reason: detail || 'managed launch failed',
       updatedAt: Date.now(),
     };
+    publishRuntimeManagedApplianceState();
     renderConnectionModel(detail);
     requestGatewayInventoryRefresh(String(evt?.gatewayPk || '').trim(), { force: true }).catch(() => false);
     refreshManagedApplianceProjection({ refreshGrantViews: false }).catch(() => {});
@@ -1854,6 +1758,7 @@ function handleGatewaySignalStatusRelayEvent(evt) {
       reason: detail || 'gateway signal failed',
       updatedAt: Date.now(),
     };
+    publishRuntimeManagedApplianceState();
     renderConnectionModel(detail);
     settlePending(pendingGatewaySignals, requestId, new Error(detail || 'gateway signal failed'));
     return;
@@ -2312,34 +2217,52 @@ async function requestGatewayManagedLaunch(record, opts = {}) {
   if (!servicePk) throw new Error('service public key is missing');
   if (!String(lastIdentity?.id || '').trim()) throw new Error('link an identity before opening managed services');
   if (!String(lastDeviceState?.pk || '').trim()) throw new Error('device key is not ready yet');
-
-  const requestId = randomOpaqueId('gw-launch');
-  const pending = createPendingRequest(pendingManagedLaunches, requestId, 'managed launch', 20_000);
-  try {
-    await client.call('gateway.managedLaunch.request', {
-      requestId,
-      gatewayPk,
-      servicePk,
-      service,
-      capability,
-      appRepo: managedAppSurfaceRepoForService(service),
-      display: {
-        shell: 'constitute',
-        surface: managedAppSurfaceRepoForService(service),
-      },
-    }, { timeoutMs: 20_000 });
-  } catch (err) {
-    settlePending(pendingManagedLaunches, requestId, err);
-    throw err;
+  const requestLaunchOnce = async () => {
+    const requestId = randomOpaqueId('gw-launch');
+    const pending = createPendingRequest(pendingManagedLaunches, requestId, 'managed launch', MANAGED_LAUNCH_REQUEST_TIMEOUT_MS);
+    try {
+      await client.call('gateway.managedLaunch.request', {
+        requestId,
+        gatewayPk,
+        servicePk,
+        service,
+        capability,
+        appRepo: managedAppSurfaceRepoForService(service),
+        display: {
+          shell: 'constitute',
+          surface: managedAppSurfaceRepoForService(service),
+        },
+      }, { timeoutMs: MANAGED_LAUNCH_REQUEST_TIMEOUT_MS });
+    } catch (err) {
+      settlePending(pendingManagedLaunches, requestId, err);
+      throw err;
+    }
+    return await pending;
+  };
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      return await requestLaunchOnce();
+    } catch (err) {
+      const message = String(err?.message || err || '').trim().toLowerCase();
+      const canRetry = message.includes('managed launch timed out') && attempt < 3;
+      if (!canRetry) throw err;
+      console.warn('[managed] managed launch timed out; retrying', {
+        gatewayPk,
+        servicePk,
+        service,
+        attempt,
+      });
+    }
   }
-  return await pending;
 }
 
 async function requestGatewaySignal(req) {
   const requestId = String(req?.requestId || '').trim() || randomOpaqueId('gw-signal');
   const signalType = String(req?.signalType || '').trim().toLowerCase();
   if (!signalType) throw new Error('missing signal type');
-  const pending = createPendingRequest(pendingGatewaySignals, requestId, `gateway ${signalType}`, 30_000);
+  const pendingTimeoutMs = signalType === 'offer' ? 30_000 : GATEWAY_SIGNAL_REQUEST_TIMEOUT_MS;
+  const callTimeoutMs = signalType === 'offer' ? 30_000 : GATEWAY_SIGNAL_REQUEST_TIMEOUT_MS;
+  const pending = createPendingRequest(pendingGatewaySignals, requestId, `gateway ${signalType}`, pendingTimeoutMs);
   try {
     await client.call('gateway.signal.request', {
       requestId,
@@ -2349,7 +2272,7 @@ async function requestGatewaySignal(req) {
       signalType,
       payload: req?.payload ?? {},
       launchToken: String(req?.launchToken || '').trim(),
-    }, { timeoutMs: 20_000 });
+    }, { timeoutMs: callTimeoutMs });
   } catch (err) {
     settlePending(pendingGatewaySignals, requestId, err);
     throw err;
@@ -2488,7 +2411,7 @@ async function requestGatewayGrantAction(record, opts = {}) {
 
 async function refreshGatewayGrantViews(identityDevices, swarmDevices) {
   const owned = ownedPkSet(identityDevices);
-  const applianceRecords = buildApplianceRecords(identityDevices, swarmDevices);
+  const applianceRecords = currentManagedApplianceRecords(identityDevices, swarmDevices);
   const nextShared = new Map();
   const nextGrantInventory = new Map();
 
@@ -2561,7 +2484,8 @@ function launchAppWindow(app) {
   }
 }
 
-function managedPopupSplashHtml(title = 'Connecting', status = 'Preparing your Security Cameras view.') {
+function managedPopupSplashHtml(title = 'Connecting', status = '') {
+  const nextStatus = String(status || '').trim();
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -2630,7 +2554,7 @@ function managedPopupSplashHtml(title = 'Connecting', status = 'Preparing your S
   <div class="bootSplashCard" aria-live="polite" role="status">
     <div class="bootSpinner" aria-hidden="true"></div>
     <p class="bootSplashTitle">${escapeHtml(title)}</p>
-    <p class="bootSplashStatus">${escapeHtml(status)}</p>
+    <p class="bootSplashStatus"${nextStatus ? '' : ' hidden'}>${escapeHtml(nextStatus)}</p>
   </div>
 </body>
 </html>`;
@@ -2640,6 +2564,7 @@ async function launchNvrControlPanel(record, opts = {}) {
   let popup = null;
   try {
     lastManagedServiceIssue = null;
+    publishRuntimeManagedApplianceState();
     setManagedServiceActionState(record, {
       state: 'resolving',
       message: 'Resolving current Security Cameras availability…',
@@ -2647,7 +2572,7 @@ async function launchNvrControlPanel(record, opts = {}) {
     popup = window.open('', '_blank');
     if (popup && !popup.closed) {
       popup.document.open();
-      popup.document.write(managedPopupSplashHtml('Connecting', 'Resolving current Security Cameras availability.'));
+      popup.document.write(managedPopupSplashHtml('Connecting'));
       popup.document.close();
     }
 
@@ -2658,7 +2583,7 @@ async function launchNvrControlPanel(record, opts = {}) {
     });
     if (popup && !popup.closed) {
       popup.document.open();
-      popup.document.write(managedPopupSplashHtml('Connecting', 'Preparing your Security Cameras view.'));
+      popup.document.write(managedPopupSplashHtml('Connecting'));
       popup.document.close();
     }
 
@@ -2668,7 +2593,10 @@ async function launchNvrControlPanel(record, opts = {}) {
     });
 
     const launchId = randomOpaqueId('launch');
-    const context = writeManagedLaunchContext({
+    if (!runtimeBridge?.putLaunchContext) {
+      throw new Error('shared browser runtime is unavailable; reload Constitute and try again');
+    }
+    const context = {
       launchId,
       app: 'nvr',
       repo: managedAppSurfaceRepoForService('nvr'),
@@ -2681,8 +2609,8 @@ async function launchNvrControlPanel(record, opts = {}) {
       display: launch?.display ?? {},
       createdAt: Date.now(),
       expiresAt: Number(launch?.expiresAt || (Date.now() + MANAGED_LAUNCH_TTL_MS)),
-    });
-    await runtimeBridge?.putLaunchContext?.(context);
+    };
+    await runtimeBridge.putLaunchContext(context);
 
     const url = await buildManagedAppSurfaceUrl(
       managedAppSurfaceRepoForService('nvr'),
@@ -2704,6 +2632,7 @@ async function launchNvrControlPanel(record, opts = {}) {
       reason: String(err?.message || err),
       updatedAt: Date.now(),
     };
+    publishRuntimeManagedApplianceState();
     setGatewayInstallStatus(`NVR control panel failed: ${String(err?.message || err)}`, true);
     runtimeBridge?.pushStatus?.(buildRuntimeShellStatus()).catch(() => {});
     setManagedServiceActionState(record, {
@@ -2844,7 +2773,7 @@ async function refreshManagedApplianceProjection(opts = {}) {
     await refreshGatewayGrantViews(lastIdentity?.devices || [], lastSwarmDevices).catch(() => {});
   }
   renderApplianceList(lastIdentity?.devices || [], lastSwarmDevices);
-  pushRuntimeApplianceProjections(lastIdentity?.devices || [], lastSwarmDevices);
+  pushRuntimeManagedApplianceSourceSnapshot(lastIdentity?.devices || [], lastSwarmDevices);
   renderConnectionModel('managed inventory refresh');
   return lastSwarmDevices;
 }
@@ -2889,7 +2818,7 @@ async function resolveManagedServiceForLaunch(record, opts = {}) {
   }
   let candidate = resolvedManagedServiceRecord(
     record,
-    buildApplianceRecords(lastIdentity?.devices || [], lastSwarmDevices || [], grantedManagedServiceRecords()),
+    currentManagedApplianceRecords(lastIdentity?.devices || [], lastSwarmDevices || []),
   );
   if (candidate && isFreshManagedServiceRecord(candidate) && isGatewayAuthoritativeManagedServiceRecord(candidate)) {
     return candidate;
@@ -2901,7 +2830,7 @@ async function resolveManagedServiceForLaunch(record, opts = {}) {
     await refreshManagedApplianceProjection({ refreshGrantViews: false }).catch(() => {});
     candidate = resolvedManagedServiceRecord(
       record,
-      buildApplianceRecords(lastIdentity?.devices || [], lastSwarmDevices || [], grantedManagedServiceRecords()),
+      currentManagedApplianceRecords(lastIdentity?.devices || [], lastSwarmDevices || []),
     );
     if (candidate && isFreshManagedServiceRecord(candidate) && isGatewayAuthoritativeManagedServiceRecord(candidate)) {
       return candidate;
@@ -2925,10 +2854,13 @@ async function resolveManagedServiceForLaunch(record, opts = {}) {
 }
 
 function renderApplianceList(identityDevices, swarmDevices) {
+  const applianceRecords = currentManagedApplianceRecords(identityDevices, swarmDevices);
   renderManagedApplianceList({
     applianceList,
     identityDevices,
     swarmDevices,
+    applianceRecords,
+    ownedDevicePks: identityOwnedDevicePks(),
     gatewayInventoryStableAt,
     showActivity,
     setSettingsTab,
@@ -2942,6 +2874,7 @@ function renderApplianceList(identityDevices, swarmDevices) {
     launchNvrControlPanel,
     openGatewayBasicsModal,
     escapeHtml,
+    describeResourceName: describeShellResourceName,
     getManagedServiceActionState: managedServiceActionStateForRecord,
     grantedRecords: grantedManagedServiceRecords(),
     getGrantInventoryForService,
@@ -2950,20 +2883,18 @@ function renderApplianceList(identityDevices, swarmDevices) {
   });
 }
 
-function pushRuntimeApplianceProjections(identityDevices, swarmDevices) {
-  if (!runtimeBridge?.putProjection) return;
-  const grantedRecords = grantedManagedServiceRecords();
-  const combinedRecords = buildApplianceRecords(identityDevices, swarmDevices, grantedRecords);
-  const owned = ownedPkSet(identityDevices);
-  const partitions = partitionApplianceRecords(
-    combinedRecords,
-    owned,
-    (record) => record?.sharedProjection === true || record?.grantedRecord === true,
-  );
-  runtimeBridge.putProjection('owned', 'appliances', partitions.ownedRecords);
-  runtimeBridge.putProjection('granted', 'appliances', partitions.grantedRecords);
-  runtimeBridge.putProjection('discoverable', 'appliances', partitions.discoverableRecords);
-  runtimeBridge.putProjection('session', 'managed-service-issue', lastManagedServiceIssue || null);
+function pushRuntimeManagedApplianceSourceSnapshot(identityDevices, swarmDevices) {
+  if (!runtimeBridge?.putManagedApplianceSourceSnapshot) return;
+  runtimeBridge.putManagedApplianceSourceSnapshot({
+    identityDevices: Array.isArray(identityDevices) ? identityDevices : [],
+    swarmDevices: Array.isArray(swarmDevices) ? swarmDevices : [],
+    grantedRecords: grantedManagedServiceRecords(),
+    managedServiceIssue: lastManagedServiceIssue || null,
+  });
+}
+
+function publishRuntimeManagedApplianceState() {
+  pushRuntimeManagedApplianceSourceSnapshot(lastIdentity?.devices || [], lastSwarmDevices || []);
 }
 
 function loadAppPrefs() {
@@ -3023,69 +2954,8 @@ function normalizeRole(value) {
   return String(value || '').trim().toLowerCase();
 }
 
-function loadGatewayHostedSnapshotCache() {
-  try {
-    const raw = localStorage.getItem(GATEWAY_HOSTED_SNAPSHOT_KEY);
-    const parsed = raw ? JSON.parse(raw) : {};
-    return (parsed && typeof parsed === 'object') ? parsed : {};
-  } catch {
-    return {};
-  }
-}
-
-function saveGatewayHostedSnapshotCache() {
-  try {
-    localStorage.setItem(GATEWAY_HOSTED_SNAPSHOT_KEY, JSON.stringify(gatewayHostedSnapshotCache));
-  } catch {}
-}
-
-function normalizeHostedServices(value) {
-  if (!Array.isArray(value)) return [];
-  return value
-    .map((entry) => (entry && typeof entry === 'object') ? entry : null)
-    .filter(Boolean);
-}
-
-function gatewayHostedSnapshot(record) {
-  const pk = String(record?.devicePk || record?.pk || '').trim();
-  const updatedAt = Number(record?.updatedAt || record?.updated_at || record?.ts || 0);
-  const hostedServices = normalizeHostedServices(record?.hostedServices || record?.hosted_services);
-  return { pk, updatedAt, hostedServices };
-}
-
 function applyGatewayHostedSnapshot(record) {
-  if (!isGatewayRecord(record)) return record;
-
-  const current = gatewayHostedSnapshot(record);
-  if (!current.pk) return record;
-
-  const cached = gatewayHostedSnapshotCache[current.pk] || null;
-  let effectiveHostedServices = current.hostedServices;
-
-  if (effectiveHostedServices.length > 0) {
-    gatewayHostedSnapshotCache[current.pk] = {
-      updatedAt: current.updatedAt,
-      hostedServices: effectiveHostedServices,
-    };
-    saveGatewayHostedSnapshotCache();
-  } else if (cached && Array.isArray(cached.hostedServices) && cached.hostedServices.length > 0) {
-    const cachedUpdatedAt = Number(cached.updatedAt || 0);
-    if (cachedUpdatedAt >= current.updatedAt) {
-      effectiveHostedServices = cached.hostedServices;
-    } else if (current.updatedAt >= cachedUpdatedAt) {
-      gatewayHostedSnapshotCache[current.pk] = {
-        updatedAt: current.updatedAt,
-        hostedServices: [],
-      };
-      saveGatewayHostedSnapshotCache();
-    }
-  }
-
-  if (effectiveHostedServices === current.hostedServices) return record;
-  return {
-    ...record,
-    hostedServices: effectiveHostedServices,
-  };
+  return record;
 }
 
 function pageAllowsInsecureRelayUrls() {
@@ -3570,7 +3440,7 @@ function renderHomeApps() {
   if (!homeAppsList) return;
 
   const apps = enabledAppManifests().filter((app) => !isManagedFirstPartyApp(app));
-  const managedServices = buildApplianceRecords(lastIdentity?.devices || [], lastSwarmDevices, grantedManagedServiceRecords())
+  const managedServices = currentManagedApplianceRecords(lastIdentity?.devices || [], lastSwarmDevices)
     .filter((rec) => isNvrRecord(rec))
     .filter((rec) => {
       const pk = String(rec?.devicePk || rec?.pk || '').trim();
@@ -3620,6 +3490,7 @@ function renderHomeApps() {
 
   for (const rec of managedServices) {
     const info = summarizeAppliance(rec, true);
+    const gatewayDescriptor = describeShellResourceName(info.hostGatewayPk, shortPk(info.hostGatewayPk));
     const row = document.createElement('div');
     row.className = 'item appItem';
 
@@ -3636,7 +3507,11 @@ function renderHomeApps() {
       rec?.sharedProjection === true || rec?.grantedRecord === true ? 'Shared service' : 'Managed service',
       `service ${info.service || 'nvr'}`,
     ];
-    if (info.hostGatewayPk) parts.push(`gateway ${info.hostGatewayPk.slice(0, 12)}...`);
+    if (info.hostGatewayPk) {
+      if (gatewayDescriptor.loading) parts.push('gateway name loading…');
+      else if (gatewayDescriptor.raw) parts.push(`gateway id ${gatewayDescriptor.text}`);
+      else parts.push(`gateway ${gatewayDescriptor.text}`);
+    }
     meta.textContent = parts.join(' - ');
 
     text.appendChild(title);
@@ -4225,9 +4100,9 @@ async function refreshAll() {
   setDaemonState('online', 'rpc ok');
 
   deviceDid.textContent = st.did || '';
-  deviceDidSummary.textContent = st.did || '(none)';
-  deviceSecuritySummary.textContent = st.didMethod === 'webauthn' ? 'platform-backed' : 'software-only';
-  identityLinkedSummary.textContent = ident?.linked ? 'yes' : 'no';
+  deviceDidSummary.textContent = String(myLabel?.label || 'This device').trim() || 'This device';
+  deviceSecuritySummary.textContent = st.didMethod === 'webauthn' ? 'Protected' : 'Basic';
+  identityLinkedSummary.textContent = ident?.linked ? currentIdentityHandle() : 'Not signed in';
   updateIdentityChrome(ident);
 
   deviceLabel.value = myLabel?.label || '';
@@ -4239,12 +4114,12 @@ async function refreshAll() {
   renderPeers(lastDirectory);
   updateZoneCommandUi();
   renderApplianceList(ident?.devices || [], lastSwarmDevices);
-  pushRuntimeApplianceProjections(ident?.devices || [], lastSwarmDevices);
+  pushRuntimeManagedApplianceSourceSnapshot(ident?.devices || [], lastSwarmDevices);
   renderHomeApps();
   renderPairRequests(reqs || [], ident?.devices || []);
   renderNotifications(notifs || []);
   ensureOnboardingState(ident);
-  const applianceRecords = buildApplianceRecords(ident?.devices || [], lastSwarmDevices);
+  const applianceRecords = currentManagedApplianceRecords(ident?.devices || [], lastSwarmDevices);
   const ownedGatewayPksNeedingRefresh = applianceRecords
     .filter((rec) => isGatewayRecord(rec))
     .map((rec) => summarizeAppliance(rec, ownedPkSet(ident?.devices || []).has(String(rec?.devicePk || rec?.pk || '').trim())))
@@ -4954,7 +4829,7 @@ function startSharedRelayPipe(client, initialRelayUrls) {
         urls: relayUrls,
         relays: relayDetails,
       });
-      if (clientReady && relayBridgeOwner) {
+      if (bootRefreshSettled && clientReady && relayBridgeOwner) {
         client.call('relay.status', {
           state: msg.state,
           url: msg.url || '',
@@ -4962,7 +4837,7 @@ function startSharedRelayPipe(client, initialRelayUrls) {
           relays: relayDetails,
           code: msg.code ?? null,
           reason: msg.reason ?? ''
-        }, { timeoutMs: 20000, priority: 'immediate' }).catch((e) => console.error('relay.status rpc failed', e));
+        }, { timeoutMs: 20000 }).catch((e) => console.error('relay.status rpc failed', e));
       }
       return;
     }
@@ -4971,8 +4846,10 @@ function startSharedRelayPipe(client, initialRelayUrls) {
       if (gatewayPayload) {
         handleGatewayRelayPayload(gatewayPayload);
       }
-      if (clientReady && relayBridgeOwner) {
-        client.call('relay.rx', { data: msg.data, url: msg.url || '' }, { timeoutMs: 20000, priority: 'immediate' })
+      // During boot, let the shell recover local identity/device state first.
+      // Once boot settles, relay ingress can flow back into the SW queue.
+      if (bootRefreshSettled && clientReady && relayBridgeOwner) {
+        client.call('relay.rx', { data: msg.data, url: msg.url || '' }, { timeoutMs: 20000 })
           .catch((e) => console.error('relay.rx rpc failed', e));
       }
     }
@@ -5057,8 +4934,26 @@ function startSharedRelayPipe(client, initialRelayUrls) {
   startRelayBridgeHeartbeat();
   startRelayRuntime('init');
   updateTargets(initialRelayUrls, 'init');
+
+  function flushBootState() {
+    if (!clientReady || !relayBridgeOwner) return;
+    const relayUrls = Array.isArray(relayPoolSnapshot?.urls) ? relayPoolSnapshot.urls : [];
+    const relayDetails = (relayPoolSnapshot?.relays && typeof relayPoolSnapshot.relays === 'object')
+      ? relayPoolSnapshot.relays
+      : {};
+    client.call('relay.status', {
+      state: relayPoolSnapshot?.state || relayState,
+      url: '',
+      urls: relayUrls,
+      relays: relayDetails,
+      code: null,
+      reason: relayPoolSnapshot?.reason || '',
+    }, { timeoutMs: 20000 }).catch((e) => console.error('relay.status rpc failed', e));
+  }
+
   return {
     updateTargets,
+    flushBootState,
     close: () => teardownRelayRuntime('api-close'),
   };
 }
@@ -5118,8 +5013,6 @@ function startSharedRelayPipe(client, initialRelayUrls) {
   }
 
   loadGatewayExtraZones();
-  cleanupManagedLaunchContexts();
-  ensureManagedAppChannel();
   wireUi();
   await hydrateAppCatalog();
   renderConnectionModel('init');
@@ -5142,6 +5035,9 @@ function startSharedRelayPipe(client, initialRelayUrls) {
     showActivity('onboarding');
     setOnboardStep(1);
   } finally {
+    bootRefreshSettled = true;
+    relayBridge?.flushBootState?.();
+    scheduleRefreshAll(0);
     dismissBootSplash();
   }
 
