@@ -5,6 +5,12 @@
 // The Service Worker is single-threaded and uses IndexedDB; sending many
 // concurrent RPCs can cause contention and apparent hangs/timeouts.
 
+import {
+  SW_CONTROLLER_GRACE_MS,
+  SW_READY_GRACE_MS,
+  bootControllerMode,
+} from "../app/loading.js";
+
 const SERVICE_WORKER_BUILD_ID = "2026-04-06-runtime-stage3";
 
 function currentServiceWorkerUrl() {
@@ -87,25 +93,25 @@ export class IdentityClient {
       console.log("[client] waiting for SW ready");
       await Promise.race([
         navigator.serviceWorker.ready,
-        new Promise((resolve) => setTimeout(resolve, 3000)),
+        new Promise((resolve) => setTimeout(resolve, SW_READY_GRACE_MS)),
       ]);
 
-      // First load after registration may need a controller; wait a bit.
+      // Give the controller a short grace window, then continue on the
+      // direct-port path instead of forcing a reload.
       console.log("[client] waiting for controller");
       let controllerOk = false;
       try {
-        await this._waitForController(9000);
+        await this._waitForController(SW_CONTROLLER_GRACE_MS);
         controllerOk = true;
       } catch (e) {
-        // On first registration, controller may not attach until reload.
-        const k = "sw:reloaded";
-        if (!sessionStorage.getItem(k)) {
-          sessionStorage.setItem(k, "1");
-          console.warn("[client] no controller; reloading to attach SW");
-          location.reload();
-          return reg;
+        const mode = bootControllerMode({
+          controllerPresent: Boolean(navigator.serviceWorker.controller),
+        });
+        if (mode === "controller") {
+          controllerOk = true;
+        } else {
+          console.warn("[client] controller unavailable; continuing with direct port fallback");
         }
-        console.warn("[client] controller unavailable; continuing with direct port fallback");
       }
       if (controllerOk) console.log("[client] controller ready");
       return reg;

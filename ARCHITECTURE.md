@@ -98,6 +98,33 @@ Service Worker
 - WebRTC is the preferred browser-safe transport direction for managed live media and direct paths
 - shell launch/bootstrap must stay separate from media transport
 
+## Startup Model
+
+### First Paint Authority
+- shared runtime snapshot is the first-paint authority for the shell and same-origin first-party app surfaces
+- persisted runtime state may be stale, but it is preferred over blocking on live hydration
+- live refresh reconciles the shell and managed surfaces after first paint
+
+### Critical Boot Vs Background Hydration
+Critical boot is limited to:
+- shell/runtime attach
+- first available runtime snapshot
+- minimum surface structure for the shell or managed app
+
+Background hydration owns:
+- service worker/controller readiness
+- relay startup
+- identity/device refresh
+- directory, zone, swarm, and notification refresh
+- app catalog hydration
+- managed app signaling/media negotiation
+
+### Surface State Rules
+- service worker/controller readiness is infrastructure warming, not a page gate
+- the shell should not remain behind a full-page splash once runtime snapshot or degraded empty-shell state is available
+- managed app surfaces should dismiss full-page splash once launch context and initial surface structure are ready
+- live media connection state belongs to tiles and section-level status after first paint
+
 ## Discovery and Directory
 Zones remain the discovery scope:
 - zone keys are operator/user-shared
