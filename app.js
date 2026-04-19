@@ -1,4 +1,10 @@
 import { IdentityClient } from './identity/client.js';
+import {
+  SHELL_BOOT_FALLBACK_TIMEOUT_MS,
+  SHELL_BOOT_RUNTIME_ATTACH_TIMEOUT_MS,
+  describeShellResourceNameState,
+  shellBootCanDismiss,
+} from './app/loading.js';
 import { createManagedApplianceModel } from './app/managed-appliances.js';
 
 const panePathEl = document.getElementById('panePath');
@@ -204,6 +210,8 @@ let lastManagedServiceIssue = null;
 let lastRuntimeShellStatusKey = '';
 let bootSplashDismissed = false;
 const resolvedResourceNames = new Map();
+const shellBootDebugEnabled = new URLSearchParams(window.location.search || '').get('debug') === '1';
+let shellBootFallbackTimer = null;
 const managedAppliances = createManagedApplianceModel({
   applyHostedSnapshot: (record) => applyGatewayHostedSnapshot(record),
   getSwarmSeen: (pk) => (swarm ? swarm.getSwarmSeen(pk) : 0),
@@ -270,6 +278,68 @@ function dismissBootSplash() {
   }, 220);
 }
 
+function markShellBoot(stage) {
+  const label = String(stage || '').trim();
+  if (!label) return;
+  try {
+    performance.mark(`constitute:${label}`);
+  } catch {}
+  if (shellBootDebugEnabled) {
+    try {
+      console.debug('[boot]', label, Math.round(performance.now()));
+    } catch {
+      console.debug('[boot]', label);
+    }
+  }
+}
+
+function clearShellBootFallbackTimer() {
+  if (!shellBootFallbackTimer) return;
+  clearTimeout(shellBootFallbackTimer);
+  shellBootFallbackTimer = null;
+}
+
+function tryDismissShellBootSplash(reason = '') {
+  if (bootSplashDismissed) return true;
+  const canDismiss = shellBootCanDismiss({
+    runtimeAttached,
+    fallbackExpired: !shellBootFallbackTimer,
+  });
+  if (!canDismiss) return false;
+  markShellBoot(reason || (runtimeAttached ? 'shell.first-paint.snapshot' : 'shell.first-paint.fallback'));
+  dismissBootSplash();
+  return true;
+}
+
+function scheduleShellBootFallback() {
+  clearShellBootFallbackTimer();
+  shellBootFallbackTimer = setTimeout(() => {
+    shellBootFallbackTimer = null;
+    renderConnectionModel('boot-fallback');
+    renderHomeApps();
+    if (lastIdentity) renderApplianceList(lastIdentity?.devices || [], lastSwarmDevices || []);
+    tryDismissShellBootSplash('shell.first-paint.fallback');
+  }, SHELL_BOOT_FALLBACK_TIMEOUT_MS);
+}
+
+function bootFromRuntimeSnapshot() {
+  scheduleShellBootFallback();
+  runtimeBridge = startPlatformRuntimeBridge();
+  if (!runtimeBridge) {
+    markShellBoot('shell.runtime-attach.unavailable');
+    return null;
+  }
+  runtimeBridge.whenReady(SHELL_BOOT_RUNTIME_ATTACH_TIMEOUT_MS)
+    .then(() => {
+      markShellBoot('shell.runtime-attached');
+    })
+    .catch((err) => {
+      console.warn('[runtime] runtime attach bootstrap failed', err);
+      markShellBoot('shell.runtime-attach.timeout');
+    });
+  return runtimeBridge;
+}
+
 function bootSplashCopy(reason = '') {
   if (daemonState === 'online') {
     return {
@@ -312,17 +382,12 @@ function conciseConnectionReason(summary) {
 function describeShellResourceName(pk, fallback = '') {
   const key = String(pk || '').trim();
   const raw = String(fallback || shortPk(key)).trim() || '—';
-  if (!key) {
-    return { text: raw, loading: false, raw: false };
-  }
-  const resolved = resolvedResourceNames.get(key);
-  if (resolved) {
-    return { text: resolved, loading: false, raw: false };
-  }
-  if (!bootRefreshSettled || !runtimeAttached) {
-    return { text: 'Loading name…', loading: true, raw: false };
-  }
-  return { text: raw, loading: false, raw: true };
+  return describeShellResourceNameState({
+    pk: key,
+    fallback: raw,
+    resolvedLabel: resolvedResourceNames.get(key) || '',
+    runtimeAttached,
+  });
 }
 
 function rememberResolvedResourceName(pk, label) {
@@ -339,6 +404,7 @@ function absorbRuntimeSnapshot(snapshot) {
   for (const [pk, label] of Object.entries(names)) {
     rememberResolvedResourceName(pk, label);
   }
+  markShellBoot('shell.runtime-snapshot');
 }
 
 function updateBootSplash(reason = '') {
@@ -1498,6 +1564,8 @@ function startPlatformRuntimeBridge() {
       renderConnectionModel();
       renderHomeApps();
       if (lastIdentity) renderApplianceList(lastIdentity?.devices || [], lastSwarmDevices || []);
+      clearShellBootFallbackTimer();
+      tryDismissShellBootSplash('shell.first-paint.snapshot');
       return;
     }
     if (msg.type === 'runtime.snapshot') {
@@ -1513,6 +1581,8 @@ function startPlatformRuntimeBridge() {
       renderConnectionModel();
       renderHomeApps();
       if (lastIdentity) renderApplianceList(lastIdentity?.devices || [], lastSwarmDevices || []);
+      clearShellBootFallbackTimer();
+      tryDismissShellBootSplash('shell.first-paint.snapshot');
       return;
     }
     if (msg.type === 'runtime.broker.request') {
@@ -3605,6 +3675,18 @@ async function hydrateAppCatalog() {
   }
 }
 
+function hydrateAppCatalogInBackground() {
+  return (async () => {
+    try {
+      await hydrateAppCatalog();
+      markShellBoot('shell.app-catalog.hydrated');
+      renderHomeApps();
+    } catch (err) {
+      console.error('hydrateAppCatalog failed', err);
+    }
+  })();
+}
+
 function clear(el) {
   if (!el) return;
   while (el.firstChild) el.removeChild(el.firstChild);
@@ -4065,9 +4147,45 @@ function ensureOnboardingState(ident) {
 }
 
 async function refreshAll() {
+  const core = await refreshCoreState();
+  await refreshExtendedState(core);
+  return { st: core.st, ident: core.ident };
+}
+
+function applyCoreRefreshState({ st, ident, myLabel }) {
+  lastDeviceState = st;
+  lastIdentity = ident;
+  if (preparedGatewayInstall && preparedGatewayInstall.identityLabel !== String(ident?.label || '').trim()) {
+    preparedGatewayInstall = null;
+  }
+  setDaemonState('online', 'rpc ok');
+  deviceDid.textContent = st.did || '';
+  deviceDidSummary.textContent = String(myLabel?.label || 'This device').trim() || 'This device';
+  deviceSecuritySummary.textContent = st.didMethod === 'webauthn' ? 'Protected' : 'Basic';
+  identityLinkedSummary.textContent = ident?.linked ? currentIdentityHandle() : 'Not signed in';
+  updateIdentityChrome(ident);
+  deviceLabel.value = myLabel?.label || '';
+  updateGatewayInstallHint();
+  renderDeviceList(ident?.devices || []);
+  renderApplianceList(ident?.devices || [], lastSwarmDevices);
+  renderHomeApps();
+  ensureOnboardingState(ident);
+  renderConnectionModel('refresh');
+}
+
+async function refreshCoreState() {
   // SEQUENTIAL (not Promise.all) to avoid SW starvation/timeouts.
   const st = await client.call('device.getState', {}, { timeoutMs: 20000 });
   const ident = await client.call('identity.get', {}, { timeoutMs: 20000 });
+  const myLabel = await client.call('device.getLabel', {}, { timeoutMs: 20000 });
+  applyCoreRefreshState({ st, ident, myLabel });
+  markShellBoot('shell.core-refresh.complete');
+  return { st, ident, myLabel };
+}
+
+async function refreshExtendedState(core = null) {
+  const st = core?.st || lastDeviceState || await client.call('device.getState', {}, { timeoutMs: 20000 });
+  const ident = core?.ident || lastIdentity || await client.call('identity.get', {}, { timeoutMs: 20000 });
   const reqs = await client.call('pairing.list', {}, { timeoutMs: 20000 });
   const blocked = await client.call('blocked.list', {}, { timeoutMs: 20000 });
   const directory = await client.call('directory.list', {}, { timeoutMs: 20000 });
@@ -4075,20 +4193,13 @@ async function refreshAll() {
   const swarmDevices = await client.call('swarm.device.list', {}, { timeoutMs: 20000 }).catch(() => []);
   const swarmIdentities = await client.call('swarm.identity.list', {}, { timeoutMs: 20000 }).catch(() => []);
   const notifs = await client.call('notifications.list', {}, { timeoutMs: 20000 });
-  const myLabel = await client.call('device.getLabel', {}, { timeoutMs: 20000 });
 
-  lastDeviceState = st;
-  lastIdentity = ident;
-  if (preparedGatewayInstall && preparedGatewayInstall.identityLabel !== String(ident?.label || '').trim()) {
-    preparedGatewayInstall = null;
-  }
   lastDirectory = directory || [];
   lastZones = zones || [];
   lastSwarmDevices = swarmDevices || [];
   await refreshGatewayGrantViews(ident?.devices || [], lastSwarmDevices).catch(() => {});
   relayBridge?.updateTargets(desiredRelayUrls(ident?.devices || [], lastSwarmDevices), 'refresh');
 
-  // If we only have a key, try to resolve the human name via peers.
   for (const z of (lastZones || [])) {
     const n = String(z?.name || '').trim();
     if (!n || n === 'Joined' || n.startsWith('Zone ')) {
@@ -4097,28 +4208,14 @@ async function refreshAll() {
     }
   }
 
-  setDaemonState('online', 'rpc ok');
-
-  deviceDid.textContent = st.did || '';
-  deviceDidSummary.textContent = String(myLabel?.label || 'This device').trim() || 'This device';
-  deviceSecuritySummary.textContent = st.didMethod === 'webauthn' ? 'Protected' : 'Basic';
-  identityLinkedSummary.textContent = ident?.linked ? currentIdentityHandle() : 'Not signed in';
-  updateIdentityChrome(ident);
-
-  deviceLabel.value = myLabel?.label || '';
-  updateGatewayInstallHint();
-
-  renderDeviceList(ident?.devices || []);
   renderBlockedList(blocked || []);
   renderZones(lastZones);
   renderPeers(lastDirectory);
   updateZoneCommandUi();
-  renderApplianceList(ident?.devices || [], lastSwarmDevices);
   pushRuntimeManagedApplianceSourceSnapshot(ident?.devices || [], lastSwarmDevices);
-  renderHomeApps();
   renderPairRequests(reqs || [], ident?.devices || []);
   renderNotifications(notifs || []);
-  ensureOnboardingState(ident);
+
   const applianceRecords = currentManagedApplianceRecords(ident?.devices || [], lastSwarmDevices);
   const ownedGatewayPksNeedingRefresh = applianceRecords
     .filter((rec) => isGatewayRecord(rec))
@@ -4145,7 +4242,8 @@ async function refreshAll() {
     setSwarmState('disabled');
   }
 
-  renderConnectionModel('refresh');
+  renderConnectionModel('extended-refresh');
+  markShellBoot('shell.extended-refresh.complete');
   return { st, ident };
 }
 
@@ -4962,6 +5060,7 @@ function startSharedRelayPipe(client, initialRelayUrls) {
   // Keep activity panes hidden until identity/device gating completes.
   panePathEl.textContent = '';
   setBootSplash();
+  markShellBoot('shell.boot.start');
 
   client = new IdentityClient({
     onEvent: (evt) => {
@@ -4993,14 +5092,7 @@ function startSharedRelayPipe(client, initialRelayUrls) {
     }
   });
 
-  await client.ready().catch((e) => console.error(e));
-  clientReady = client.isServiceWorkerAvailable();
-  if (clientReady) {
-    relayBridge = startSharedRelayPipe(client, desiredRelayUrls([], []));
-    runtimeBridge = startPlatformRuntimeBridge();
-  } else {
-    setDaemonState('offline', 'sw unavailable');
-  }
+  bootFromRuntimeSnapshot();
 
   swarm = new SwarmTransport({ client, onState: (s) => setSwarmState(s) });
   swarm.loadSuccess();
@@ -5014,14 +5106,28 @@ function startSharedRelayPipe(client, initialRelayUrls) {
 
   loadGatewayExtraZones();
   wireUi();
-  await hydrateAppCatalog();
   renderConnectionModel('init');
+  void hydrateAppCatalogInBackground();
 
   // Default radio selection: webauthn if supported
   setSecurityChoice('webauthn');
 
   try {
-    await runRefreshAll();
+    await client.ready();
+    clientReady = client.isServiceWorkerAvailable();
+    markShellBoot('shell.client-ready');
+    if (clientReady) {
+      relayBridge = startSharedRelayPipe(client, desiredRelayUrls([], []));
+    } else {
+      setDaemonState('offline', 'sw unavailable');
+    }
+
+    const core = await refreshCoreState();
+    bootRefreshSettled = true;
+    relayBridge?.flushBootState?.();
+    clearShellBootFallbackTimer();
+    tryDismissShellBootSplash('shell.first-paint.core');
+
     const linked = await ensureOnboardingFlow();
     if (linked) {
       setSettingsTab('devices');
@@ -5029,16 +5135,19 @@ function startSharedRelayPipe(client, initialRelayUrls) {
     } else {
       await applyUrlParams();
     }
+
+    void refreshExtendedState(core).catch((err) => {
+      console.error('refreshExtendedState failed', err);
+      renderConnectionModel('extended-refresh-failed');
+    });
   } catch (e) {
-    console.error('refreshAll failed', e);
+    console.error('shell boot failed', e);
     setDaemonState('offline', 'rpc failed');
     showActivity('onboarding');
     setOnboardStep(1);
-  } finally {
     bootRefreshSettled = true;
-    relayBridge?.flushBootState?.();
-    scheduleRefreshAll(0);
-    dismissBootSplash();
+    clearShellBootFallbackTimer();
+    tryDismissShellBootSplash('shell.first-paint.error');
   }
 
   // Health check: if SW drops, fall back to onboarding.
