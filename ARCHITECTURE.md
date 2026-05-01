@@ -43,7 +43,7 @@ A special service-backed device that:
 `constitute-account` does not own:
 - gateway inventory and freshness UI
 - hosted service inventory UI
-- network/security posture UI
+- network/cybersecurity posture UI
 - long-running native transport
 - camera ingest or retention
 - direct service-specific media pipelines
@@ -68,6 +68,7 @@ Current shell rules:
 First-party apps publish separately, for example:
 - `tld/constitute-gateway-ui/`
 - `tld/constitute-nvr-ui/`
+- future `tld/constitute-physec/`
 
 Direct app entry is canonical. Managed app surfaces still redeem short-lived launch context instead of long-lived secrets in the URL.
 Users should not need to visit `constitute-account` manually before another first-party app can become usable. When an app needs account/session/grant repair, it should attach to the shared runtime and drive that recovery through the app flow.
