@@ -6,7 +6,7 @@ Browser-native account authority for the Constitution ecosystem.
 ## Status
 - Prototype: active development
 - Discovery bootstrap: implemented (zones + directory)
-- Shared runtime + managed launch convergence: active
+- Shared runtime + service access convergence: active
 - Direct first-party app entry: active
 
 ## Key Concepts
@@ -24,11 +24,11 @@ Browser-native account authority for the Constitution ecosystem.
 - Grants/access review
 - Notifications and pending-request management
 - Relay transport via worker bridge + Service Worker authority
-- Shared runtime worker for managed launch context and cross-surface service status
+- Shared runtime worker for managed service access context and cross-surface service status
 - Zone presence/list propagation and directory updates
 - Swarm record cache (identity/device) with signed record validation
 - Canonical app-channel plumbing for `swarm_record_request` and `swarm_dht_get/put`
-- Managed app launch/runtime authority for first-party Pages surfaces such as `constitute-gateway-ui` and `constitute-nvr-ui`
+- Managed app service access/runtime authority for first-party Pages surfaces such as `constitute-gateway-ui` and `constitute-nvr-ui`
 
 ## Project Layout
 - `app.js`: account routes, pairing/device/grant presentation, and runtime/broker integration

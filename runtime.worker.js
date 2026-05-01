@@ -1,3 +1,5 @@
+import { BROKER } from "constitute-protocol";
+
 const RUNTIME_VERSION = Object.freeze({ major: 2, minor: 9 });
 const RUNTIME_WORKER_BUILD_ID = `runtime-${RUNTIME_VERSION.major}.${RUNTIME_VERSION.minor}`;
 const CONTEXT_TTL_FALLBACK_MS = 2 * 60 * 1000;
@@ -111,7 +113,7 @@ function ownedPkSet(identityDevices) {
 
 const endpoints = new Map();
 const pendingBrokerRequests = new Map();
-const launchContexts = new Map();
+const serviceAccessContexts = new Map();
 const runtimeStatus = {
   shell: null,
   services: {},
@@ -186,8 +188,8 @@ function touchRuntime() {
   runtimeUpdatedAt = nowMs();
 }
 
-function managedLaunchContextObject() {
-  return Object.fromEntries(Array.from(launchContexts.entries()).map(([launchId, context]) => [launchId, safeClone(context)]));
+function managedServiceAccessContextObject() {
+  return Object.fromEntries(Array.from(serviceAccessContexts.entries()).map(([contextId, context]) => [contextId, safeClone(context)]));
 }
 
 function normalizeHostedServices(value) {
@@ -478,13 +480,13 @@ function rebuildManagedApplianceSnapshot() {
   managedState.managedServiceIssue = source.managedServiceIssue ? safeClone(source.managedServiceIssue) : null;
 }
 
-function cleanupLaunchContexts() {
+function cleanupServiceAccessContexts() {
   const now = nowMs();
   let changed = false;
-  for (const [launchId, context] of launchContexts.entries()) {
+  for (const [contextId, context] of serviceAccessContexts.entries()) {
     const expiresAt = Number(context?.expiresAt || 0) || (Number(context?.createdAt || 0) + CONTEXT_TTL_FALLBACK_MS);
     if (expiresAt && expiresAt <= now) {
-      launchContexts.delete(launchId);
+      serviceAccessContexts.delete(contextId);
       changed = true;
     }
   }
@@ -492,7 +494,7 @@ function cleanupLaunchContexts() {
 }
 
 function runtimeSnapshot() {
-  if (cleanupLaunchContexts()) {
+  if (cleanupServiceAccessContexts()) {
     touchRuntime();
     schedulePersist();
   }
@@ -504,7 +506,7 @@ function runtimeSnapshot() {
     managedAppliances: safeClone(managedState.applianceSnapshot),
     resourceNames: safeClone(managedState.resourceNames),
     managedServiceIssue: safeClone(managedState.managedServiceIssue),
-    launchContextCount: launchContexts.size,
+    serviceAccessContextCount: serviceAccessContexts.size,
   };
 }
 
@@ -570,7 +572,7 @@ function serializedRuntimeState() {
     resourceNames: safeClone(managedState.resourceNames),
     managedServiceIssue: safeClone(managedState.managedServiceIssue),
     hostedGatewaySnapshots: safeClone(managedState.hostedGatewaySnapshots),
-    launchContexts: managedLaunchContextObject(),
+    serviceAccessContexts: managedServiceAccessContextObject(),
   };
 }
 
@@ -632,18 +634,18 @@ async function hydrateRuntimeState() {
     managedState.hostedGatewaySnapshots = payload.hostedGatewaySnapshots && typeof payload.hostedGatewaySnapshots === 'object'
       ? safeClone(payload.hostedGatewaySnapshots)
       : {};
-    launchContexts.clear();
-    const persistedContexts = payload.launchContexts && typeof payload.launchContexts === 'object'
-      ? payload.launchContexts
+    serviceAccessContexts.clear();
+    const persistedContexts = payload.serviceAccessContexts && typeof payload.serviceAccessContexts === 'object'
+      ? payload.serviceAccessContexts
       : {};
-    for (const [launchId, context] of Object.entries(persistedContexts)) {
-      const key = String(launchId || '').trim();
+    for (const [contextId, context] of Object.entries(persistedContexts)) {
+      const key = String(contextId || '').trim();
       if (!key || !context || typeof context !== 'object') continue;
-      launchContexts.set(key, safeClone(context));
+      serviceAccessContexts.set(key, safeClone(context));
     }
   }
   rebuildManagedApplianceSnapshot();
-  if (cleanupLaunchContexts()) {
+  if (cleanupServiceAccessContexts()) {
     touchRuntime();
     schedulePersist();
   }
@@ -710,29 +712,29 @@ function handleStatusPut(message, endpoint) {
   return { ok: true, result: runtimeSnapshot() };
 }
 
-function handleLaunchContextPut(message) {
+function handleServiceAccessContextPut(message) {
   const context = message.context && typeof message.context === 'object' ? message.context : null;
-  const launchId = String(context?.launchId || '').trim();
-  if (!launchId) return { ok: false, error: 'missing launchId' };
-  launchContexts.set(launchId, safeClone(context));
-  cleanupLaunchContexts();
+  const contextId = String(context?.contextId || '').trim();
+  if (!contextId) return { ok: false, error: 'missing contextId' };
+  serviceAccessContexts.set(contextId, safeClone(context));
+  cleanupServiceAccessContexts();
   touchRuntime();
   schedulePersist();
   broadcastSnapshot();
-  return { ok: true, result: safeClone(launchContexts.get(launchId) || null) };
+  return { ok: true, result: safeClone(serviceAccessContexts.get(contextId) || null) };
 }
 
-function handleLaunchContextGet(message) {
-  cleanupLaunchContexts();
-  const launchId = String(message.launchId || '').trim();
-  if (!launchId) return { ok: false, error: 'missing launchId' };
-  return { ok: true, result: safeClone(launchContexts.get(launchId) || null) };
+function handleServiceAccessContextGet(message) {
+  cleanupServiceAccessContexts();
+  const contextId = String(message.contextId || '').trim();
+  if (!contextId) return { ok: false, error: 'missing contextId' };
+  return { ok: true, result: safeClone(serviceAccessContexts.get(contextId) || null) };
 }
 
-function handleLaunchContextDelete(message) {
-  const launchId = String(message.launchId || '').trim();
-  if (!launchId) return { ok: false, error: 'missing launchId' };
-  const existed = launchContexts.delete(launchId);
+function handleServiceAccessContextDelete(message) {
+  const contextId = String(message.contextId || '').trim();
+  if (!contextId) return { ok: false, error: 'missing contextId' };
+  const existed = serviceAccessContexts.delete(contextId);
   if (existed) {
     touchRuntime();
     schedulePersist();
@@ -849,30 +851,30 @@ async function handleControlMessage(message, endpoint) {
       };
       break;
     }
-    case 'launchContext.put': {
+    case BROKER.SERVICE_ACCESS_CONTEXT_PUT: {
       response = {
         type: 'runtime.response',
         requestId: String(message.requestId || '').trim(),
-        kind: 'launchContext.put',
-        ...handleLaunchContextPut(message),
+        kind: BROKER.SERVICE_ACCESS_CONTEXT_PUT,
+        ...handleServiceAccessContextPut(message),
       };
       break;
     }
-    case 'launchContext.get': {
+    case BROKER.SERVICE_ACCESS_CONTEXT_GET: {
       response = {
         type: 'runtime.response',
         requestId: String(message.requestId || '').trim(),
-        kind: 'launchContext.get',
-        ...handleLaunchContextGet(message),
+        kind: BROKER.SERVICE_ACCESS_CONTEXT_GET,
+        ...handleServiceAccessContextGet(message),
       };
       break;
     }
-    case 'launchContext.delete': {
+    case BROKER.SERVICE_ACCESS_CONTEXT_DELETE: {
       response = {
         type: 'runtime.response',
         requestId: String(message.requestId || '').trim(),
-        kind: 'launchContext.delete',
-        ...handleLaunchContextDelete(message),
+        kind: BROKER.SERVICE_ACCESS_CONTEXT_DELETE,
+        ...handleServiceAccessContextDelete(message),
       };
       break;
     }
@@ -885,8 +887,8 @@ async function handleControlMessage(message, endpoint) {
       };
       break;
     }
-    case 'gateway.signal.request':
-    case 'gateway.launch.request':
+    case BROKER.SERVICE_SIGNAL_REQUEST:
+    case BROKER.SERVICE_ACCESS_REQUEST:
     case 'gateway.grant.request':
     case 'gateway.service.install.request':
     case 'gateway.zones.sync.request': {
@@ -901,19 +903,19 @@ async function handleControlMessage(message, endpoint) {
       }
       break;
     }
-    case 'gateway.signal.response': {
+    case BROKER.SERVICE_SIGNAL_RESPONSE: {
       response = {
         type: 'runtime.ack',
-        kind: 'gateway.signal.response',
-        ...handleBrokerResponse('gateway.signal.request', message),
+        kind: BROKER.SERVICE_SIGNAL_RESPONSE,
+        ...handleBrokerResponse(BROKER.SERVICE_SIGNAL_REQUEST, message),
       };
       break;
     }
-    case 'gateway.launch.response': {
+    case BROKER.SERVICE_ACCESS_RESPONSE: {
       response = {
         type: 'runtime.ack',
-        kind: 'gateway.launch.response',
-        ...handleBrokerResponse('gateway.launch.request', message),
+        kind: BROKER.SERVICE_ACCESS_RESPONSE,
+        ...handleBrokerResponse(BROKER.SERVICE_ACCESS_REQUEST, message),
       };
       break;
     }

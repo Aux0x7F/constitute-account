@@ -10,6 +10,7 @@
     "test": "node --test app/**/*.test.js"
   },
   "dependencies": {
+    "constitute-protocol": "file:../constitute-protocol",
     "constitute-ui": "file:../constitute-ui"
   },
   "devDependencies": {

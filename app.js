@@ -5,6 +5,7 @@ import {
   renderFirstPartyShell,
   setConnectionStateText,
 } from "constitute-ui";
+import { BROKER, SERVICE_ACCESS_EVENTS } from "constitute-protocol";
 import { IdentityClient } from './identity/client.js';
 import {
   SHELL_BOOT_FALLBACK_TIMEOUT_MS,
@@ -294,7 +295,7 @@ const PLATFORM_RUNTIME_VERSION = Object.freeze({ major: 2, minor: 9 });
 const PLATFORM_RUNTIME_BUILD_ID = `runtime-${PLATFORM_RUNTIME_VERSION.major}.${PLATFORM_RUNTIME_VERSION.minor}`;
 const RUNTIME_ATTACH_TIMEOUT_MS = 15_000;
 const RUNTIME_WRITE_TIMEOUT_MS = 12_000;
-const MANAGED_LAUNCH_REQUEST_TIMEOUT_MS = 90_000;
+const MANAGED_SERVICE_ACCESS_REQUEST_TIMEOUT_MS = 90_000;
 const GATEWAY_SIGNAL_REQUEST_TIMEOUT_MS = 135_000;
 const BROKER_READY_TIMEOUT_MS = 45_000;
 const BROKER_RELAY_READY_TIMEOUT_MS = 30_000;
@@ -328,7 +329,7 @@ const GATEWAY_EXTRA_ZONES_KEY = 'constitute.gateway.extraZones';
 const MANAGED_APP_SURFACES = Object.freeze({
   nvr: 'constitute-nvr-ui',
 });
-const MANAGED_LAUNCH_TTL_MS = 2 * 60 * 1000;
+const MANAGED_SERVICE_ACCESS_TTL_MS = 2 * 60 * 1000;
 const GATEWAY_INVENTORY_REFRESH_TTL_MS = 15_000;
 const GATEWAY_INVENTORY_STABLE_TTL_MS = 2 * 60 * 1000;
 const RELAY_BRIDGE_LEASE_KEY = 'constitute.relayBridge.owner';
@@ -350,7 +351,7 @@ let runtimeStatusSnapshot = {
   managedAppliances: { owned: [], granted: [], discoverable: [] },
   resourceNames: {},
   managedServiceIssue: null,
-  launchContextCount: 0,
+  serviceAccessContextCount: 0,
 };
 let lastManagedServiceIssue = null;
 let lastRuntimeShellStatusKey = '';
@@ -581,7 +582,7 @@ const gatewayInventoryRefreshAt = new Map();
 const gatewayInventoryStableAt = new Map();
 const pendingGatewayServiceInstalls = new Map();
 const pendingGatewayZoneSyncs = new Map();
-const pendingManagedLaunches = new Map();
+const pendingServiceAccesses = new Map();
 const pendingGatewayGrantRequests = new Map();
 const pendingGatewaySignals = new Map();
 const sharedManagedServicesByGatewayPk = new Map();
@@ -1079,7 +1080,7 @@ function summarizeServices(gatewaySummary) {
     return {
       code: 'degraded',
       label: 'degraded',
-      reason: String(runtimeStatusSnapshot.managedServiceIssue.reason || 'Managed NVR launch failed.').trim(),
+      reason: String(runtimeStatusSnapshot.managedServiceIssue.reason || 'Managed NVR service access failed.').trim(),
       usable: false,
     };
   }
@@ -1522,6 +1523,13 @@ function runtimeWorkerScriptUrl() {
   return target.toString();
 }
 
+function createRuntimeSharedWorker() {
+  return new SharedWorker(runtimeWorkerScriptUrl(), {
+    type: 'module',
+    name: `constitute-account-runtime-${PLATFORM_RUNTIME_BUILD_ID}`,
+  });
+}
+
 function managedAppSurfaceCandidates(repoName) {
   const repo = String(repoName || '').trim();
   if (!repo) throw new Error('missing managed app repo');
@@ -1580,10 +1588,10 @@ async function resolveManagedAppSurfaceBaseUrl(repoName) {
   }
 }
 
-async function buildManagedAppSurfaceUrl(repoName, launchId, opts = {}) {
+async function buildManagedAppSurfaceUrl(repoName, contextId, opts = {}) {
   const target = new URL(await resolveManagedAppSurfaceBaseUrl(repoName));
   const params = new URLSearchParams();
-  params.set('launch', String(launchId || '').trim());
+  params.set('serviceAccess', String(contextId || '').trim());
   const activity = String(opts?.activity || '').trim();
   const settingsTab = String(opts?.settingsTab || '').trim();
   const camera = String(opts?.camera || '').trim();
@@ -1680,7 +1688,7 @@ async function syncRelayStatusForBroker() {
   return true;
 }
 
-async function ensureRuntimeBrokerReadyForLaunch() {
+async function ensureRuntimeBrokerReadyForServiceAccess() {
   if (!client) throw new Error('account runtime is not initialized');
 
   await client.ready();
@@ -1703,7 +1711,7 @@ async function ensureRuntimeBrokerReadyForLaunch() {
     throw new Error('device key is not ready yet');
   }
 
-  relayBridge?.updateTargets?.(desiredRelayUrls(lastIdentity?.devices || [], lastSwarmDevices || []), 'broker-launch');
+  relayBridge?.updateTargets?.(desiredRelayUrls(lastIdentity?.devices || [], lastSwarmDevices || []), 'broker-service-access');
   await waitForBrokerCondition(
     () => relayState === 'open' || relaysOpenCount() > 0,
     BROKER_RELAY_READY_TIMEOUT_MS,
@@ -1732,7 +1740,7 @@ function startPlatformRuntimeBridge() {
   const clientId = randomOpaqueId('runtime-shell');
   let worker;
   try {
-    worker = new SharedWorker(runtimeWorkerScriptUrl());
+    worker = createRuntimeSharedWorker();
   } catch (err) {
     console.warn('[runtime] SharedWorker attach failed', err);
     return null;
@@ -1815,9 +1823,9 @@ function startPlatformRuntimeBridge() {
   }
 
   bridge.call = runtimeCall;
-  bridge.putLaunchContext = async (context) => {
+  bridge.putServiceAccessContext = async (context) => {
     await bridge.whenReady();
-    return await runtimeCall('launchContext.put', { context }, RUNTIME_WRITE_TIMEOUT_MS);
+    return await runtimeCall(BROKER.SERVICE_ACCESS_CONTEXT_PUT, { context }, RUNTIME_WRITE_TIMEOUT_MS);
   };
   bridge.pushStatus = async (status) => {
     if (!(await bridge.whenReadyQuietly())) return;
@@ -1872,13 +1880,13 @@ function startPlatformRuntimeBridge() {
     if (msg.type === 'runtime.broker.request') {
       handleRuntimeBrokerRequest(msg).catch((err) => {
         const kind = String(msg?.kind || '').trim();
-        const responseType = kind === 'gateway.launch.request'
-          ? 'gateway.launch.response'
+        const responseType = kind === BROKER.SERVICE_ACCESS_REQUEST
+          ? BROKER.SERVICE_ACCESS_RESPONSE
           : (kind === 'gateway.grant.request'
             ? 'gateway.grant.response'
             : (kind === 'gateway.service.install.request'
               ? 'gateway.service.install.response'
-              : (kind === 'gateway.zones.sync.request' ? 'gateway.zones.sync.response' : 'gateway.signal.response')));
+              : (kind === 'gateway.zones.sync.request' ? 'gateway.zones.sync.response' : BROKER.SERVICE_SIGNAL_RESPONSE)));
         port.postMessage({
           type: responseType,
           clientId,
@@ -1920,11 +1928,11 @@ async function handleRuntimeBrokerRequest(message) {
   const requestId = String(message?.requestId || '').trim();
   if (!runtimeBridge || !requestId || !kind) return;
   const payload = message?.payload && typeof message.payload === 'object' ? message.payload : {};
-  if (kind === 'gateway.signal.request') {
-    await ensureRuntimeBrokerReadyForLaunch();
+  if (kind === BROKER.SERVICE_SIGNAL_REQUEST) {
+    await ensureRuntimeBrokerReadyForServiceAccess();
     const result = await requestGatewaySignal(payload);
     runtimeBridge.port.postMessage({
-      type: 'gateway.signal.response',
+      type: BROKER.SERVICE_SIGNAL_RESPONSE,
       clientId: runtimeBridge.clientId,
       requestId,
       ok: true,
@@ -1932,10 +1940,10 @@ async function handleRuntimeBrokerRequest(message) {
     });
     return;
   }
-  if (kind === 'gateway.launch.request') {
-    const result = await requestGatewayManagedLaunch(payload.record || payload, payload.options || {});
+  if (kind === BROKER.SERVICE_ACCESS_REQUEST) {
+    const result = await requestGatewayServiceAccess(payload.record || payload, payload.options || {});
     runtimeBridge.port.postMessage({
-      type: 'gateway.launch.response',
+      type: BROKER.SERVICE_ACCESS_RESPONSE,
       clientId: runtimeBridge.clientId,
       requestId,
       ok: true,
@@ -2048,7 +2056,7 @@ function handleGatewayZoneSyncStatusEvent(evt) {
   }
 }
 
-function handleGatewayManagedLaunchStatusEvent(evt) {
+function handleGatewayServiceAccessStatusEvent(evt) {
   const requestId = String(evt?.requestId || '').trim();
   const status = String(evt?.status || '').trim().toLowerCase();
   if (!requestId) return;
@@ -2056,13 +2064,13 @@ function handleGatewayManagedLaunchStatusEvent(evt) {
   if (status === 'complete') {
     lastManagedServiceIssue = null;
     publishRuntimeManagedApplianceState();
-    settlePending(pendingManagedLaunches, requestId, null, {
+    settlePending(pendingServiceAccesses, requestId, null, {
       requestId,
       gatewayPk: String(evt?.gatewayPk || '').trim(),
       servicePk: String(evt?.servicePk || '').trim(),
       service: String(evt?.service || '').trim(),
       capability: String(evt?.capability || '').trim(),
-      launchToken: String(evt?.launchToken || '').trim(),
+      serviceCapability: String(evt?.serviceCapability || '').trim(),
       expiresAt: Number(evt?.expiresAt || 0),
       display: evt?.display ?? {},
       ts: Number(evt?.ts || Date.now()),
@@ -2071,19 +2079,19 @@ function handleGatewayManagedLaunchStatusEvent(evt) {
   }
 
   if (status === 'failed' || status === 'rejected') {
-    const detail = String(evt?.detail || evt?.reason || 'managed launch failed').trim();
+    const detail = String(evt?.detail || evt?.reason || 'service access failed').trim();
     lastManagedServiceIssue = {
       service: String(evt?.service || 'nvr').trim().toLowerCase() || 'nvr',
       state: 'error',
-      stage: 'launch_authorization',
-      reason: detail || 'managed launch failed',
+      stage: 'service_access_authorization',
+      reason: detail || 'service access failed',
       updatedAt: Date.now(),
     };
     publishRuntimeManagedApplianceState();
     renderConnectionModel(detail);
     requestGatewayInventoryRefresh(String(evt?.gatewayPk || '').trim(), { force: true }).catch(() => false);
     refreshManagedApplianceProjection({ refreshGrantViews: false }).catch(() => {});
-    settlePending(pendingManagedLaunches, requestId, new Error(detail || 'managed launch failed'));
+    settlePending(pendingServiceAccesses, requestId, new Error(detail || 'service access failed'));
   }
 }
 
@@ -2135,7 +2143,7 @@ function handleGatewaySignalStatusRelayEvent(evt) {
     lastManagedServiceIssue = {
       service: String(evt?.service || 'nvr').trim().toLowerCase() || 'nvr',
       state: 'degraded',
-      stage: 'gateway_signal',
+      stage: SERVICE_ACCESS_EVENTS.SIGNAL,
       reason: detail || 'gateway signal failed',
       updatedAt: Date.now(),
     };
@@ -2229,19 +2237,19 @@ function handleGatewayRelayPayload(payload) {
   if (!payload || typeof payload !== 'object') return false;
   const type = String(payload.type || '').trim();
   if (!type) return false;
-  if (type === 'gateway_managed_launch_status') {
-    handleGatewayManagedLaunchStatusEvent(payload);
+  if (type === SERVICE_ACCESS_EVENTS.STATUS) {
+    handleGatewayServiceAccessStatusEvent(payload);
     return true;
   }
   if (type === 'gateway_grant_status') {
     handleGatewayGrantStatusEvent(payload);
     return true;
   }
-  if (type === 'gateway_signal_status') {
+  if (type === SERVICE_ACCESS_EVENTS.SIGNAL_STATUS) {
     handleGatewaySignalStatusRelayEvent(payload);
     return true;
   }
-  if (type === 'gateway_signal') {
+  if (type === SERVICE_ACCESS_EVENTS.SIGNAL) {
     handleGatewaySignalRelayEvent(payload);
     return true;
   }
@@ -2461,8 +2469,8 @@ async function requestRemoteNvrInstall(record) {
   };
 }
 
-async function requestGatewayManagedLaunch(record, opts = {}) {
-  await ensureRuntimeBrokerReadyForLaunch();
+async function requestGatewayServiceAccess(record, opts = {}) {
+  await ensureRuntimeBrokerReadyForServiceAccess();
   const gatewayPk = managedGatewayPkForRecord(record);
   const servicePk = managedServicePkForRecord(record);
   const service = String(opts?.service || record?.service || 'nvr').trim() || 'nvr';
@@ -2471,11 +2479,11 @@ async function requestGatewayManagedLaunch(record, opts = {}) {
   if (!servicePk) throw new Error('service public key is missing');
   if (!String(lastIdentity?.id || '').trim()) throw new Error('link an identity before opening managed services');
   if (!String(lastDeviceState?.pk || '').trim()) throw new Error('device key is not ready yet');
-  const requestLaunchOnce = async () => {
-    const requestId = randomOpaqueId('gw-launch');
-    const pending = createPendingRequest(pendingManagedLaunches, requestId, 'managed launch', MANAGED_LAUNCH_REQUEST_TIMEOUT_MS);
+  const requestServiceAccessOnce = async () => {
+    const requestId = randomOpaqueId('gw-service-access');
+    const pending = createPendingRequest(pendingServiceAccesses, requestId, 'service access', MANAGED_SERVICE_ACCESS_REQUEST_TIMEOUT_MS);
     try {
-      await client.call('gateway.managedLaunch.request', {
+      await client.call('gateway.serviceAccess.request', {
         requestId,
         gatewayPk,
         servicePk,
@@ -2486,21 +2494,21 @@ async function requestGatewayManagedLaunch(record, opts = {}) {
           shell: 'constitute',
           surface: managedAppSurfaceRepoForService(service),
         },
-      }, { timeoutMs: MANAGED_LAUNCH_REQUEST_TIMEOUT_MS });
+      }, { timeoutMs: MANAGED_SERVICE_ACCESS_REQUEST_TIMEOUT_MS });
     } catch (err) {
-      settlePending(pendingManagedLaunches, requestId, err);
+      settlePending(pendingServiceAccesses, requestId, err);
       throw err;
     }
     return await pending;
   };
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     try {
-      return await requestLaunchOnce();
+      return await requestServiceAccessOnce();
     } catch (err) {
       const message = String(err?.message || err || '').trim().toLowerCase();
-      const canRetry = message.includes('managed launch timed out') && attempt < 3;
+      const canRetry = message.includes('service access timed out') && attempt < 3;
       if (!canRetry) throw err;
-      console.warn('[managed] managed launch timed out; retrying', {
+      console.warn('[managed] service access timed out; retrying', {
         gatewayPk,
         servicePk,
         service,
@@ -2518,14 +2526,14 @@ async function requestGatewaySignal(req) {
   const callTimeoutMs = signalType === 'offer' ? 30_000 : GATEWAY_SIGNAL_REQUEST_TIMEOUT_MS;
   const pending = createPendingRequest(pendingGatewaySignals, requestId, `gateway ${signalType}`, pendingTimeoutMs);
   try {
-    await client.call('gateway.signal.request', {
+    await client.call(BROKER.SERVICE_SIGNAL_REQUEST, {
       requestId,
       gatewayPk: String(req?.gatewayPk || '').trim(),
       servicePk: String(req?.servicePk || '').trim(),
       service: String(req?.service || 'nvr').trim() || 'nvr',
       signalType,
       payload: req?.payload ?? {},
-      launchToken: String(req?.launchToken || '').trim(),
+      serviceCapability: String(req?.serviceCapability || '').trim(),
     }, { timeoutMs: callTimeoutMs });
   } catch (err) {
     settlePending(pendingGatewaySignals, requestId, err);
@@ -2795,7 +2803,7 @@ function managedPopupSplashHtml(title = 'Connecting', status = '') {
 </html>`;
 }
 
-async function launchNvrControlPanel(record, opts = {}) {
+async function openNvrControlPanel(record, opts = {}) {
   let popup = null;
   try {
     lastManagedServiceIssue = null;
@@ -2811,9 +2819,9 @@ async function launchNvrControlPanel(record, opts = {}) {
       popup.document.close();
     }
 
-    const resolvedRecord = await resolveManagedServiceForLaunch(record, { serviceLabel: 'Security Cameras' });
+    const resolvedRecord = await resolveManagedServiceForAccess(record, { serviceLabel: 'Security Cameras' });
     setManagedServiceActionState(record, {
-      state: 'launching',
+      state: 'opening',
       message: 'Opening Security Cameras…',
     });
     if (popup && !popup.closed) {
@@ -2822,34 +2830,34 @@ async function launchNvrControlPanel(record, opts = {}) {
       popup.document.close();
     }
 
-    const launch = await requestGatewayManagedLaunch(resolvedRecord, {
+    const access = await requestGatewayServiceAccess(resolvedRecord, {
       service: 'nvr',
       capability: 'nvr.view',
     });
 
-    const launchId = randomOpaqueId('launch');
-    if (!runtimeBridge?.putLaunchContext) {
+    const contextId = randomOpaqueId('service-access');
+    if (!runtimeBridge?.putServiceAccessContext) {
       throw new Error('shared browser runtime is unavailable; reload Constitute Account and try again');
     }
     const context = {
-      launchId,
+      contextId,
       app: 'nvr',
       repo: managedAppSurfaceRepoForService('nvr'),
       identityId: String(lastIdentity?.id || '').trim(),
       devicePk: String(lastDeviceState?.pk || '').trim(),
-      gatewayPk: String(launch?.gatewayPk || managedGatewayPkForRecord(resolvedRecord) || '').trim(),
-      servicePk: String(launch?.servicePk || managedServicePkForRecord(resolvedRecord) || '').trim(),
+      gatewayPk: String(access?.gatewayPk || managedGatewayPkForRecord(resolvedRecord) || '').trim(),
+      servicePk: String(access?.servicePk || managedServicePkForRecord(resolvedRecord) || '').trim(),
       service: 'nvr',
-      launchToken: String(launch?.launchToken || '').trim(),
-      display: launch?.display ?? {},
+      serviceCapability: String(access?.serviceCapability || '').trim(),
+      display: access?.display ?? {},
       createdAt: Date.now(),
-      expiresAt: Number(launch?.expiresAt || (Date.now() + MANAGED_LAUNCH_TTL_MS)),
+      expiresAt: Number(access?.expiresAt || (Date.now() + MANAGED_SERVICE_ACCESS_TTL_MS)),
     };
-    await runtimeBridge.putLaunchContext(context);
+    await runtimeBridge.putServiceAccessContext(context);
 
     const url = await buildManagedAppSurfaceUrl(
       managedAppSurfaceRepoForService('nvr'),
-      launchId,
+      contextId,
       opts,
     );
     if (popup && !popup.closed) {
@@ -2863,7 +2871,7 @@ async function launchNvrControlPanel(record, opts = {}) {
     lastManagedServiceIssue = {
       service: 'nvr',
       state: 'error',
-      stage: String(err?.message || '').split(':')[0] || 'launch_authorization',
+      stage: String(err?.message || '').split(':')[0] || 'service_access_authorization',
       reason: String(err?.message || err),
       updatedAt: Date.now(),
     };
@@ -2875,8 +2883,8 @@ async function launchNvrControlPanel(record, opts = {}) {
       message: String(err?.message || err),
     }, 7_500);
     if (popup && !popup.closed) {
-      popup.document.title = 'Security Cameras Launch Failed';
-      popup.document.body.innerHTML = `<pre style="font:14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; padding:16px; color:#fca5a5; background:#0b1220;">Launch failed: ${escapeHtml(String(err?.message || err))}</pre>`;
+      popup.document.title = 'Security Cameras Service Access Failed';
+      popup.document.body.innerHTML = `<pre style="font:14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; padding:16px; color:#fca5a5; background:#0b1220;">Service access failed: ${escapeHtml(String(err?.message || err))}</pre>`;
     }
   }
 }
@@ -2955,7 +2963,7 @@ function isGatewayAuthoritativeManagedServiceRecord(record) {
   return String(record?.managedAvailabilityAuthority || '').trim().toLowerCase() === 'gateway';
 }
 
-async function resolveManagedServiceForLaunch(record, opts = {}) {
+async function resolveManagedServiceForAccess(record, opts = {}) {
   const gatewayPk = managedGatewayPkForRecord(record);
   const serviceLabel = String(opts?.serviceLabel || 'Security Cameras').trim() || 'Security Cameras';
   if (!gatewayPk) {
@@ -4296,7 +4304,10 @@ function startSharedRelayPipe(client, initialRelayUrls) {
 
   function createSharedRelayRuntime() {
     const scriptUrl = relayWorkerScriptUrl();
-    const worker = new SharedWorker(scriptUrl);
+    const worker = new SharedWorker(scriptUrl, {
+      type: 'module',
+      name: `constitute-account-relay-${SHELL_BUILD_ID}`,
+    });
     const port = worker.port;
     port.start();
     port.onmessage = (ev) => handleRelayRuntimeMessage(ev.data || {});
@@ -4411,16 +4422,16 @@ function startSharedRelayPipe(client, initialRelayUrls) {
       if (evt?.type === 'gateway_zone_sync_status') {
         handleGatewayZoneSyncStatusEvent(evt);
       }
-      if (evt?.type === 'gateway_managed_launch_status') {
-        handleGatewayManagedLaunchStatusEvent(evt);
+      if (evt?.type === SERVICE_ACCESS_EVENTS.STATUS) {
+        handleGatewayServiceAccessStatusEvent(evt);
       }
       if (evt?.type === 'gateway_grant_status') {
         handleGatewayGrantStatusEvent(evt);
       }
-      if (evt?.type === 'gateway_signal_status') {
+      if (evt?.type === SERVICE_ACCESS_EVENTS.SIGNAL_STATUS) {
         handleGatewaySignalStatusRelayEvent(evt);
       }
-      if (evt?.type === 'gateway_signal') {
+      if (evt?.type === SERVICE_ACCESS_EVENTS.SIGNAL) {
         handleGatewaySignalRelayEvent(evt);
       }
       if (evt?.type === 'notify') scheduleRefreshAll();

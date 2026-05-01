@@ -26,7 +26,7 @@ Examples:
 
 ### Gateway
 A special service-backed device that:
-- brokers browser launch/signaling
+- brokers browser service access/signaling
 - inventories hosted services
 - enforces managed-service capability checks
 
@@ -70,7 +70,7 @@ First-party apps publish separately, for example:
 - `tld/constitute-nvr-ui/`
 - future `tld/constitute-physec/`
 
-Direct app entry is canonical. Managed app surfaces still redeem short-lived launch context instead of long-lived secrets in the URL.
+Direct app entry is canonical. Managed app surfaces still redeem short-lived service access context instead of long-lived secrets in the URL.
 Users should not need to visit `constitute-account` manually before another first-party app can become usable. When an app needs account/session/grant repair, it should attach to the shared runtime and drive that recovery through the app flow.
 
 ## Runtime Structure
@@ -81,7 +81,7 @@ Browser UI
 - `identity/client.js`
   - window-to-Service Worker RPC bridge
 - `runtime.worker.js`
-  - same-origin shared runtime for managed launch context, cross-surface status, and gateway request brokering
+  - same-origin shared runtime for managed service access context, cross-surface status, and gateway request brokering
 - `relay.worker.js`
   - persistent WebSocket relay bridge for relay pool transport only
 
@@ -99,7 +99,8 @@ Service Worker
 
 ### Current Browser Authority
 - Service Worker is the cryptographic/state authority.
-- SharedWorker runtime owns same-origin launch/session/status coordination across first-party app surfaces.
+- SharedWorker runtime owns same-origin service access/session/status coordination across first-party app surfaces.
+- `runtime.worker.js` is an ES module SharedWorker. First-party apps must attach with the versioned URL and worker name `constitute-account-runtime-${runtimeBuildId}` so direct-entry apps and the account bridge share one runtime instance.
 - Relay transport runs in a dedicated/shared worker bridge, separate from page rendering.
 - Windows never own long-lived secret authority directly.
 
@@ -107,10 +108,10 @@ Service Worker
 - browser app surfaces should attach to owned services through owned gateways
 - gateway remains the control/auth boundary
 - WebRTC is the preferred browser-safe transport direction for managed live media and direct paths
-- shell launch/bootstrap must stay separate from media transport
+- shell service access/bootstrap must stay separate from media transport
 - retained runtime projection is first truth for display/session hints until contradicted
 - privileged service admission still requires valid cryptographic authorization
-- future service capability state should be explicit and bound to identity, device, gateway, service, scope, expiry, and replay protection
+- service access uses `constitute-protocol` CAAC primitives for explicit capability state bound to identity, device, gateway, service, scope, expiry, and replay protection
 
 ## Startup Model
 
@@ -136,7 +137,7 @@ Background hydration owns:
 ### Surface State Rules
 - service worker/controller readiness is infrastructure warming, not a page gate
 - the shell should not remain behind a full-page splash once runtime snapshot or degraded empty-shell state is available
-- managed app surfaces should dismiss full-page splash once launch context and initial surface structure are ready
+- managed app surfaces should dismiss full-page splash once service access context and initial surface structure are ready
 - live media connection state belongs to tiles and section-level status after first paint
 - onboarding progress should remain stable while background hydration continues; refresh loops must not snap the user back to step one unless the device truly lost its local authority
 
@@ -145,7 +146,7 @@ Zones remain the discovery scope:
 - zone keys are operator/user-shared
 - directory stores discovered devices and service-backed devices
 - service-backed devices must render distinctly from user devices
-- appliance inventory should show host relationship, freshness, and launch availability
+- appliance inventory should show host relationship, freshness, and service access availability
 
 ## State Storage
 
@@ -165,23 +166,24 @@ Used for:
 - device and identity label updates
 - gateway/service status events
 - discovery and zone presence
-- managed launch/signaling coordination
+- service access/signaling coordination
 
 ## Security Model
 - device-level signing remains mandatory
 - Service Worker remains the cryptographic authority for shell state
-- long-lived identity secrets must not be passed in app launch URLs
-- managed app surfaces should redeem short-lived launch context through shared runtime first, with explicit local fallback only where needed
+- long-lived identity secrets must not be passed in app service access URLs
+- managed app surfaces should redeem short-lived service access context through shared runtime first, with explicit local fallback only where needed
 - relay transport remains untrusted and validation-bound
 - signed data is not confidential by default
-- launch, signaling, and session payloads must distinguish signed integrity from encrypted confidentiality
+- touched service-access paths must use CAAC envelopes when sensitive metadata crosses broker or relay-facing boundaries; signed integrity alone is not treated as confidentiality
 
 ## Active Convergence Slice
 Current convergence work is focused on:
 - account-centered identity/session/grant authority in `constitute-account`
 - shared first-party chrome/primitives in `constitute-ui`
 - gateway-management extraction into `constitute-gateway-ui`
-- managed NVR launch into `constitute-nvr-ui`
+- managed NVR service access into `constitute-nvr-ui`
+- shared non-UI protocol/security/control primitives in `constitute-protocol`
 - WebRTC live preview as the managed browser media direction
 
 ## Design Principles
@@ -189,7 +191,7 @@ Current convergence work is focused on:
 - gateway remains the canonical browser control boundary
 - transport choice must not redefine trust
 - service-backed devices participate in the same identity model
-- launch context is short-lived and explicit
+- service access context is short-lived and explicit
 
 ## Current Product Boundary
 - `constitute-account` is the account-centered browser authority now

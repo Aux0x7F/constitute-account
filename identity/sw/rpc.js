@@ -11,6 +11,7 @@ import { relaySend, subscribeOnRelayOpen as subOpen, publishAppEvent } from './r
 import { nip04Encrypt } from './nostr.js';
 import { revokeDeviceAndRotate } from './revoke.js';
 import { handleRelayFrame } from './relayIn.js';
+import { BROKER, SERVICE_ACCESS_EVENTS, SERVICE_ACCESS_KINDS, sealEnvelope } from "constitute-protocol";
 import { blockedList, blockedRemove } from './blocklist.js';
 import { directoryList } from './directory.js';
 import { listZones, addZone, joinZone, publishZonePresence, publishZoneProbe, publishZoneList, publishZoneListRequest, publishZoneMeta, publishZoneMetaRequest, addSelfToZoneList, getZoneList, getZoneName, getPendingZoneKey, setPendingZoneKey, clearPendingZoneKey } from './zone.js';
@@ -619,7 +620,7 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
     return { ok: true, requestId, targetGatewayPk, zoneKeys, extraZoneKeys };
   }
 
-  if (method === 'gateway.managedLaunch.request') {
+  if (method === BROKER.SERVICE_ACCESS_REQUEST) {
     const ident = await getIdentity();
     if (!ident?.linked || !ident?.id || !ident?.label) throw new Error('no linked identity');
 
@@ -631,20 +632,35 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
     if (!targetGatewayPk) throw new Error('missing gatewayPk');
     if (!servicePk) throw new Error('missing servicePk');
 
-    const requestId = String(params?.requestId || '').trim() || makeSwarmRequestId('gw-launch');
+    const requestId = String(params?.requestId || '').trim() || makeSwarmRequestId('gw-service-access');
+    const issuedAt = Date.now();
+    const requestEnvelope = sealEnvelope({
+      kind: SERVICE_ACCESS_KINDS.REQUEST,
+      issuerSecretKey: dev.nostr.skHex,
+      recipientPks: [targetGatewayPk],
+      issuedAt,
+      expiresAt: issuedAt + 90_000,
+      claims: {
+        requestId,
+        toDevicePk: targetGatewayPk,
+        identityId: String(ident.id || '').trim(),
+        devicePk: String(dev?.nostr?.pk || '').trim(),
+        servicePk,
+        service,
+        capability,
+        appRepo: String(params?.appRepo || '').trim(),
+        display: params?.display && typeof params.display === 'object' ? params.display : {},
+        ts: issuedAt,
+        ttl: 90,
+      },
+    });
     const payload = {
-      type: 'gateway_managed_launch_request',
+      type: SERVICE_ACCESS_EVENTS.REQUEST,
       requestId,
       toDevicePk: targetGatewayPk,
-      identityId: String(ident.id || '').trim(),
-      devicePk: String(dev?.nostr?.pk || '').trim(),
-      servicePk,
-      service,
-      capability,
-      appRepo: String(params?.appRepo || '').trim(),
-      display: params?.display && typeof params.display === 'object' ? params.display : {},
-      ts: Date.now(),
-      ttl: 120,
+      requestEnvelope,
+      ts: issuedAt,
+      ttl: 90,
     };
 
     const zones = await listZones(ident || {}).catch(() => []);
@@ -652,7 +668,7 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
     return { ok: true, requestId, gatewayPk: targetGatewayPk, servicePk, service, capability };
   }
 
-  if (method === 'gateway.signal.request') {
+  if (method === BROKER.SERVICE_SIGNAL_REQUEST) {
     const ident = await getIdentity();
     if (!ident?.linked || !ident?.id || !ident?.label) throw new Error('no linked identity');
 
@@ -661,26 +677,41 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
     const servicePk = String(params?.servicePk || '').trim();
     const service = String(params?.service || 'nvr').trim() || 'nvr';
     const signalType = String(params?.signalType || '').trim().toLowerCase();
-    const launchToken = String(params?.launchToken || '').trim();
+    const serviceCapability = String(params?.serviceCapability || '').trim();
     if (!targetGatewayPk) throw new Error('missing gatewayPk');
     if (!servicePk) throw new Error('missing servicePk');
     if (!signalType) throw new Error('missing signalType');
-    if (!launchToken) throw new Error('missing launchToken');
+    if (!serviceCapability) throw new Error('missing serviceCapability');
 
     const requestId = String(params?.requestId || '').trim() || makeSwarmRequestId('gw-signal');
+    const issuedAt = Date.now();
+    const requestEnvelope = sealEnvelope({
+      kind: SERVICE_ACCESS_KINDS.SIGNAL,
+      issuerSecretKey: dev.nostr.skHex,
+      recipientPks: [targetGatewayPk],
+      issuedAt,
+      expiresAt: issuedAt + 90_000,
+      claims: {
+        requestId,
+        toDevicePk: targetGatewayPk,
+        identityId: String(ident.id || '').trim(),
+        devicePk: String(dev?.nostr?.pk || '').trim(),
+        servicePk,
+        service,
+        signalType,
+        payload: params?.payload ?? {},
+        serviceCapability,
+        ts: issuedAt,
+        ttl: 90,
+      },
+    });
     const payload = {
-      type: 'gateway_signal_request',
+      type: SERVICE_ACCESS_EVENTS.SIGNAL_REQUEST,
       requestId,
       toDevicePk: targetGatewayPk,
-      identityId: String(ident.id || '').trim(),
-      devicePk: String(dev?.nostr?.pk || '').trim(),
-      servicePk,
-      service,
-      signalType,
-      payload: params?.payload ?? {},
-      launchToken,
-      ts: Date.now(),
-      ttl: 120,
+      requestEnvelope,
+      ts: issuedAt,
+      ttl: 90,
     };
 
     const zones = await listZones(ident || {}).catch(() => []);
