@@ -42,9 +42,9 @@ Browser-native account authority for the Constitution ecosystem.
 See `ARCHITECTURE.md` for system design and convergence direction.
 
 ## Running Locally
-1. From the workspace root, run `npm run build`
-2. From the workspace root, run `npm run serve:local`
-3. Open `http://localhost:8023/constitute-account/`
+1. Run `npm install`
+2. Run `npm run build`
+3. Serve the built static output at `/constitute-account/`
 4. Use HTTPS or localhost for WebAuthn paths
 
 ## Usage
