@@ -406,7 +406,7 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
     if (drec) await publishAppEvent(sw, { type: 'swarm_device_record', record: drec }).catch(() => {});
     return { ok: true };
   }
-  if (method === 'swarm.record.request' || method === 'swarm.discovery.request') {
+  if (method === 'swarm.record.request') {
     const requestId = String(params?.requestId || '').trim() || makeSwarmRequestId('record');
     const want = Array.isArray(params?.want) && params.want.length
       ? params.want.map(String)
@@ -424,10 +424,6 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
     };
     await publishAppEvent(sw, payload).catch(() => {});
 
-    // Legacy compatibility while both contracts are in flight.
-    if (method === 'swarm.discovery.request') {
-      await publishAppEvent(sw, { ...payload, type: 'swarm_discovery_request' }).catch(() => {});
-    }
     return { ok: true, requestId };
   }
   if (method === 'swarm.dht.put') {
@@ -556,7 +552,7 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
       authorizedDevicePks,
       swarmPeers,
       publicWsUrl: String(params?.publicWsUrl || '').trim(),
-      allowUnsignedHelloMvp: params?.allowUnsignedHelloMvp !== false,
+      allowUnsignedDebugHello: params?.allowUnsignedDebugHello !== false,
       reolinkAutoprovision: params?.reolinkAutoprovision !== false,
       reolinkUsername: String(params?.reolinkUsername || '').trim(),
       reolinkPassword: String(params?.reolinkPassword || '').trim(),
@@ -953,6 +949,10 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
     const hasNewOpenRelay = openRelayUrls.some((relayUrl) => !openRelaySubscriptionUrls.has(relayUrl));
     if (state === 'open' && (prevState !== 'open' || hasNewOpenRelay)) {
       const ident = await getIdentity();
+      if (!ident?.linked || !ident?.id || !ident?.label) {
+        log(sw, 'relay open; identity-scoped subscriptions deferred until account links');
+        return { ok: true };
+      }
       const dev = await ensureDevice();
       await subOpen(sw, ident, (m) => log(sw, m));
       for (const relayUrl of openRelayUrls) openRelaySubscriptionUrls.add(relayUrl);

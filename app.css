@@ -84,39 +84,12 @@ body:not(.booting) #bootSplash{
   to{transform:translateY(-2px) scale(1.015); text-shadow:0 10px 28px rgba(109,242,198,0.18)}
 }
 
-.topbar{
-  position:sticky; top:0; z-index:50;
-  display:flex;
-  justify-content:space-between;
-  align-items:center;
-  padding:0.75rem 1rem;
-  background:linear-gradient(to bottom, rgba(18,23,38,0.95), rgba(18,23,38,0.75));
-  -webkit-backdrop-filter: blur(10px);
-  backdrop-filter: blur(10px);
-  border-bottom:1px solid rgba(255,255,255,0.08);
-}
-
-.title{display:flex; flex-direction:column; gap:2px}
-.appname{font-weight:800; letter-spacing:0.2px}
 .small{font-size:0.85rem}
 .muted{color:var(--muted)}
 .mono{font-family:var(--mono)}
-.right{display:flex; gap:0.5rem; align-items:center}
-
-.iconbtn{
-  border:1px solid rgba(255,255,255,0.12);
-  background:rgba(255,255,255,0.03);
-  color:var(--text);
-  border-radius:12px;
-  padding:0.4rem 0.55rem;
-  cursor:pointer;
-}
-.iconbtn:hover{background:rgba(255,255,255,0.06)}
 .ghost{opacity:0.8}
 
 .main{
-  max-width:920px;
-  margin:0 auto;
   padding:1rem;
 }
 
@@ -340,130 +313,6 @@ button:disabled{opacity:0.5; cursor:not-allowed}
 .appItemLabel input[type="checkbox"]{
   width:auto;
   margin:0;
-}
-
-.backdrop{
-  position:fixed; inset:0;
-  background:rgba(0,0,0,0.55);
-  z-index:60;
-}
-.backdrop.hidden{display:none}
-
-.drawer{
-  position:fixed;
-  top:0; right:0;
-  width:320px;
-  height:100%;
-  background:rgba(18,23,38,0.98);
-  border-left:1px solid rgba(255,255,255,0.10);
-  box-shadow:var(--shadow);
-  z-index:70;
-  padding:0.75rem;
-  display:flex;
-  flex-direction:column;
-}
-.drawer.hidden{display:none}
-.drawerHeader{display:flex; justify-content:space-between; align-items:center}
-.drawerTitle{font-weight:700}
-.drawerNav{display:flex; flex-direction:column; gap:0.5rem; margin-top:1rem}
-.navbtn{text-align:left; padding:0.6rem 0.75rem; border-radius:14px}
-.drawerFooter{margin-top:auto; padding-top:1rem; border-top:1px solid rgba(255,255,255,0.08)}
-.drawerStatusRail{
-  margin-top:0.2rem;
-}
-.drawerStatusInline{
-  display:flex;
-  align-items:center;
-  justify-content:space-between;
-  gap:0.85rem;
-}
-.identityHandle{
-  color:var(--muted);
-  user-select:none;
-  white-space:nowrap;
-}
-.identityHandle-linked{
-  color:var(--accent);
-}
-.identityHandle-unlinked{
-  color:#f6c56b;
-}
-
-.menu{
-  position:absolute;
-  top:60px; right:16px;
-  width:360px;
-  background:rgba(18,23,38,0.98);
-  border:1px solid rgba(255,255,255,0.10);
-  border-radius:16px;
-  box-shadow:var(--shadow);
-  z-index:80;
-  padding:0.6rem;
-}
-.menu.hidden{display:none}
-.menuHeader{display:flex; justify-content:space-between; align-items:center; padding:0.25rem 0.2rem 0.6rem 0.2rem}
-.menuTitle{font-weight:700}
-.smallbtn{padding:0.35rem 0.6rem; border-radius:999px}
-.menuList{display:flex; flex-direction:column; gap:0.5rem; max-height:420px; overflow:auto}
-
-.bellIcon{
-  width:20px;
-  height:20px;
-  display:block;
-}
-.bellIcon path{
-  fill:none;
-  stroke:currentColor;
-  stroke-width:1.6;
-}
-.iconbtn.has-unread .bellIcon path{
-  fill:var(--accent);
-  stroke:var(--accent);
-}
-
-/* Connection popover */
-.connWrap{
-  position:relative;
-  display:inline-flex;
-  align-items:center;
-  justify-content:flex-end;
-  min-width:max-content;
-}
-.connStateText{
-  font-size:0.82rem;
-  color:var(--muted);
-  font-weight:600;
-  user-select:none;
-}
-.connStateText-connected{
-  color:var(--accent);
-}
-.connStateText-limited{
-  color:#f6c56b;
-}
-.connStateText-error{
-  color:#ff8c8c;
-}
-.popover{
-  position:absolute;
-  right:0;
-  bottom:calc(100% + 10px);
-  width:280px;
-  background:rgba(18,23,38,0.98);
-  border:1px solid rgba(255,255,255,0.12);
-  border-radius:14px;
-  padding:0.7rem;
-  box-shadow:var(--shadow);
-  z-index:90;
-}
-.popover.hidden{display:none}
-.popoverTitle{font-weight:700; margin-bottom:0.5rem}
-.popoverRow{display:flex; justify-content:space-between; font-size:0.9rem; margin:0.25rem 0}
-.popoverDetails{
-  font-size:0.82rem;
-  margin:0.5rem 0 0;
-  word-break:break-word;
-  line-height:1.4;
 }
 
 /* Onboarding “radio” choice buttons */

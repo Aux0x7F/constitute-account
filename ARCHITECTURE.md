@@ -1,9 +1,9 @@
-# Constitute - Architecture Overview
+# Constitute Account - Architecture Overview
 
-`constitute` is the browser-native management shell for the Constitution ecosystem.
-It owns identity, device, pairing, gateway, zone, and managed-service control UX.
+`constitute-account` is the browser-native account authority for the Constitution ecosystem.
+It owns identity, device, pairing, grant, notification, and identity-zone UX.
 
-It does not permanently embed every first-party application inside the shell. Instead, it launches managed app surfaces that publish separately under the same site domain.
+It does not permanently embed every first-party application inside the account surface. Shared first-party chrome comes from `constitute-ui`, and gateway-specific management lives in `constitute-gateway-ui`.
 
 ## Core Concepts
 
@@ -30,43 +30,53 @@ A special service-backed device that:
 - inventories hosted services
 - enforces managed-service capability checks
 
-## Shell Responsibilities
-`constitute` owns:
+## Account Responsibilities
+`constitute-account` owns:
 - onboarding
 - device creation and pairing approval
 - identity lifecycle
 - zone management
-- gateway inventory and freshness
-- hosted service inventory
-- managed app launch
+- grants/access
+- notifications
+- shared runtime authority
 
-`constitute` does not own:
+`constitute-account` does not own:
+- gateway inventory and freshness UI
+- hosted service inventory UI
+- network/security posture UI
 - long-running native transport
 - camera ingest or retention
 - direct service-specific media pipelines
 
 ## UI Structure
 
-### Management Shell
-The shell remains at `tld/constitute/` and is responsible for:
-- Home
-- Settings
-- pairing and identity management
-- devices and service-backed devices
-- appliances/gateway management
-- launch entry points for managed apps
+### Account Surface
+The account app remains at `tld/constitute-account/` and is responsible for:
+- account overview
+- identity/profile
+- devices
+- grants/access
+- notifications
+- identity-owned zones
+
+Current shell rules:
+- onboarding is automatic when no linked session/device exists; it is not a persistent navigation option
+- notifications should stay in a loading state until the first notification query resolves
+- service-worker controller warmup may fall back to direct RPC transport, but that infrastructure detail should not by itself degrade the visible connection summary
 
 ### Managed App Surfaces
 First-party apps publish separately, for example:
+- `tld/constitute-gateway-ui/`
 - `tld/constitute-nvr-ui/`
 
-The shell launches these in a new tab or window and provides a short-lived launch context instead of long-lived secrets in the URL.
+Direct app entry is canonical. Managed app surfaces still redeem short-lived launch context instead of long-lived secrets in the URL.
+Users should not need to visit `constitute-account` manually before another first-party app can become usable. When an app needs account/session/grant repair, it should attach to the shared runtime and drive that recovery through the app flow.
 
 ## Runtime Structure
 
 Browser UI
 - `app.js`
-  - shell routes and appliances, launcher flow, and peer/service presentation
+  - account routes, pairing/device/grant presentation, and runtime/broker integration
 - `identity/client.js`
   - window-to-Service Worker RPC bridge
 - `runtime.worker.js`
@@ -97,6 +107,9 @@ Service Worker
 - gateway remains the control/auth boundary
 - WebRTC is the preferred browser-safe transport direction for managed live media and direct paths
 - shell launch/bootstrap must stay separate from media transport
+- retained runtime projection is first truth for display/session hints until contradicted
+- privileged service admission still requires valid cryptographic authorization
+- future service capability state should be explicit and bound to identity, device, gateway, service, scope, expiry, and replay protection
 
 ## Startup Model
 
@@ -124,6 +137,7 @@ Background hydration owns:
 - the shell should not remain behind a full-page splash once runtime snapshot or degraded empty-shell state is available
 - managed app surfaces should dismiss full-page splash once launch context and initial surface structure are ready
 - live media connection state belongs to tiles and section-level status after first paint
+- onboarding progress should remain stable while background hydration continues; refresh loops must not snap the user back to step one unless the device truly lost its local authority
 
 ## Discovery and Directory
 Zones remain the discovery scope:
@@ -158,12 +172,14 @@ Used for:
 - long-lived identity secrets must not be passed in app launch URLs
 - managed app surfaces should redeem short-lived launch context through shared runtime first, with explicit local fallback only where needed
 - relay transport remains untrusted and validation-bound
+- signed data is not confidential by default
+- launch, signaling, and session payloads must distinguish signed integrity from encrypted confidentiality
 
 ## Active Convergence Slice
-`constitute` is converging toward:
-- service-backed device rendering (`deviceKind = user|service`)
-- gateway-managed launch authorization
-- Pages-native app surfaces (`tld/<repo-name>/`)
+Current convergence work is focused on:
+- account-centered identity/session/grant authority in `constitute-account`
+- shared first-party chrome/primitives in `constitute-ui`
+- gateway-management extraction into `constitute-gateway-ui`
 - managed NVR launch into `constitute-nvr-ui`
 - WebRTC live preview as the managed browser media direction
 
@@ -173,3 +189,9 @@ Used for:
 - transport choice must not redefine trust
 - service-backed devices participate in the same identity model
 - launch context is short-lived and explicit
+
+## Current Product Boundary
+- `constitute-account` is the account-centered browser authority now
+- direct app entry is canonical
+- gateway-specific management belongs in `constitute-gateway-ui`
+- the footer account/state rail is the stable first-party account entrypoint across apps

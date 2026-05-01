@@ -4,7 +4,7 @@ import { emit, status, log, pokeUi } from './uiBus.js';
 import { ensureDevice } from './deviceStore.js';
 import { getIdentity } from './identityStore.js';
 import { handleRpc } from './rpc.js';
-import { handleRelayFrame, subscribeOnRelayOpen } from './relayIn.js';
+import { handleRelayFrame } from './relayIn.js';
 
 export function startDaemon(sw) {
   status(sw, 'identity daemon online');

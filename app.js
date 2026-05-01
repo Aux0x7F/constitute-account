@@ -1,3 +1,10 @@
+import "constitute-ui/styles.css";
+import {
+  renderActionList,
+  renderAccountCenterSummary,
+  renderFirstPartyShell,
+  setConnectionStateText,
+} from "constitute-ui";
 import { IdentityClient } from './identity/client.js';
 import {
   SHELL_BOOT_FALLBACK_TIMEOUT_MS,
@@ -7,30 +14,216 @@ import {
 } from './app/loading.js';
 import { createManagedApplianceModel } from './app/managed-appliances.js';
 
-const panePathEl = document.getElementById('panePath');
+const ACCOUNT_MAIN_HTML = `
+  <section id="viewHome" class="activity hidden">
+    <h1>Account</h1>
+    <div class="card">
+      <div class="cardTitle">Account</div>
+      <div class="kv">
+        <div class="k">Device</div>
+        <div class="v" id="deviceDidSummary"></div>
+      </div>
+      <div class="kv">
+        <div class="k">Protection</div>
+        <div class="v" id="deviceSecuritySummary"></div>
+      </div>
+      <div class="kv">
+        <div class="k">Signed in</div>
+        <div class="v" id="identityLinkedSummary"></div>
+      </div>
+    </div>
+  </section>
 
-const connWrap = document.getElementById('connWrap');
-const connStateText = document.getElementById('connStateText');
-const connPopover = document.getElementById('connPopover');
+  <section id="viewSettings" class="activity hidden">
+    <div class="tabs">
+      <button class="tab" data-tab="devices">Devices</button>
+      <button class="tab" data-tab="network">Zones</button>
+    </div>
+
+    <div id="tab_devices" class="tabpane hidden">
+      <section id="pendingRequestsSection" class="hidden">
+        <h2>Pending Requests</h2>
+        <div id="pairingList" class="list"></div>
+        <div id="pairingEmpty" class="small muted">No pending pairing requests.</div>
+      </section>
+
+      <section>
+        <h2>Add Device</h2>
+        <div class="card">
+          <div class="cardTitle">Add Device</div>
+          <div class="small muted">Enter the pairing code from a device you want to claim and link to this identity.</div>
+          <div class="row u-mt-sm">
+            <input id="pairCodeInput" type="text" placeholder="Enter code from new device" />
+            <button id="btnClaimPairCode" type="button">Claim Code</button>
+          </div>
+          <div id="pairCodeStatus" class="small muted u-mt-sm"></div>
+        </div>
+      </section>
+
+      <section>
+        <h2>This Device</h2>
+        <div class="kv">
+          <div class="k">This device DID</div>
+          <div class="v" id="deviceDid"></div>
+        </div>
+
+        <label for="deviceLabel">This device label</label>
+        <input id="deviceLabel" type="text" placeholder="device label" />
+
+        <div class="row">
+          <button id="btnSaveDeviceLabel" type="button">Save Device Label</button>
+        </div>
+
+        <h3>Linked Devices</h3>
+        <div id="deviceList" class="list"></div>
+
+        <h3>Blocked Devices</h3>
+        <div id="blockedList" class="list"></div>
+      </section>
+    </div>
+
+    <div id="tab_network" class="tabpane hidden">
+      <h2>Zones</h2>
+
+      <div class="card">
+        <div class="cardTitle">Status</div>
+        <div class="kv">
+          <div class="k">Connection</div>
+          <div class="v" id="networkStatusConnection">offline</div>
+        </div>
+        <div class="kv">
+          <div class="k">Relay</div>
+          <div class="v" id="networkStatusRelay">offline</div>
+        </div>
+        <div class="kv">
+          <div class="k">Gateway</div>
+          <div class="v" id="networkStatusGatewayMesh">unknown</div>
+        </div>
+        <div class="kv">
+          <div class="k">Services</div>
+          <div class="v" id="networkStatusServices">unknown</div>
+        </div>
+        <div class="small muted" id="networkStatusDetail">Updates automatically.</div>
+      </div>
+
+      <div class="card">
+        <div class="cardTitle">Zones</div>
+        <div class="small muted">Type a new zone name to create one, or paste a zone ID to join it.</div>
+        <div class="row u-mt-sm">
+          <input id="zoneCommandInput" type="text" placeholder="New zone name or zone ID" autocomplete="off" />
+          <button id="zoneCommandButton" type="button" disabled>Create</button>
+          <span id="zoneCommandSpinner" class="inlineSpinner hidden" aria-hidden="true"></span>
+        </div>
+        <div id="zoneCommandHelper" class="small muted u-mt-sm">Type a name to create a zone, or paste a zone ID to join one.</div>
+      </div>
+
+      <div id="zonesList" class="list"></div>
+
+      <div class="card">
+        <div class="cardTitle">Zone Devices <span id="peersCount" class="small muted"></span></div>
+        <div id="peersList" class="list"></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="viewOnboard" class="activity hidden">
+    <h1>Onboarding</h1>
+
+    <div id="obStepDevice" class="card hidden">
+      <div class="cardTitle">Step 1 — Device security</div>
+      <div class="small muted">Pick one. WebAuthn is recommended.</div>
+
+      <div class="choiceRow" role="radiogroup" aria-label="Device security method">
+        <button id="btnSecWebAuthn" type="button" class="choiceBtn" role="radio" aria-checked="false">
+          <div class="choiceTitle">WebAuthn</div>
+          <div class="choiceSub">Platform-backed key (preferred)</div>
+        </button>
+
+        <button id="btnSecSkip" type="button" class="choiceBtn" role="radio" aria-checked="false">
+          <div class="choiceTitle">Skip</div>
+          <div class="choiceSub">Software-only (fallback)</div>
+        </button>
+      </div>
+
+      <div id="obDeviceStatus" class="small muted u-mt-sm"></div>
+
+      <div class="row u-mt-md">
+        <button id="btnObDeviceContinue" type="button">Continue</button>
+      </div>
+    </div>
+
+    <div id="obStepIdentity" class="card hidden">
+      <div class="cardTitle">Step 2 — Labels</div>
+      <div class="small muted">Both are required.</div>
+
+      <label for="obDeviceLabel">Device label</label>
+      <input id="obDeviceLabel" type="text" placeholder="e.g. users-laptop" />
+
+      <label for="obIdentityLabel">Identity label</label>
+      <input id="obIdentityLabel" type="text" placeholder="e.g. some-unique-username" />
+
+      <div class="tabs u-mt-sm">
+        <button type="button" class="tab tab-active" data-mode="new">Create</button>
+        <button type="button" class="tab" data-mode="existing">Join existing</button>
+      </div>
+
+      <div id="obPairCodeWrap" class="hidden u-mt-sm">
+        <label for="obPairCode">Pairing code (recommended)</label>
+        <input id="obPairCode" type="text" placeholder="Paste code from owner device" />
+        <div class="small muted">If blank, a random code is generated and shown after request.</div>
+      </div>
+
+      <div class="row u-mt-md">
+        <button id="btnObIdentityContinue" type="button">Continue</button>
+      </div>
+
+      <div id="existingInfo" class="small muted hidden u-mt-md"></div>
+    </div>
+  </section>
+`;
+
+const app = document.getElementById("app");
+if (!app) throw new Error("#app not found");
+
+const shell = renderFirstPartyShell(app, {
+  appName: "Account",
+  navItems: [
+    { id: "home", label: "Home", active: true },
+    { id: "devices", label: "Devices" },
+    { id: "zones", label: "Zones" },
+  ],
+  mainHtml: ACCOUNT_MAIN_HTML,
+});
+
+const panePathEl = shell.panePathEl;
+
+const connWrap = shell.connWrapEl;
+const connStateText = shell.connStateTextEl;
+const connPopover = shell.connPopoverEl;
 const bootSplashEl = document.getElementById('bootSplash');
 const bootSplashTitleEl = document.getElementById('bootSplashTitle');
 const bootSplashStatusEl = document.getElementById('bootSplashStatus');
-const popConnection = document.getElementById('popConnection');
-const popConnectionReason = document.getElementById('popConnectionReason');
-const popRelay = document.getElementById('popRelay');
-const popGateway = document.getElementById('popGateway');
-const popServices = document.getElementById('popServices');
+const popConnection = shell.popConnectionEl;
+const popConnectionReason = shell.popConnectionReasonEl;
+const popRelay = shell.popRelayEl;
+const popGateway = shell.popGatewayEl;
+const popServices = shell.popServicesEl;
 
-const btnMenu = document.getElementById('btnMenu');
-const drawer = document.getElementById('drawer');
-const drawerBackdrop = document.getElementById('drawerBackdrop');
-const btnDrawerClose = document.getElementById('btnDrawerClose');
-const identityHandle = document.getElementById('identityHandle');
+const btnMenu = shell.btnMenuEl;
+const drawer = shell.drawerEl;
+const drawerBackdrop = shell.drawerBackdropEl;
+const btnDrawerClose = shell.btnDrawerCloseEl;
+const navButtons = shell.navButtons;
+const accountRailButton = shell.accountRailButtonEl;
+const accountCenterMenu = shell.accountCenterMenuEl;
+const accountCenterSummary = shell.accountCenterSummaryEl;
+const accountCenterActions = shell.accountCenterActionsEl;
+const identityHandle = shell.identityHandleEl;
 
-const btnBell = document.getElementById('btnBell');
-const notifMenu = document.getElementById('notifMenu');
-const notifList = document.getElementById('notifList');
-const btnNotifClear = document.getElementById('btnNotifClear');
+const btnBell = shell.btnBellEl;
+const notifMenu = shell.notifMenuEl;
+const notifList = shell.notifListEl;
+const btnNotifClear = shell.btnNotifClearEl;
 
 const viewHome = document.getElementById('viewHome');
 const viewSettings = document.getElementById('viewSettings');
@@ -61,33 +254,12 @@ const networkStatusGatewayMeshEl = document.getElementById('networkStatusGateway
 const networkStatusServicesEl = document.getElementById('networkStatusServices');
 const networkStatusDetailEl = document.getElementById('networkStatusDetail');
 
-// Optional app repo settings
-const appRepoInput = document.getElementById('appRepoInput');
-const btnAddAppRepo = document.getElementById('btnAddAppRepo');
-const appRepoStatus = document.getElementById('appRepoStatus');
-const appCapabilityList = document.getElementById('appCapabilityList');
-const homeAppsList = document.getElementById('homeAppsList');
-
-const btnGatewayInstallOpen = document.getElementById('btnGatewayInstallOpen');
-const gatewayInstallStatus = document.getElementById('gatewayInstallStatus');
-const gatewayInstallDetectedPlatform = document.getElementById('gatewayInstallDetectedPlatform');
-const gatewayInstallHint = document.getElementById('gatewayInstallHint');
-const gatewayInstallCommandPreview = document.getElementById('gatewayInstallCommandPreview');
-const applianceList = document.getElementById('applianceList');
-const resourceModalBackdrop = document.getElementById('resourceModalBackdrop');
-const gatewayBasicsModal = document.getElementById('gatewayBasicsModal');
-const gatewayBasicsModalTitle = document.getElementById('gatewayBasicsModalTitle');
-const gatewayBasicsModalBody = document.getElementById('gatewayBasicsModalBody');
-const gatewayBasicsModalActions = document.getElementById('gatewayBasicsModalActions');
-const btnGatewayBasicsClose = document.getElementById('btnGatewayBasicsClose');
-
 const joinDeviceLabelEl = document.getElementById('joinDeviceLabel');
 
 const deviceDidSummary = document.getElementById('deviceDidSummary');
 const deviceSecuritySummary = document.getElementById('deviceSecuritySummary');
 const identityLinkedSummary = document.getElementById('identityLinkedSummary');
 
-// Peers UI
 const zoneCommandInput = document.getElementById('zoneCommandInput');
 const zoneCommandButton = document.getElementById('zoneCommandButton');
 const zoneCommandHelper = document.getElementById('zoneCommandHelper');
@@ -96,7 +268,6 @@ const zonesList = document.getElementById('zonesList');
 const peersCount = document.getElementById('peersCount');
 const peersList = document.getElementById('peersList');
 
-// Onboarding elements
 const obStepDevice = document.getElementById('obStepDevice');
 const obStepIdentity = document.getElementById('obStepIdentity');
 const btnObDeviceContinue = document.getElementById('btnObDeviceContinue');
@@ -119,12 +290,16 @@ const SWARM_ICE_SERVERS = [
 ];
 
 const SHELL_BUILD_ID = '2026-04-06-runtime-stage3';
-const PLATFORM_RUNTIME_VERSION = Object.freeze({ major: 2, minor: 8 });
+const PLATFORM_RUNTIME_VERSION = Object.freeze({ major: 2, minor: 9 });
 const PLATFORM_RUNTIME_BUILD_ID = `runtime-${PLATFORM_RUNTIME_VERSION.major}.${PLATFORM_RUNTIME_VERSION.minor}`;
 const RUNTIME_ATTACH_TIMEOUT_MS = 15_000;
 const RUNTIME_WRITE_TIMEOUT_MS = 12_000;
 const MANAGED_LAUNCH_REQUEST_TIMEOUT_MS = 90_000;
 const GATEWAY_SIGNAL_REQUEST_TIMEOUT_MS = 135_000;
+const BROKER_READY_TIMEOUT_MS = 45_000;
+const BROKER_RELAY_READY_TIMEOUT_MS = 30_000;
+const BROKER_READY_POLL_MS = 250;
+const BROKER_RELAY_SETTLE_MS = 500;
 const DEFAULT_PUBLIC_RELAYS = Object.freeze([
   'wss://nos.lol',
   'wss://relay.primal.net',
@@ -134,8 +309,10 @@ const DEFAULT_PUBLIC_RELAYS = Object.freeze([
 let relayState = 'offline';
 let daemonState = 'unknown';
 let swarmState = 'offline';
-let identityHandleCopied = false;
+let accountCenterOpen = false;
 let bootRefreshSettled = false;
+let notificationsResolved = false;
+let lastNotifications = [];
 
 let lastDeviceState = null;
 let lastIdentity = null;
@@ -147,16 +324,7 @@ let swarm = null;
 let clientReady = false;
 let swarmBootRequested = false;
 
-const APPS_REPOS_KEY = 'constitute.apps.repos';
-const APPS_ENABLED_KEY = 'constitute.apps.enabled';
 const GATEWAY_EXTRA_ZONES_KEY = 'constitute.gateway.extraZones';
-const DEFAULT_APP_REPOS = [];
-const ROLE_APP_REPO_MAP = Object.freeze({});
-const SERVICE_APP_REPO_MAP = Object.freeze({});
-let appRepoCatalog = [];
-let appEnabledIds = new Set();
-let appLaunchHints = new Map();
-window.__constituteEnabledApps = [];
 const MANAGED_APP_SURFACES = Object.freeze({
   nvr: 'constitute-nvr-ui',
 });
@@ -168,28 +336,6 @@ const RELAY_BRIDGE_LEASE_MS = 12_000;
 const RELAY_BRIDGE_HEARTBEAT_MS = 4_000;
 const RELAY_WORKER_QUIET_TIMEOUT_MS = 1_500;
 
-const NVR_INSTALLERS = Object.freeze({
-  linux: {
-    commandBase: "curl -fsSL https://raw.githubusercontent.com/Aux0x7F/constitute-nvr/main/scripts/linux/install-latest.sh | bash -s --",
-    scriptUrl: "https://raw.githubusercontent.com/Aux0x7F/constitute-nvr/main/scripts/linux/install-latest.sh",
-  },
-});
-
-const GATEWAY_OPERATOR_UTILITY = Object.freeze({
-  windows: Object.freeze({
-    asset: 'constitute-operator-windows.zip',
-    hint: 'Extract the zip and run constitute-operator.exe.',
-  }),
-  linux: Object.freeze({
-    asset: 'constitute-operator-linux-amd64.tar.gz',
-    hint: 'Extract the tarball and run constitute-operator.',
-  }),
-});
-
-const GATEWAY_RELEASES_API = 'https://api.github.com/repos/Aux0x7F/constitute-gateway/releases?per_page=20';
-const gatewayUtilityAssetUrlCache = new Map(); // asset -> { url, tag, prerelease }
-let gatewayReleasesCache = null;
-let preparedGatewayInstall = null;
 const APPLIANCE_DISCOVERY_MAX_AGE_MS = 60 * 60 * 1000;
 
 let relayBridge = null;
@@ -208,9 +354,21 @@ let runtimeStatusSnapshot = {
 };
 let lastManagedServiceIssue = null;
 let lastRuntimeShellStatusKey = '';
+let runtimeAttachWarningLogged = false;
+let shellRuntimeSnapshotMarked = false;
 let bootSplashDismissed = false;
 const resolvedResourceNames = new Map();
 const shellBootDebugEnabled = new URLSearchParams(window.location.search || '').get('debug') === '1';
+
+function debugLog(...args) {
+  if (!shellBootDebugEnabled) return;
+  console.debug(...args);
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
+}
+
 let shellBootFallbackTimer = null;
 const managedAppliances = createManagedApplianceModel({
   applyHostedSnapshot: (record) => applyGatewayHostedSnapshot(record),
@@ -230,7 +388,6 @@ const {
   managedServicePkForRecord,
   ownedPkSet,
   partitionApplianceRecords,
-  renderApplianceList: renderManagedApplianceList,
   summarizeAppliance,
 } = managedAppliances;
 
@@ -316,8 +473,7 @@ function scheduleShellBootFallback() {
   shellBootFallbackTimer = setTimeout(() => {
     shellBootFallbackTimer = null;
     renderConnectionModel('boot-fallback');
-    renderHomeApps();
-    if (lastIdentity) renderApplianceList(lastIdentity?.devices || [], lastSwarmDevices || []);
+    pushRuntimeManagedApplianceSourceSnapshot(lastIdentity?.devices || [], lastSwarmDevices || []);
     tryDismissShellBootSplash('shell.first-paint.fallback');
   }, SHELL_BOOT_FALLBACK_TIMEOUT_MS);
 }
@@ -334,7 +490,10 @@ function bootFromRuntimeSnapshot() {
       markShellBoot('shell.runtime-attached');
     })
     .catch((err) => {
-      console.warn('[runtime] runtime attach bootstrap failed', err);
+      if (!runtimeAttachWarningLogged) {
+        runtimeAttachWarningLogged = true;
+        console.warn('[runtime] runtime attach bootstrap failed', err);
+      }
       markShellBoot('shell.runtime-attach.timeout');
     });
   return runtimeBridge;
@@ -373,7 +532,7 @@ function bootSplashCopy(reason = '') {
 
 function conciseConnectionReason(summary) {
   if (summary.code === 'connected') return 'Everything is available.';
-  if (summary.code === 'connected-limited') return 'Connected. Some services are still warming up.';
+  if (summary.code === 'connected-limited') return 'Connected. Some transport paths are still settling.';
   if (summary.code === 'degraded') return 'Connected with limited reachability.';
   if (summary.code === 'connecting') return 'Starting local and network services.';
   return 'Waiting for local services.';
@@ -400,86 +559,21 @@ function rememberResolvedResourceName(pk, label) {
 function absorbRuntimeSnapshot(snapshot) {
   runtimeStatusSnapshot = (snapshot && typeof snapshot === 'object') ? snapshot : runtimeStatusSnapshot;
   const names = runtimeStatusSnapshot?.resourceNames;
-  if (!names || typeof names !== 'object') return;
-  for (const [pk, label] of Object.entries(names)) {
-    rememberResolvedResourceName(pk, label);
+  if (names && typeof names === 'object') {
+    for (const [pk, label] of Object.entries(names)) {
+      rememberResolvedResourceName(pk, label);
+    }
   }
-  markShellBoot('shell.runtime-snapshot');
+  if (!shellRuntimeSnapshotMarked) {
+    shellRuntimeSnapshotMarked = true;
+    markShellBoot('shell.runtime-snapshot');
+  }
 }
 
 function updateBootSplash(reason = '') {
   if (bootSplashDismissed) return;
   const copy = bootSplashCopy(reason);
   setBootSplash(copy.title, copy.status);
-}
-
-function currentGatewayUtilityDownloadInfo() {
-  const platform = currentOperatorPlatform();
-  const byPlatform = GATEWAY_OPERATOR_UTILITY[platform] || null;
-  if (!byPlatform) return null;
-  const asset = String(byPlatform.asset || '').trim();
-  if (!asset) return null;
-  return {
-    platform,
-    asset,
-    fallbackUrl: `https://github.com/Aux0x7F/constitute-gateway/releases/latest/download/${asset}`,
-    hint: String(byPlatform.hint || '').trim(),
-  };
-}
-
-function pickGatewayReleaseAsset(releases, assetName) {
-  if (!Array.isArray(releases) || !assetName) return null;
-  for (const release of releases) {
-    if (release?.draft) continue;
-    const assets = Array.isArray(release?.assets) ? release.assets : [];
-    const hit = assets.find((a) => String(a?.name || '') === assetName);
-    const url = String(hit?.browser_download_url || '').trim();
-    if (url) {
-      return {
-        url,
-        tag: String(release?.tag_name || '').trim(),
-        prerelease: Boolean(release?.prerelease),
-      };
-    }
-  }
-  return null;
-}
-
-async function fetchGatewayReleases() {
-  if (Array.isArray(gatewayReleasesCache)) return gatewayReleasesCache;
-  const res = await fetch(GATEWAY_RELEASES_API, {
-    method: 'GET',
-    headers: { 'Accept': 'application/vnd.github+json' },
-    cache: 'no-store',
-  });
-  if (!res.ok) throw new Error(`GitHub releases query failed (${res.status})`);
-  const payload = await res.json();
-  gatewayReleasesCache = Array.isArray(payload) ? payload : [];
-  return gatewayReleasesCache;
-}
-
-async function resolveGatewayUtilityAssetUrl(assetName) {
-  const asset = String(assetName || '').trim();
-  if (!asset) throw new Error('missing utility asset name');
-
-  const cached = gatewayUtilityAssetUrlCache.get(asset);
-  if (cached?.url) return cached;
-
-  try {
-    const releases = await fetchGatewayReleases();
-    const match = pickGatewayReleaseAsset(releases, asset);
-    if (match?.url) {
-      gatewayUtilityAssetUrlCache.set(asset, match);
-      return match;
-    }
-  } catch {}
-
-  // Fallback for stable releases when API is blocked/rate-limited.
-  return {
-    url: `https://github.com/Aux0x7F/constitute-gateway/releases/latest/download/${asset}`,
-    tag: 'latest',
-    prerelease: false,
-  };
 }
 
 let lastSwarmDevices = [];
@@ -494,7 +588,6 @@ const sharedManagedServicesByGatewayPk = new Map();
 const ownedGatewayGrantInventoryByServiceKey = new Map();
 const managedServiceActionStates = new Map();
 const managedServiceActionTimers = new Map();
-let gatewayBasicsModalState = null;
 let gatewayExtraZonesByPk = {};
 const ZONE_KEY_RE = /^[A-Za-z0-9_-]{20}$/;
 const ZONE_COMMAND_DEBOUNCE_MS = 500;
@@ -558,13 +651,13 @@ class SwarmTransport {
       return;
     }
     this.lastPeerKey = key;
-    console.log('[swarm] peers selected', peers);
+    debugLog('[swarm] peers selected', peers);
     this.lastKnown = peers;
     this._persistLastKnown(peers);
     for (const pk of peers) {
       if (!this.peers.has(pk) && !this.connecting.has(pk) && this._canDial(pk)) {
         this.connecting.add(pk);
-        console.log('[swarm] dialing', pk);
+        debugLog('[swarm] dialing', pk);
         this._connectTo(pk).catch(() => {});
       }
     }
@@ -594,7 +687,7 @@ class SwarmTransport {
 
     pc.onicecandidate = (e) => {
       if (!e.candidate) return;
-      console.log('[swarm] ice', pk);
+      debugLog('[swarm] ice', pk);
       this._sendSignal(pk, 'ice', e.candidate).catch(() => {});
     };
 
@@ -610,7 +703,7 @@ class SwarmTransport {
 
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
-    console.log('[swarm] offer', pk);
+    debugLog('[swarm] offer', pk);
     await this._sendSignal(pk, 'offer', offer);
   }
 
@@ -634,7 +727,7 @@ class SwarmTransport {
     await pc.setRemoteDescription(new RTCSessionDescription(offer));
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
-    console.log('[swarm] answer', pk);
+    debugLog('[swarm] answer', pk);
     await this._sendSignal(pk, 'answer', answer);
   }
 
@@ -657,7 +750,7 @@ class SwarmTransport {
       this.backoff.delete(pk);
       this._recordSuccess(pk);
       this._markSeen(pk);
-      console.log('[swarm] channel open', pk);
+      debugLog('[swarm] channel open', pk);
       await this._sendRecords(dc);
       this._updateState();
     };
@@ -678,7 +771,7 @@ class SwarmTransport {
     let msg;
     try { msg = JSON.parse(String(data || '')); } catch { return; }
     this._markSeen(pk);
-    console.log('[swarm] msg', pk, msg?.type || 'unknown');
+    debugLog('[swarm] msg', pk, msg?.type || 'unknown');
     if (msg.type === 'swarm_records') {
       if (msg.identityRecord) await this.client.call('swarm.identity.put', { record: msg.identityRecord }, { timeoutMs: 20000 }).catch(() => {});
       if (msg.deviceRecord) await this.client.call('swarm.device.put', { record: msg.deviceRecord }, { timeoutMs: 20000 }).catch(() => {});
@@ -698,7 +791,7 @@ class SwarmTransport {
     const from = String(evt?.from || '').trim();
     if (!from || from === this.localPk) return;
     const t = evt?.signalType;
-    console.log('[swarm] signal', t, from);
+    debugLog('[swarm] signal', t, from);
     if (t === 'offer') return await this._acceptFrom(from, evt.data);
     if (t === 'answer') return await this._handleAnswer(from, evt.data);
     if (t === 'ice') return await this._handleIce(from, evt.data);
@@ -718,7 +811,7 @@ class SwarmTransport {
   _selectPeers(list) {
     const arr = (Array.isArray(list) ? list : [])
       .filter((rec) => {
-        const role = normalizeRole(rec?.role || rec?.nodeType || rec?.type || '');
+        const role = normalizeRole(rec?.role || rec?.type || '');
         const service = normalizeRole(rec?.service || '');
         return role === 'browser' && !service;
       })
@@ -1050,10 +1143,10 @@ function connectionSummary() {
       code = 'connected';
       label = 'Connected';
       reason = 'Owned gateway and hosted services are available.';
-      if (relay.code !== 'healthy' || gatewayMesh.code === 'idle' || browserPeerTransport.code !== 'healthy') {
+      if (relay.code !== 'healthy') {
         code = 'connected-limited';
         label = 'Connected with limits';
-        reason = services.reason || gateway.reason;
+        reason = relay.reason || services.reason || gateway.reason;
       }
     } else if (gateway.usable) {
       code = 'connected-limited';
@@ -1091,13 +1184,14 @@ function renderConnectionModel(reason = '') {
   const summary = connectionSummary();
   const conciseReason = conciseConnectionReason(summary);
   if (connStateText) {
-    connStateText.textContent = summary.label;
-    connStateText.classList.remove('connStateText-connected', 'connStateText-limited', 'connStateText-error');
-    connStateText.classList.add(connectionTextClass(summary.code));
+    setConnectionStateText(connStateText, {
+      label: summary.label,
+      toneClass: connectionTextClass(summary.code),
+    });
   }
   if (networkStatusConnectionEl) networkStatusConnectionEl.textContent = summary.label;
   if (networkStatusRelayEl) networkStatusRelayEl.textContent = summary.relay.label;
-  if (networkStatusGatewayMeshEl) networkStatusGatewayMeshEl.textContent = summary.gateway.label;
+  if (networkStatusGatewayMeshEl) networkStatusGatewayMeshEl.textContent = summary.gatewayMesh.label;
   if (networkStatusServicesEl) networkStatusServicesEl.textContent = summary.services.label;
   if (networkStatusDetailEl) {
     networkStatusDetailEl.textContent = conciseReason;
@@ -1108,6 +1202,7 @@ function renderConnectionModel(reason = '') {
   if (popRelay) popRelay.textContent = summary.relay.label;
   if (popGateway) popGateway.textContent = summary.gateway.label;
   if (popServices) popServices.textContent = summary.services.label;
+  renderAccountCenter();
 
   const runtimeShellStatus = buildRuntimeShellStatus(summary);
   const runtimeShellStatusKey = JSON.stringify(runtimeShellStatus);
@@ -1134,6 +1229,7 @@ function buildRuntimeShellStatus(summary = connectionSummary()) {
       state: daemonState,
       linked: Boolean(lastIdentity?.linked),
       identityId: String(lastIdentity?.id || '').trim(),
+      label: String(lastIdentity?.label || '').trim(),
     },
     ownedGateway: {
       state: summary.gateway.label,
@@ -1241,11 +1337,21 @@ function hasIdentityAndDevice() {
 }
 
 function showActivity(name) {
-  const target = (name === 'onboarding' && hasIdentityAndDevice()) ? 'home' : name;
+  const requested = String(name || '').trim().toLowerCase();
+  const normalized = requested === 'devices'
+    ? 'settings'
+    : (requested === 'zones' ? 'settings' : requested);
+  const target = (normalized === 'onboarding' && hasIdentityAndDevice()) ? 'home' : normalized;
   viewHome.classList.toggle('hidden', target !== 'home');
   viewSettings.classList.toggle('hidden', target !== 'settings');
   viewOnboard.classList.toggle('hidden', target !== 'onboarding');
-  panePathEl.textContent = target === 'home' ? '' : target;
+  if (requested === 'devices') setSettingsTab('devices');
+  if (requested === 'zones') setSettingsTab('network');
+  if (panePathEl) panePathEl.textContent = target === 'home' ? '' : (requested === 'devices' ? 'devices' : (requested === 'zones' ? 'zones' : target));
+  for (const button of navButtons) {
+    const activity = String(button.dataset.activity || '').trim().toLowerCase();
+    button.classList.toggle('active', activity === requested || (requested === 'home' && activity === 'home'));
+  }
 }
 
 function normalizeSettingsTabName(name) {
@@ -1276,24 +1382,105 @@ function updateIdentityChrome(ident = lastIdentity) {
   identityHandle.textContent = linked ? currentIdentityHandle() : '@unlinked';
   identityHandle.classList.toggle('identityHandle-linked', linked);
   identityHandle.classList.toggle('identityHandle-unlinked', !linked);
-  identityHandle.title = rawId
-    ? (identityHandleCopied ? 'Copied!' : 'Click to copy ID')
-    : 'Identity not linked yet';
+  identityHandle.title = rawId ? 'Open account center' : 'Identity not linked yet';
   identityHandle.setAttribute('aria-label', rawId ? `Identity ${rawId}` : 'Identity not linked');
+  renderAccountCenter();
 }
 
-function resetIdentityHandleCopyHint() {
-  if (!identityHandleCopied) return;
-  identityHandleCopied = false;
-  updateIdentityChrome(lastIdentity);
+function openAccountCenter() {
+  accountCenterOpen = true;
+  accountRailButton?.setAttribute('aria-expanded', 'true');
+  accountCenterMenu?.classList.remove('hidden');
 }
 
-
-function setAppStatus(msg, error = false) {
-  if (!appRepoStatus) return;
-  appRepoStatus.textContent = String(msg || '');
-  appRepoStatus.classList.toggle('warn', !!error);
+function closeAccountCenter() {
+  accountCenterOpen = false;
+  accountRailButton?.setAttribute('aria-expanded', 'false');
+  accountCenterMenu?.classList.add('hidden');
 }
+
+function toggleAccountCenter() {
+  if (accountCenterOpen) {
+    closeAccountCenter();
+    return;
+  }
+  openAccountCenter();
+}
+
+async function copyIdentityId() {
+  const rawId = String(lastIdentity?.id || '').trim();
+  if (!rawId) return;
+  try {
+    await navigator.clipboard.writeText(rawId);
+    addNotification('good', 'Identity copied', 'Copied linked identity ID.');
+  } catch (error) {
+    addNotification('bad', 'Identity copy failed', String(error?.message || error));
+  }
+}
+
+function renderAccountCenter() {
+  if (!accountCenterSummary || !accountCenterActions) return;
+  const rawId = String(lastIdentity?.id || '').trim();
+  const connection = String(connStateText?.textContent || 'Offline').trim() || 'Offline';
+  renderAccountCenterSummary(accountCenterSummary, {
+    handle: rawId ? currentIdentityHandle() : '@unlinked',
+    linked: Boolean(rawId),
+    connectionLabel: connection,
+    connectionToneClass: connectionTextClass(connectionSummary().code),
+  });
+  renderActionList(accountCenterActions, [
+    {
+      id: 'account.open_home',
+      label: 'Open Account Overview',
+      description: 'Show the account overview.',
+      onSelect: () => {
+        closeAccountCenter();
+        closeDrawer();
+        showActivity('home');
+      },
+    },
+    {
+      id: 'account.open_devices',
+      label: 'Open Devices',
+      description: 'Show paired and pending devices.',
+      onSelect: () => {
+        closeAccountCenter();
+        closeDrawer();
+        showActivity('devices');
+      },
+    },
+    {
+      id: 'account.open_zones',
+      label: 'Open Zones',
+      description: 'Show identity-owned zone state.',
+      onSelect: () => {
+        closeAccountCenter();
+        closeDrawer();
+        showActivity('zones');
+      },
+    },
+    {
+      id: 'account.open_notifications',
+      label: 'Open Notifications',
+      description: 'Show notifications.',
+      onSelect: () => {
+        closeAccountCenter();
+        notifMenu.classList.remove('hidden');
+      },
+    },
+    {
+      id: 'account.copy_identity',
+      label: 'Copy Identity ID',
+      description: 'Copy the linked identity ID.',
+      disabled: !rawId,
+      onSelect: () => {
+        closeAccountCenter();
+        void copyIdentityId();
+      },
+    },
+  ]);
+}
+
 
 function setPairCodeStatus(msg, error = false) {
   if (!pairCodeStatus) return;
@@ -1302,22 +1489,9 @@ function setPairCodeStatus(msg, error = false) {
 }
 
 function setGatewayInstallStatus(msg, error = false) {
-  if (!gatewayInstallStatus) return;
   const text = String(msg || '').trim();
-  gatewayInstallStatus.textContent = text;
-  gatewayInstallStatus.classList.toggle('hidden', !text);
-  gatewayInstallStatus.classList.toggle('warn', !!error);
-}
-
-function setGatewayInstallHint(msg, error = false) {
-  if (!gatewayInstallHint) return;
-  gatewayInstallHint.textContent = String(msg || '');
-  gatewayInstallHint.classList.toggle('warn', !!error);
-}
-
-function setGatewayInstallCommandPreview(msg = '') {
-  if (!gatewayInstallCommandPreview) return;
-  gatewayInstallCommandPreview.textContent = String(msg || '');
+  if (!text) return;
+  addNotification(error ? 'bad' : 'neutral', 'Gateway service update', text);
 }
 
 function randomOpaqueId(prefix = 'id') {
@@ -1354,10 +1528,7 @@ function managedAppSurfaceCandidates(repoName) {
   const target = new URL(window.location.origin);
   const primary = new URL(target);
   primary.pathname = `/${repo}/`;
-  if (!pageAllowsInsecureRelayUrls()) return [primary];
-  const dist = new URL(target);
-  dist.pathname = `/${repo}/dist/`;
-  return [dist, primary];
+  return [primary];
 }
 
 function managedSurfaceLooksBuilt(html) {
@@ -1446,6 +1617,102 @@ function createPendingRequest(map, requestId, label, timeoutMs = 20_000) {
   });
 }
 
+async function waitForBrokerCondition(predicate, timeoutMs, label) {
+  const deadline = Date.now() + Math.max(0, Number(timeoutMs) || 0);
+  while (true) {
+    if (predicate()) return true;
+    if (Date.now() >= deadline) {
+      throw new Error(`${label} is not ready`);
+    }
+    await delay(BROKER_READY_POLL_MS);
+  }
+}
+
+async function withBrokerTimeout(promise, timeoutMs, label) {
+  let timer = 0;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label} is not ready`)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function refreshBrokerCoreState() {
+  const st = lastDeviceState || await client.call('device.getState', {}, { timeoutMs: 20_000 });
+  const ident = lastIdentity || await client.call('identity.get', {}, { timeoutMs: 20_000 });
+  const myLabel = {
+    label: String(deviceLabel?.value || deviceDidSummary?.textContent || 'This device').trim() || 'This device',
+  };
+  applyCoreRefreshState({ st, ident, myLabel });
+  return { st, ident, myLabel };
+}
+
+function relayStatusPayloadForBroker() {
+  const relayUrls = Array.isArray(relayPoolSnapshot?.urls) ? relayPoolSnapshot.urls : [];
+  const relayDetails = (relayPoolSnapshot?.relays && typeof relayPoolSnapshot.relays === 'object')
+    ? relayPoolSnapshot.relays
+    : {};
+  const openCount = relaysOpenCount();
+  const state = openCount > 0 ? 'open' : (relayPoolSnapshot?.state || relayState || 'offline');
+  return {
+    state,
+    url: '',
+    urls: relayUrls,
+    relays: relayDetails,
+    code: null,
+    reason: relayPoolSnapshot?.reason || '',
+  };
+}
+
+async function syncRelayStatusForBroker() {
+  if (!clientReady || !client) return false;
+  if (relayState !== 'open' && relaysOpenCount() < 1) return false;
+  const flushed = await relayBridge?.flushBootState?.();
+  if (!flushed) {
+    await client.call('relay.status', relayStatusPayloadForBroker(), { timeoutMs: 20_000 });
+  }
+  await delay(BROKER_RELAY_SETTLE_MS);
+  return true;
+}
+
+async function ensureRuntimeBrokerReadyForLaunch() {
+  if (!client) throw new Error('account runtime is not initialized');
+
+  await client.ready();
+  clientReady = client.isServiceWorkerAvailable();
+  if (!clientReady) throw new Error('account service worker is not ready');
+
+  if (!relayBridge) {
+    relayBridge = startSharedRelayPipe(client, desiredRelayUrls(lastIdentity?.devices || [], lastSwarmDevices || []));
+  }
+
+  if (!bootRefreshSettled || !lastDeviceState || !lastIdentity) {
+    await withBrokerTimeout(refreshBrokerCoreState(), BROKER_READY_TIMEOUT_MS, 'account identity');
+    bootRefreshSettled = true;
+  }
+
+  if (!String(lastIdentity?.id || '').trim() || !String(lastIdentity?.label || '').trim()) {
+    throw new Error('link an identity before opening managed services');
+  }
+  if (!String(lastDeviceState?.pk || '').trim()) {
+    throw new Error('device key is not ready yet');
+  }
+
+  relayBridge?.updateTargets?.(desiredRelayUrls(lastIdentity?.devices || [], lastSwarmDevices || []), 'broker-launch');
+  await waitForBrokerCondition(
+    () => relayState === 'open' || relaysOpenCount() > 0,
+    BROKER_RELAY_READY_TIMEOUT_MS,
+    'account relay'
+  );
+  await syncRelayStatusForBroker();
+  return true;
+}
+
 function managedAppSurfaceRepoForService(service) {
   const key = normalizeRole(service || '');
   return MANAGED_APP_SURFACES[key] || '';
@@ -1483,6 +1750,8 @@ function startPlatformRuntimeBridge() {
     readyPromise: null,
     resolveReady: null,
     rejectReady: null,
+    attachTimedOut: false,
+    attachError: null,
     close() {
       try {
       port.postMessage({ type: 'runtime.detach', clientId });
@@ -1498,6 +1767,8 @@ function startPlatformRuntimeBridge() {
   });
   try {
     worker.onerror = (event) => {
+      bridge.attachTimedOut = true;
+      bridge.attachError = new Error(String(event?.message || 'shared worker failure'));
       bridge.rejectReady?.(new Error(String(event?.message || 'shared worker failure')));
       bridge.rejectReady = null;
       bridge.resolveReady = null;
@@ -1506,12 +1777,29 @@ function startPlatformRuntimeBridge() {
   } catch {}
   bridge.whenReady = async (timeoutMs = RUNTIME_ATTACH_TIMEOUT_MS) => {
     if (bridge.ready) return bridge.snapshot;
-    return await Promise.race([
-      bridge.readyPromise,
-      new Promise((_, reject) => {
-        window.setTimeout(() => reject(new Error('runtime.attach timed out')), timeoutMs);
-      }),
-    ]);
+    try {
+      return await Promise.race([
+        bridge.readyPromise,
+        new Promise((_, reject) => {
+          window.setTimeout(() => reject(new Error('runtime.attach timed out')), timeoutMs);
+        }),
+      ]);
+    } catch (err) {
+      bridge.attachTimedOut = true;
+      bridge.attachError = err;
+      throw err;
+    }
+  };
+
+  bridge.whenReadyQuietly = async (timeoutMs = 1000) => {
+    if (bridge.ready) return true;
+    if (bridge.attachTimedOut) return false;
+    try {
+      await bridge.whenReady(timeoutMs);
+      return bridge.ready;
+    } catch {
+      return false;
+    }
   };
 
   function runtimeCall(type, payload = {}, timeoutMs = 20_000) {
@@ -1532,19 +1820,13 @@ function startPlatformRuntimeBridge() {
     return await runtimeCall('launchContext.put', { context }, RUNTIME_WRITE_TIMEOUT_MS);
   };
   bridge.pushStatus = async (status) => {
-    await bridge.whenReady().catch((err) => {
-      console.warn('[runtime] runtime attach failed', err);
-    });
-    if (!bridge.ready) return;
+    if (!(await bridge.whenReadyQuietly())) return;
     await runtimeCall('runtime.status.put', { role: 'shell', status }, RUNTIME_WRITE_TIMEOUT_MS).catch((err) => {
       console.warn('[runtime] runtime.status.put failed', err);
     });
   };
   bridge.putManagedApplianceSourceSnapshot = async (sourceSnapshot) => {
-    await bridge.whenReady().catch((err) => {
-      console.warn('[runtime] runtime attach failed', err);
-    });
-    if (!bridge.ready) return;
+    if (!(await bridge.whenReadyQuietly())) return;
     await runtimeCall('managedAppliances.sourceSnapshot.put', { sourceSnapshot }, RUNTIME_WRITE_TIMEOUT_MS).catch((err) => {
       console.warn('[runtime] managedAppliances.sourceSnapshot.put failed', err);
     });
@@ -1555,6 +1837,8 @@ function startPlatformRuntimeBridge() {
     if (msg.type === 'runtime.attached') {
       runtimeAttached = true;
       bridge.ready = true;
+      bridge.attachTimedOut = false;
+      bridge.attachError = null;
       bridge.snapshot = msg.snapshot || null;
       absorbRuntimeSnapshot(msg.snapshot || null);
       lastManagedServiceIssue = runtimeStatusSnapshot?.managedServiceIssue || null;
@@ -1562,8 +1846,7 @@ function startPlatformRuntimeBridge() {
       bridge.resolveReady = null;
       bridge.rejectReady = null;
       renderConnectionModel();
-      renderHomeApps();
-      if (lastIdentity) renderApplianceList(lastIdentity?.devices || [], lastSwarmDevices || []);
+      if (lastIdentity) pushRuntimeManagedApplianceSourceSnapshot(lastIdentity?.devices || [], lastSwarmDevices || []);
       clearShellBootFallbackTimer();
       tryDismissShellBootSplash('shell.first-paint.snapshot');
       return;
@@ -1571,6 +1854,8 @@ function startPlatformRuntimeBridge() {
     if (msg.type === 'runtime.snapshot') {
       if (!bridge.ready) {
         bridge.ready = true;
+        bridge.attachTimedOut = false;
+        bridge.attachError = null;
         bridge.resolveReady?.(msg.snapshot || null);
         bridge.resolveReady = null;
         bridge.rejectReady = null;
@@ -1579,8 +1864,7 @@ function startPlatformRuntimeBridge() {
       absorbRuntimeSnapshot(msg.snapshot || null);
       lastManagedServiceIssue = runtimeStatusSnapshot?.managedServiceIssue || null;
       renderConnectionModel();
-      renderHomeApps();
-      if (lastIdentity) renderApplianceList(lastIdentity?.devices || [], lastSwarmDevices || []);
+      if (lastIdentity) pushRuntimeManagedApplianceSourceSnapshot(lastIdentity?.devices || [], lastSwarmDevices || []);
       clearShellBootFallbackTimer();
       tryDismissShellBootSplash('shell.first-paint.snapshot');
       return;
@@ -1590,7 +1874,11 @@ function startPlatformRuntimeBridge() {
         const kind = String(msg?.kind || '').trim();
         const responseType = kind === 'gateway.launch.request'
           ? 'gateway.launch.response'
-          : (kind === 'gateway.grant.request' ? 'gateway.grant.response' : 'gateway.signal.response');
+          : (kind === 'gateway.grant.request'
+            ? 'gateway.grant.response'
+            : (kind === 'gateway.service.install.request'
+              ? 'gateway.service.install.response'
+              : (kind === 'gateway.zones.sync.request' ? 'gateway.zones.sync.response' : 'gateway.signal.response')));
         port.postMessage({
           type: responseType,
           clientId,
@@ -1633,6 +1921,7 @@ async function handleRuntimeBrokerRequest(message) {
   if (!runtimeBridge || !requestId || !kind) return;
   const payload = message?.payload && typeof message.payload === 'object' ? message.payload : {};
   if (kind === 'gateway.signal.request') {
+    await ensureRuntimeBrokerReadyForLaunch();
     const result = await requestGatewaySignal(payload);
     runtimeBridge.port.postMessage({
       type: 'gateway.signal.response',
@@ -1669,6 +1958,28 @@ async function handleRuntimeBrokerRequest(message) {
     });
     runtimeBridge.port.postMessage({
       type: 'gateway.grant.response',
+      clientId: runtimeBridge.clientId,
+      requestId,
+      ok: true,
+      result,
+    });
+    return;
+  }
+  if (kind === 'gateway.service.install.request') {
+    const result = await requestRemoteNvrInstall(payload.record || payload);
+    runtimeBridge.port.postMessage({
+      type: 'gateway.service.install.response',
+      clientId: runtimeBridge.clientId,
+      requestId,
+      ok: true,
+      result,
+    });
+    return;
+  }
+  if (kind === 'gateway.zones.sync.request') {
+    const result = await requestGatewayZoneSync(payload.record || payload, Array.isArray(payload?.extraZoneKeys) ? payload.extraZoneKeys : []);
+    runtimeBridge.port.postMessage({
+      type: 'gateway.zones.sync.response',
       clientId: runtimeBridge.clientId,
       requestId,
       ok: true,
@@ -1937,54 +2248,6 @@ function handleGatewayRelayPayload(payload) {
   return false;
 }
 
-function detectOperatorPlatform() {
-  const ua = String(navigator.userAgent || '').toLowerCase();
-  const platform = String(navigator.platform || '').toLowerCase();
-  if (platform.includes('win') || ua.includes('windows')) return 'windows';
-  if (platform.includes('mac') || ua.includes('mac os')) return 'mac';
-  if (platform.includes('linux') || ua.includes('linux')) return 'linux';
-  return 'unknown';
-}
-
-function currentOperatorPlatform() {
-  return detectOperatorPlatform();
-}
-
-function operatorPlatformLabel() {
-  const platform = currentOperatorPlatform();
-  if (platform === 'windows') return 'Windows';
-  if (platform === 'linux') return 'Linux';
-  if (platform === 'mac') return 'macOS';
-  return 'Unknown';
-}
-
-function quoteForShell(value, shell) {
-  const raw = String(value || '');
-  if (shell === 'powershell') {
-    return `'${raw.replace(/'/g, "''")}'`;
-  }
-  return `'${raw.split("'").join("'\\''")}'`;
-}
-
-function buildGatewayOperatorInstallCommand(identityLabel) {
-  const identity = String(identityLabel || '').trim();
-  if (!identity) return '';
-
-  if (currentOperatorPlatform() === 'windows') {
-    return [
-      './constitute-operator.exe',
-      '--pair-identity', quoteForShell(identity, 'powershell'),
-      'windows-service',
-    ].join(' ');
-  }
-
-  return [
-    './constitute-operator',
-    '--pair-identity', quoteForShell(identity, 'sh'),
-    'linux-service',
-  ].join(' ');
-}
-
 function parseUdpPeer(endpoint) {
   const raw = String(endpoint || '').trim();
   if (!raw) return '';
@@ -2091,9 +2354,6 @@ async function prepareInstallEnrollment(target = 'device') {
 }
 
 async function prepareNvrInstallContext(record) {
-  const installer = currentNvrInstaller();
-  if (!installer?.commandBase) throw new Error('no nvr installer configured');
-
   const identityId = String(lastIdentity?.id || '').trim();
   if (!identityId || !String(lastIdentity?.label || '').trim()) {
     throw new Error('link an identity before installing NVR');
@@ -2113,22 +2373,12 @@ async function prepareNvrInstallContext(record) {
   const enrollment = await prepareInstallEnrollment('nvr');
 
   const gatewayHost = gatewayPeer.split(':')[0];
-  const defaultWs = gatewayHost ? `ws://${gatewayHost}:8456/session` : 'ws://127.0.0.1:8456/session';
-  const swarmPeers = [gatewayPeer, '127.0.0.1:4040'].filter((v, i, arr) => v && arr.indexOf(v) === i);
-
-  const command = buildNvrInstallCommand({
-    identityId,
-    enrollment,
-    zoneKeys: zones,
-    swarmPeers,
-    publicWsUrl: defaultWs,
-  });
+  const publicWsUrl = gatewayHost ? `ws://${gatewayHost}:8456/session` : 'ws://127.0.0.1:8456/session';
 
   return {
-    installer,
-    command,
     enrollment,
     gatewayPeer,
+    publicWsUrl,
     zones,
   };
 }
@@ -2178,9 +2428,6 @@ async function requestRemoteNvrInstall(record) {
   const identityId = String(lastIdentity?.id || '').trim();
   if (!identityId) throw new Error('identity is not linked');
 
-  const gatewayHost = String(prepared.gatewayPeer || '').split(':')[0] || '';
-  const publicWsUrl = gatewayHost ? `ws://${gatewayHost}:8456/session` : 'ws://127.0.0.1:8456/session';
-
   const payload = {
     gatewayDevicePk: gatewayPk,
     service: 'nvr',
@@ -2193,8 +2440,8 @@ async function requestRemoteNvrInstall(record) {
     zoneKeys: prepared.zones,
     authorizedDevicePks: collectAuthorizedIdentityDevicePks(),
     swarmPeers: [prepared.gatewayPeer, '127.0.0.1:4040'].filter((v, i, arr) => v && arr.indexOf(v) === i),
-    publicWsUrl,
-    allowUnsignedHelloMvp: true,
+    publicWsUrl: prepared.publicWsUrl,
+    allowUnsignedDebugHello: true,
     reolinkAutoprovision: true,
     timeoutSecs: 900,
   };
@@ -2214,71 +2461,8 @@ async function requestRemoteNvrInstall(record) {
   };
 }
 
-
-function updateGatewayInstallHint() {
-  if (gatewayInstallDetectedPlatform) {
-    gatewayInstallDetectedPlatform.textContent = `Detected operator platform: ${operatorPlatformLabel()}.`;
-  }
-
-  const info = currentGatewayUtilityDownloadInfo();
-  if (!info) {
-    setGatewayInstallHint(`Installer utility is not available for ${operatorPlatformLabel()} operators yet.`, true);
-    setGatewayInstallCommandPreview('');
-    return;
-  }
-
-  const hintParts = [
-    'Download the native operator utility from releases.',
-    'Installer generates a one-time pairing code during first install when identity pairing is configured.',
-    'Copy that code into Settings > Devices > Add Device to claim and approve.',
-    'This path installs/updates gateway services only (no OS image/media generation).',
-    info.hint,
-  ].filter(Boolean);
-
-  setGatewayInstallHint(hintParts.join(' '));
-
-  if (preparedGatewayInstall?.command) {
-    setGatewayInstallCommandPreview(preparedGatewayInstall.command);
-  } else {
-    setGatewayInstallCommandPreview('# click "Download Installer Utility" to generate install command');
-  }
-}
-
-async function ensureNvrAppEnabledFromRecord(record) {
-  const hint = serviceModuleHints(record) || {
-    owner: 'Aux0x7F',
-    repo: 'constitute-nvr-ui',
-    repoUrl: 'https://github.com/Aux0x7F/constitute-nvr-ui',
-    manifestUrl: '',
-    sessionWsUrl: String(record?.sessionWsUrl || record?.session_ws_url || record?.publicWsUrl || '').trim(),
-    allowUnsignedHelloMvp: Boolean(record?.allowUnsignedHelloMvp || record?.allow_unsigned_hello_mvp || false),
-  };
-
-  const changed = await ensureAppRepoEnabledByUrl(hint.repoUrl, {
-    manifestUrl: hint.manifestUrl,
-  });
-
-  if (hint.sessionWsUrl || hint.allowUnsignedHelloMvp) {
-    const key = repoKey(hint.owner, hint.repo);
-    const launchHint = {};
-    if (hint.sessionWsUrl) launchHint.ws = hint.sessionWsUrl;
-    if (hint.allowUnsignedHelloMvp) launchHint.insecure = true;
-    appLaunchHints.set(key, launchHint);
-  }
-
-  if (changed) {
-    saveAppPrefs();
-    publishEnabledApps();
-    renderAppCatalog();
-  }
-
-  return appRepoCatalog.find((entry) =>
-    String(entry?.owner || '').toLowerCase() === String(hint.owner || '').toLowerCase() &&
-    String(entry?.repo || '').toLowerCase() === String(hint.repo || '').toLowerCase()
-  ) || null;
-}
-
 async function requestGatewayManagedLaunch(record, opts = {}) {
+  await ensureRuntimeBrokerReadyForLaunch();
   const gatewayPk = managedGatewayPkForRecord(record);
   const servicePk = managedServicePkForRecord(record);
   const service = String(opts?.service || record?.service || 'nvr').trim() || 'nvr';
@@ -2365,7 +2549,7 @@ function managedServiceActionKey(record) {
 
 function rerenderManagedDevices() {
   if (!lastIdentity) return;
-  renderApplianceList(lastIdentity?.devices || [], lastSwarmDevices || []);
+  pushRuntimeManagedApplianceSourceSnapshot(lastIdentity?.devices || [], lastSwarmDevices || []);
 }
 
 function clearManagedServiceActionTimer(key) {
@@ -2535,25 +2719,6 @@ async function refreshGatewayGrantViews(identityDevices, swarmDevices) {
   }
 }
 
-function launchAppWindow(app) {
-  const base = appLaunchUrl(app);
-  if (!base) {
-    setAppStatus('No launch URL available for this app.', true);
-    return;
-  }
-  try {
-    const target = new URL(base);
-    const ctx = appLaunchContextQuery(app);
-    if (ctx) {
-      const combined = target.search ? `${target.search}&${ctx}` : `?${ctx}`;
-      target.search = combined;
-    }
-    window.open(target.toString(), '_blank', 'noopener,noreferrer');
-  } catch {
-    setAppStatus('App launch URL is invalid.', true);
-  }
-}
-
 function managedPopupSplashHtml(title = 'Connecting', status = '') {
   const nextStatus = String(status || '').trim();
   return `<!doctype html>
@@ -2664,7 +2829,7 @@ async function launchNvrControlPanel(record, opts = {}) {
 
     const launchId = randomOpaqueId('launch');
     if (!runtimeBridge?.putLaunchContext) {
-      throw new Error('shared browser runtime is unavailable; reload Constitute and try again');
+      throw new Error('shared browser runtime is unavailable; reload Constitute Account and try again');
     }
     const context = {
       launchId,
@@ -2716,95 +2881,6 @@ async function launchNvrControlPanel(record, opts = {}) {
   }
 }
 
-function closeGatewayBasicsModal() {
-  gatewayBasicsModalState = null;
-  gatewayBasicsModal?.classList.add('hidden');
-  resourceModalBackdrop?.classList.add('hidden');
-  if (gatewayBasicsModalActions) gatewayBasicsModalActions.innerHTML = '';
-  if (gatewayBasicsModalBody) gatewayBasicsModalBody.innerHTML = '';
-}
-
-function addGatewayBasicsAction(label, onClick, extraClass = '') {
-  if (typeof onClick !== 'function' || !gatewayBasicsModalActions) return;
-  const button = document.createElement('button');
-  button.type = 'button';
-  button.textContent = label;
-  if (extraClass) button.className = extraClass;
-  button.addEventListener('click', () => {
-    Promise.resolve(onClick()).catch((err) => {
-      setGatewayInstallStatus(`Gateway action failed: ${String(err?.message || err)}`, true);
-    });
-  });
-  gatewayBasicsModalActions.appendChild(button);
-}
-
-function openGatewayBasicsModal(spec = {}) {
-  gatewayBasicsModalState = spec;
-  if (!gatewayBasicsModal || !resourceModalBackdrop || !gatewayBasicsModalTitle || !gatewayBasicsModalBody || !gatewayBasicsModalActions) {
-    return;
-  }
-  const info = spec.info || {};
-  const hostedNvr = spec.hostedNvr || null;
-  const freshness = spec.freshness || {};
-  const last = String(spec.last || '').trim() || 'n/a';
-  const hostedServices = Array.isArray(info.hostedServices) ? info.hostedServices : [];
-  const hostedSummary = hostedServices.length > 0
-    ? hostedServices.map((service) => String(service?.service || 'service')).join(', ')
-    : 'none detected';
-  gatewayBasicsModalTitle.textContent = String(info.title || 'Gateway').trim() || 'Gateway';
-  gatewayBasicsModalBody.innerHTML = `
-    <section class="modalSection">
-      <div class="modalSectionTitle">Status</div>
-      <div class="kv">
-        <div class="k">Freshness</div>
-        <div class="v">${escapeHtml(String(freshness.label || 'unknown'))} • ${escapeHtml(formatRelativeTime(spec.seenAt || 0))}</div>
-      </div>
-      <div class="kv">
-        <div class="k">Last update</div>
-        <div class="v">${escapeHtml(last)}</div>
-      </div>
-      <div class="kv">
-        <div class="k">Platform</div>
-        <div class="v">${escapeHtml(String(info.hostPlatform || 'unknown'))}</div>
-      </div>
-      <div class="kv">
-        <div class="k">Release</div>
-        <div class="v">${escapeHtml(formatReleaseMeta(info.releaseChannel, info.releaseTrack, info.releaseBranch) || 'unknown')}</div>
-      </div>
-    </section>
-
-    <section class="modalSection">
-      <div class="modalSectionTitle">Hosted Services</div>
-      <div class="kv">
-        <div class="k">Detected</div>
-        <div class="v">${escapeHtml(hostedSummary)}</div>
-      </div>
-      <div class="kv">
-        <div class="k">Security Cameras</div>
-        <div class="v">${hostedNvr ? 'Installed and discoverable.' : 'Not installed yet.'}</div>
-      </div>
-    </section>
-
-    <section class="modalSection">
-      <div class="modalSectionTitle">Gateway Scope</div>
-      <div class="small muted">Gateway settings stay gateway-specific here. NVR and camera settings live on the Security Cameras surface.</div>
-      <div class="small muted" style="margin-top:0.55rem;">Roadmap: a dedicated Gateway Management app will own richer configuration, statistics, graphs, service lifecycle, and host OS management later.</div>
-    </section>
-  `;
-  gatewayBasicsModalActions.innerHTML = '';
-  addGatewayBasicsAction('Configure Zones', spec.onConfigureZones);
-  if (hostedNvr && typeof spec.onOpenNvr === 'function') {
-    addGatewayBasicsAction('Open Security Cameras', async () => {
-      closeGatewayBasicsModal();
-      await spec.onOpenNvr();
-    }, 'ok');
-  } else if (!hostedNvr && typeof spec.onInstallNvr === 'function') {
-    addGatewayBasicsAction('Install NVR Service', spec.onInstallNvr);
-  }
-  gatewayBasicsModal.classList.remove('hidden');
-  resourceModalBackdrop.classList.remove('hidden');
-}
-
 function shouldRefreshGatewayInventory(gatewayPk) {
   const pk = String(gatewayPk || '').trim();
   if (!pk) return false;
@@ -2842,7 +2918,6 @@ async function refreshManagedApplianceProjection(opts = {}) {
   if (refreshGrantViews) {
     await refreshGatewayGrantViews(lastIdentity?.devices || [], lastSwarmDevices).catch(() => {});
   }
-  renderApplianceList(lastIdentity?.devices || [], lastSwarmDevices);
   pushRuntimeManagedApplianceSourceSnapshot(lastIdentity?.devices || [], lastSwarmDevices);
   renderConnectionModel('managed inventory refresh');
   return lastSwarmDevices;
@@ -2923,36 +2998,6 @@ async function resolveManagedServiceForLaunch(record, opts = {}) {
   throw new Error(`${serviceLabel} is not available right now. ${detail}`.trim());
 }
 
-function renderApplianceList(identityDevices, swarmDevices) {
-  const applianceRecords = currentManagedApplianceRecords(identityDevices, swarmDevices);
-  renderManagedApplianceList({
-    applianceList,
-    identityDevices,
-    swarmDevices,
-    applianceRecords,
-    ownedDevicePks: identityOwnedDevicePks(),
-    gatewayInventoryStableAt,
-    showActivity,
-    setSettingsTab,
-    setPairCodeStatus,
-    gatewayExtraZonesForPk,
-    parseZoneKeyList,
-    setGatewayExtraZonesForPk,
-    requestGatewayZoneSync,
-    setGatewayInstallStatus,
-    requestRemoteNvrInstall,
-    launchNvrControlPanel,
-    openGatewayBasicsModal,
-    escapeHtml,
-    describeResourceName: describeShellResourceName,
-    getManagedServiceActionState: managedServiceActionStateForRecord,
-    grantedRecords: grantedManagedServiceRecords(),
-    getGrantInventoryForService,
-    requestGatewayGrantAction,
-    isGrantedRecord: (record) => record?.sharedProjection === true || record?.grantedRecord === true,
-  });
-}
-
 function pushRuntimeManagedApplianceSourceSnapshot(identityDevices, swarmDevices) {
   if (!runtimeBridge?.putManagedApplianceSourceSnapshot) return;
   runtimeBridge.putManagedApplianceSourceSnapshot({
@@ -2965,59 +3010,6 @@ function pushRuntimeManagedApplianceSourceSnapshot(identityDevices, swarmDevices
 
 function publishRuntimeManagedApplianceState() {
   pushRuntimeManagedApplianceSourceSnapshot(lastIdentity?.devices || [], lastSwarmDevices || []);
-}
-
-function loadAppPrefs() {
-  try {
-    const rawRepos = localStorage.getItem(APPS_REPOS_KEY);
-    const parsedRepos = rawRepos ? JSON.parse(rawRepos) : [];
-    if (Array.isArray(parsedRepos)) appRepoCatalog = parsedRepos;
-  } catch {}
-
-  if (!Array.isArray(appRepoCatalog) || appRepoCatalog.length === 0) {
-    appRepoCatalog = DEFAULT_APP_REPOS.map((url) => ({ url }));
-  }
-
-  try {
-    const rawEnabled = localStorage.getItem(APPS_ENABLED_KEY);
-    const arr = rawEnabled ? JSON.parse(rawEnabled) : [];
-    appEnabledIds = new Set(Array.isArray(arr) ? arr.map(String) : []);
-  } catch {
-    appEnabledIds = new Set();
-  }
-}
-
-function saveAppPrefs() {
-  try {
-    localStorage.setItem(APPS_REPOS_KEY, JSON.stringify(appRepoCatalog));
-    localStorage.setItem(APPS_ENABLED_KEY, JSON.stringify(Array.from(appEnabledIds)));
-  } catch {}
-}
-
-function enabledAppManifests() {
-  return appRepoCatalog
-    .filter((app) => !app.unresolved)
-    .filter((app) => appEnabledIds.has(String(app.id || `${app.owner}/${app.repo}`)));
-}
-
-function publishEnabledApps() {
-  const enabled = enabledAppManifests().map((app) => ({
-    id: String(app.id || ''),
-    label: String(app.label || ''),
-    owner: String(app.owner || ''),
-    repo: String(app.repo || ''),
-    ref: String(app.ref || ''),
-    url: String(app.url || ''),
-    entry: String(app.entry || 'index.html'),
-    capabilities: Array.isArray(app.capabilities) ? app.capabilities.map(String) : [],
-    version: String(app.version || ''),
-    description: String(app.description || ''),
-    manifestUrl: String(app.manifestUrl || ''),
-    launchUrl: String(app.launchUrl || ''),
-  }));
-  window.__constituteEnabledApps = enabled;
-  window.dispatchEvent(new CustomEvent('constitute.apps.updated', { detail: { enabled } }));
-  renderHomeApps();
 }
 
 function normalizeRole(value) {
@@ -3080,613 +3072,6 @@ function desiredRelayUrls(identityDevices = [], swarmDevices = []) {
   return out;
 }
 
-function repoKey(owner, repo) {
-  return `${String(owner || '').trim().toLowerCase()}/${String(repo || '').trim().toLowerCase()}`;
-}
-
-function findAppIndexByRepo(owner, repo) {
-  const o = String(owner || '').trim().toLowerCase();
-  const r = String(repo || '').trim().toLowerCase();
-  return appRepoCatalog.findIndex((entry) =>
-    String(entry?.owner || '').trim().toLowerCase() === o &&
-    String(entry?.repo || '').trim().toLowerCase() === r
-  );
-}
-
-function findAppIndexByManifestUrl(url) {
-  const target = String(url || '').trim();
-  if (!target) return -1;
-  return appRepoCatalog.findIndex((entry) => String(entry?.manifestUrl || '').trim() === target);
-}
-
-function parseGitHubRepoInput(value) {
-  const raw = String(value || '').trim();
-  if (!raw) return null;
-
-  const shorthand = raw.match(/^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)(?:@([A-Za-z0-9._\/-]+))?$/);
-  if (shorthand) {
-    const owner = shorthand[1];
-    const repo = shorthand[2];
-    const ref = String(shorthand[3] || 'main').trim() || 'main';
-    return {
-      owner,
-      repo,
-      ref,
-      url: `https://github.com/${owner}/${repo}/tree/${ref}`,
-    };
-  }
-
-  let candidate = raw;
-  if (!/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(candidate)) {
-    candidate = candidate.replace(/^github\.com\//i, 'https://github.com/');
-    if (!/^https?:\/\//i.test(candidate)) candidate = `https://${candidate}`;
-  }
-
-  let u;
-  try {
-    u = new URL(candidate);
-  } catch {
-    return null;
-  }
-
-  if (!/^(www\.)?github\.com$/i.test(u.hostname)) return null;
-
-  const parts = u.pathname.replace(/^\/+|\/+$/g, '').split('/').filter(Boolean);
-  if (parts.length < 2) return null;
-
-  const owner = parts[0];
-  const repo = String(parts[1] || '').replace(/\.git$/i, '');
-  if (!owner || !repo) return null;
-
-  let ref = 'main';
-  if (parts[2] === 'tree' && parts[3]) {
-    ref = decodeURIComponent(parts[3]);
-  }
-  ref = String(ref || 'main').trim() || 'main';
-
-  return {
-    owner,
-    repo,
-    ref,
-    url: `https://github.com/${owner}/${repo}/tree/${ref}`,
-  };
-}
-
-function buildAppManifestCandidateUrls(parsed, opts = {}) {
-  const owner = String(parsed?.owner || '').trim();
-  const repo = String(parsed?.repo || '').trim();
-  const ref = String(parsed?.ref || 'main').trim() || 'main';
-  if (!owner || !repo) return [];
-
-  const candidates = [];
-  const explicit = String(opts?.manifestUrl || '').trim();
-  if (explicit) candidates.push(explicit);
-
-  const base = `https://cdn.jsdelivr.net/gh/${owner}/${repo}@${ref}`;
-  candidates.push(`${base}/app.manifest.json`);
-  candidates.push(`${base}/manifest.json`);
-  candidates.push(`https://raw.githubusercontent.com/${owner}/${repo}/${ref}/app.manifest.json`);
-  candidates.push(`https://raw.githubusercontent.com/${owner}/${repo}/${ref}/manifest.json`);
-
-  return Array.from(new Set(candidates));
-}
-
-async function fetchJson(url) {
-  const res = await fetch(url, { method: 'GET', cache: 'no-store' });
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-  return await res.json();
-}
-
-async function fetchAppManifest(parsed, opts = {}) {
-  const owner = String(parsed?.owner || '').trim();
-  const repo = String(parsed?.repo || '').trim();
-  const ref = String(parsed?.ref || 'main').trim() || 'main';
-  if (!owner || !repo) throw new Error('invalid repo input');
-
-  const candidates = buildAppManifestCandidateUrls(parsed, opts);
-  if (candidates.length === 0) throw new Error('no manifest candidates');
-
-  let payload = null;
-  let manifestUrl = '';
-  let lastErr = null;
-  for (const url of candidates) {
-    try {
-      payload = await fetchJson(url);
-      manifestUrl = url;
-      break;
-    } catch (err) {
-      lastErr = err;
-    }
-  }
-
-  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
-    throw new Error(`manifest unavailable (${String(lastErr?.message || 'not found')})`);
-  }
-
-  const id = String(payload.id || `${owner}/${repo}`).trim();
-  const label = String(payload.label || payload.name || repo).trim() || repo;
-  const entry = String(payload.entry || 'index.html').trim() || 'index.html';
-  const url = String(payload.url || `https://github.com/${owner}/${repo}/tree/${ref}`).trim();
-  const launchUrl = String(payload.launchUrl || payload.launch_url || '').trim();
-  const description = String(payload.description || '').trim();
-  const version = String(payload.version || '').trim();
-  const capabilities = Array.isArray(payload.capabilities) ? payload.capabilities.map(String) : [];
-
-  return {
-    id,
-    label,
-    owner,
-    repo,
-    ref,
-    url,
-    entry,
-    launchUrl,
-    description,
-    version,
-    capabilities,
-    manifestUrl,
-  };
-}
-
-function parseServiceRepoHint(value, repoRef = 'main') {
-  const raw = String(value || '').trim();
-  if (!raw) return null;
-
-  if (/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(raw)) {
-    const [owner, repo] = raw.split('/');
-    const ref = String(repoRef || 'main').trim() || 'main';
-    return {
-      owner,
-      repo,
-      ref,
-      url: `https://github.com/${owner}/${repo}/tree/${ref}`,
-    };
-  }
-
-  const parsed = parseGitHubRepoInput(raw);
-  if (!parsed) return null;
-  if (repoRef && parsed.ref === 'main') {
-    parsed.ref = String(repoRef).trim() || parsed.ref;
-    parsed.url = `https://github.com/${parsed.owner}/${parsed.repo}/tree/${parsed.ref}`;
-  }
-  return parsed;
-}
-
-async function ensureAppRepoEnabledByUrl(url, opts = {}) {
-  const parsed = parseGitHubRepoInput(url);
-  if (!parsed) return false;
-
-  const existingIdx = findAppIndexByRepo(parsed.owner, parsed.repo);
-  const manifestUrl = String(opts?.manifestUrl || '').trim();
-
-  if (existingIdx >= 0) {
-    const existing = appRepoCatalog[existingIdx];
-    const existingId = String(existing?.id || `${existing?.owner}/${existing?.repo}`);
-    if (existing?.unresolved) {
-      try {
-        const manifest = await fetchAppManifest(parsed, { manifestUrl });
-        appRepoCatalog[existingIdx] = manifest;
-        appEnabledIds.delete(existingId);
-        appEnabledIds.add(String(manifest.id || `${manifest.owner}/${manifest.repo}`));
-        return true;
-      } catch {
-        return false;
-      }
-    }
-    let changed = false;
-    if (manifestUrl && String(existing?.manifestUrl || '').trim() !== manifestUrl) {
-      existing.manifestUrl = manifestUrl;
-      changed = true;
-    }
-    if (!appEnabledIds.has(existingId)) {
-      appEnabledIds.add(existingId);
-      changed = true;
-    }
-    return changed;
-  }
-
-  if (manifestUrl) {
-    const byManifestIdx = findAppIndexByManifestUrl(manifestUrl);
-    if (byManifestIdx >= 0) {
-      const existing = appRepoCatalog[byManifestIdx];
-      const existingId = String(existing?.id || `${existing?.owner}/${existing?.repo}`);
-      if (!appEnabledIds.has(existingId)) {
-        appEnabledIds.add(existingId);
-        return true;
-      }
-      return false;
-    }
-  }
-
-  try {
-    const manifest = await fetchAppManifest(parsed, { manifestUrl });
-    appRepoCatalog.push(manifest);
-    appEnabledIds.add(String(manifest.id || `${manifest.owner}/${manifest.repo}`));
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function serviceModuleHints(rec) {
-  const uiRepo = String(rec?.uiRepo || rec?.ui_repo || '').trim();
-  const uiRef = String(rec?.uiRef || rec?.ui_ref || rec?.['ref'] || '').trim() || 'main';
-  const uiManifestUrl = String(rec?.uiManifestUrl || rec?.ui_manifest_url || '').trim();
-
-  if (!uiRepo && !uiManifestUrl) return null;
-
-  const parsedRepo = parseServiceRepoHint(uiRepo, uiRef);
-  if (!parsedRepo) return null;
-
-  const sessionWsUrl = String(rec?.sessionWsUrl || rec?.session_ws_url || rec?.publicWsUrl || '').trim();
-  const allowUnsignedHelloMvp = Boolean(
-    rec?.allowUnsignedHelloMvp || rec?.allow_unsigned_hello_mvp || false
-  );
-
-  return {
-    owner: parsedRepo.owner,
-    repo: parsedRepo.repo,
-    repoUrl: parsedRepo.url,
-    manifestUrl: uiManifestUrl,
-    sessionWsUrl,
-    allowUnsignedHelloMvp,
-  };
-}
-
-async function autoEnableAppsForIdentityDeviceRoles(identityDevices, swarmDevices) {
-  const identityPks = new Set(
-    (Array.isArray(identityDevices) ? identityDevices : [])
-      .map((d) => String(d?.pk || d?.devicePk || '').trim())
-      .filter(Boolean)
-  );
-  if (identityPks.size === 0) return;
-
-  const roles = new Set();
-  const services = new Set();
-  const directHints = [];
-  for (const rec of (Array.isArray(swarmDevices) ? swarmDevices : [])) {
-    const pk = String(rec?.devicePk || rec?.pk || '').trim();
-    if (!identityPks.has(pk)) continue;
-    const role = normalizeRole(rec?.role || rec?.nodeType || rec?.type || '');
-    if (role) roles.add(role);
-    const service = normalizeRole(rec?.service || '');
-    if (service) services.add(service);
-
-    const hint = serviceModuleHints(rec);
-    if (hint) directHints.push(hint);
-  }
-
-  const repoTargets = [];
-  const launchHints = new Map();
-  if (directHints.length > 0) {
-    for (const hint of directHints) {
-      repoTargets.push(hint);
-      const key = repoKey(hint.owner, hint.repo);
-      if (key !== '/') {
-        const launchHint = {};
-        if (hint.sessionWsUrl) launchHint.ws = hint.sessionWsUrl;
-        if (hint.allowUnsignedHelloMvp) launchHint.insecure = true;
-        if (Object.keys(launchHint).length > 0) {
-          launchHints.set(key, launchHint);
-        }
-      }
-    }
-  } else {
-    const fallbackRepoUrls = new Set();
-    for (const role of roles) {
-      const mapped = ROLE_APP_REPO_MAP[role] || [];
-      for (const u of mapped) fallbackRepoUrls.add(u);
-    }
-    for (const service of services) {
-      const mapped = SERVICE_APP_REPO_MAP[service] || [];
-      for (const u of mapped) fallbackRepoUrls.add(u);
-    }
-    for (const repoUrl of fallbackRepoUrls) {
-      repoTargets.push({ repoUrl, manifestUrl: '' });
-    }
-  }
-
-  if (repoTargets.length === 0) return;
-
-  if (launchHints.size > 0) {
-    appLaunchHints = launchHints;
-  }
-
-  const dedupe = new Set();
-  let changed = false;
-  for (const target of repoTargets) {
-    const key = `${target.repoUrl}@@${target.manifestUrl || ''}`;
-    if (dedupe.has(key)) continue;
-    dedupe.add(key);
-    const didChange = await ensureAppRepoEnabledByUrl(target.repoUrl, {
-      manifestUrl: target.manifestUrl,
-    });
-    changed = changed || didChange;
-  }
-
-  if (changed) {
-    saveAppPrefs();
-    publishEnabledApps();
-    renderAppCatalog();
-    renderHomeApps();
-    setAppStatus('Auto-enabled app repos from detected service records.');
-  }
-}
-function renderAppCatalog() {
-  clear(appCapabilityList);
-  if (!appCapabilityList) return;
-
-  if (!Array.isArray(appRepoCatalog) || appRepoCatalog.length === 0) {
-    const d = document.createElement('div');
-    d.className = 'small muted';
-    d.textContent = 'No app repos configured.';
-    appCapabilityList.appendChild(d);
-    return;
-  }
-
-  for (const app of appRepoCatalog) {
-    const id = String(app.id || `${app.owner}/${app.repo}`);
-    const row = document.createElement('div');
-    row.className = 'item appItem';
-
-    const label = document.createElement('label');
-    label.className = 'appItemLabel';
-
-    const cb = document.createElement('input');
-    cb.type = 'checkbox';
-    cb.checked = appEnabledIds.has(id);
-    cb.disabled = !!app.unresolved;
-    cb.onchange = () => {
-      if (cb.checked) appEnabledIds.add(id);
-      else appEnabledIds.delete(id);
-      saveAppPrefs();
-      publishEnabledApps();
-      setAppStatus(`${app.label} ${cb.checked ? 'enabled' : 'disabled'}.`);
-    };
-
-    const text = document.createElement('div');
-    const title = document.createElement('strong');
-    title.textContent = app.unresolved ? `${app.label} (manifest unavailable)` : app.label;
-    const meta = document.createElement('div');
-    meta.className = 'small muted';
-    const parts = [`${app.owner}/${app.repo}@${app.ref}`];
-    if (app.description) parts.push(app.description);
-    meta.textContent = parts.join(' - ');
-    text.appendChild(title);
-    text.appendChild(meta);
-
-    label.appendChild(cb);
-    label.appendChild(text);
-
-    const btnRemove = document.createElement('button');
-    btnRemove.type = 'button';
-    btnRemove.textContent = 'Remove';
-    btnRemove.onclick = () => {
-      appRepoCatalog = appRepoCatalog.filter((x) => String(x.id || `${x.owner}/${x.repo}`) !== id);
-      appEnabledIds.delete(id);
-      saveAppPrefs();
-      publishEnabledApps();
-      renderAppCatalog();
-      setAppStatus(`Removed ${app.label}.`);
-    };
-
-    row.appendChild(label);
-    row.appendChild(btnRemove);
-    appCapabilityList.appendChild(row);
-  }
-}
-
-function appLaunchUrl(app) {
-  const explicit = String(app?.launchUrl || '').trim();
-  if (explicit && /^https:\/\//.test(explicit)) return explicit;
-
-  const owner = String(app?.owner || '').trim();
-  const repo = String(app?.repo || '').trim();
-  const ref = String(app?.ref || 'main').trim() || 'main';
-  const entry = String(app?.entry || 'index.html').replace(/^\/+/, '');
-  if (!owner || !repo || !entry) return '';
-
-  return `https://cdn.jsdelivr.net/gh/${owner}/${repo}@${ref}/${entry}`;
-}
-
-function appLaunchContextQuery(app) {
-  const q = new URLSearchParams();
-  const identityId = String(lastIdentity?.id || '').trim();
-  const devicePk = String(lastDeviceState?.pk || '').trim();
-  if (identityId) q.set('identityId', identityId);
-  if (devicePk) q.set('devicePk', devicePk);
-
-  const key = repoKey(app?.owner, app?.repo);
-  const hint = appLaunchHints.get(key);
-  if (hint?.ws) q.set('ws', String(hint.ws));
-  if (hint?.insecure) q.set('insecure', '1');
-  q.set('autoconnect', '1');
-
-  return q.toString();
-}
-
-function renderHomeApps() {
-  clear(homeAppsList);
-  if (!homeAppsList) return;
-
-  const apps = enabledAppManifests().filter((app) => !isManagedFirstPartyApp(app));
-  const managedServices = currentManagedApplianceRecords(lastIdentity?.devices || [], lastSwarmDevices)
-    .filter((rec) => isNvrRecord(rec))
-    .filter((rec) => {
-      const pk = String(rec?.devicePk || rec?.pk || '').trim();
-      const hostGatewayPk = String(rec?.hostGatewayPk || rec?.host_gateway_pk || '').trim();
-      const owned = ownedPkSet(lastIdentity?.devices || []);
-      return owned.has(pk) || owned.has(hostGatewayPk) || rec?.sharedProjection === true || rec?.grantedRecord === true;
-    });
-  if (!apps.length && !managedServices.length) {
-    const d = document.createElement('div');
-    d.className = 'small muted';
-    d.textContent = 'No apps available yet. Install or pair a managed service from Devices.';
-    homeAppsList.appendChild(d);
-  }
-
-  for (const app of apps) {
-    const row = document.createElement('div');
-    row.className = 'item appItem';
-
-    const left = document.createElement('div');
-    left.className = 'appItemLabel';
-
-    const text = document.createElement('div');
-    const title = document.createElement('strong');
-    title.textContent = app.label || app.id || 'App';
-
-    const meta = document.createElement('div');
-    meta.className = 'small muted';
-    const parts = [`${app.owner}/${app.repo}@${app.ref}`];
-    if (app.description) parts.push(app.description);
-    meta.textContent = parts.join(' - ');
-
-    text.appendChild(title);
-    text.appendChild(meta);
-    left.appendChild(text);
-
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.textContent = 'Launch';
-    btn.onclick = () => {
-      launchAppWindow(app);
-    };
-
-    row.appendChild(left);
-    row.appendChild(btn);
-    homeAppsList.appendChild(row);
-  }
-
-  for (const rec of managedServices) {
-    const info = summarizeAppliance(rec, true);
-    const gatewayDescriptor = describeShellResourceName(info.hostGatewayPk, shortPk(info.hostGatewayPk));
-    const row = document.createElement('div');
-    row.className = 'item appItem';
-
-    const left = document.createElement('div');
-    left.className = 'appItemLabel';
-
-    const text = document.createElement('div');
-    const title = document.createElement('strong');
-    title.textContent = info.title || 'Security Cameras';
-
-    const meta = document.createElement('div');
-    meta.className = 'small muted';
-    const parts = [
-      rec?.sharedProjection === true || rec?.grantedRecord === true ? 'Shared service' : 'Managed service',
-      `service ${info.service || 'nvr'}`,
-    ];
-    if (info.hostGatewayPk) {
-      if (gatewayDescriptor.loading) parts.push('gateway name loading…');
-      else if (gatewayDescriptor.raw) parts.push(`gateway id ${gatewayDescriptor.text}`);
-      else parts.push(`gateway ${gatewayDescriptor.text}`);
-    }
-    meta.textContent = parts.join(' - ');
-
-    text.appendChild(title);
-    text.appendChild(meta);
-    left.appendChild(text);
-
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.textContent = 'Open';
-    btn.onclick = () => {
-      launchNvrControlPanel(rec).catch((err) => {
-        setGatewayInstallStatus(`NVR launch failed: ${String(err?.message || err)}`, true);
-      });
-    };
-
-    row.appendChild(left);
-    row.appendChild(btn);
-    homeAppsList.appendChild(row);
-  }
-}
-
-async function addAppRepoFromInput() {
-  const parsed = parseGitHubRepoInput(appRepoInput?.value);
-  if (!parsed) {
-    setAppStatus('Paste a valid GitHub repo URL (or owner/repo).', true);
-    return;
-  }
-
-  setAppStatus('Fetching app manifest…');
-  try {
-    const manifest = await fetchAppManifest(parsed);
-    const id = String(manifest.id || `${manifest.owner}/${manifest.repo}`);
-    const existingIdx = appRepoCatalog.findIndex((x) => String(x.id || `${x.owner}/${x.repo}`) === id);
-    if (existingIdx >= 0) appRepoCatalog[existingIdx] = manifest;
-    else appRepoCatalog.push(manifest);
-    appEnabledIds.add(id);
-    saveAppPrefs();
-    publishEnabledApps();
-    renderAppCatalog();
-    if (appRepoInput) appRepoInput.value = '';
-    setAppStatus(`Added ${manifest.label}.`);
-  } catch (err) {
-    setAppStatus(`Failed to fetch manifest: ${String(err?.message || err)}`, true);
-  }
-}
-
-async function hydrateAppCatalog() {
-  loadAppPrefs();
-  const hydrated = [];
-  for (const entry of appRepoCatalog) {
-    const parsed = entry.owner && entry.repo
-      ? { owner: entry.owner, repo: entry.repo, ref: entry.ref || 'main', url: entry.url || `https://github.com/${entry.owner}/${entry.repo}` }
-      : parseGitHubRepoInput(entry.url || '');
-    if (!parsed) continue;
-    try {
-      const manifest = await fetchAppManifest(parsed);
-      hydrated.push(manifest);
-      if (!appEnabledIds.has(String(manifest.id))) appEnabledIds.add(String(manifest.id));
-    } catch {
-      const unresolvedId = String(entry.id || `${parsed.owner}/${parsed.repo}`);
-      hydrated.push({
-        id: unresolvedId,
-        label: String(entry.label || parsed.repo),
-        entry: String(entry.entry || 'index.html'),
-        capabilities: Array.isArray(entry.capabilities) ? entry.capabilities.map(String) : [],
-        description: String(entry.description || 'Manifest unavailable'),
-        version: String(entry.version || ''),
-        manifestUrl: String(entry.manifestUrl || ''),
-        launchUrl: String(entry.launchUrl || ''),
-        owner: parsed.owner,
-        repo: parsed.repo,
-        ref: parsed.ref || 'main',
-        url: parsed.url,
-        unresolved: true,
-      });
-      appEnabledIds.delete(unresolvedId);
-    }
-  }
-  appRepoCatalog = hydrated;
-  saveAppPrefs();
-  publishEnabledApps();
-  renderAppCatalog();
-  const okCount = hydrated.filter((x) => !x.unresolved).length;
-  const badCount = hydrated.length - okCount;
-  if (hydrated.length === 0) {
-    setAppStatus('No app manifests loaded.', true);
-  } else if (badCount > 0) {
-    setAppStatus(`${okCount} loaded, ${badCount} unavailable.`, true);
-  } else {
-    setAppStatus(`${okCount} app manifest(s) loaded.`);
-  }
-}
-
-function hydrateAppCatalogInBackground() {
-  return (async () => {
-    try {
-      await hydrateAppCatalog();
-      markShellBoot('shell.app-catalog.hydrated');
-      renderHomeApps();
-    } catch (err) {
-      console.error('hydrateAppCatalog failed', err);
-    }
-  })();
-}
-
 function clear(el) {
   if (!el) return;
   while (el.firstChild) el.removeChild(el.firstChild);
@@ -3707,12 +3092,26 @@ function b64url(bytes) {
   return btoa(s).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
 }
 
-function renderNotifications(notifs) {
+function renderNotifications() {
   clear(notifList);
-  const unread = (notifs || []).filter(n => !n.read);
+  const unread = (lastNotifications || []).filter(n => !n.read);
   btnBell.classList.toggle('has-unread', unread.length !== 0);
+  if (btnNotifClear) btnNotifClear.disabled = !notificationsResolved || lastNotifications.length === 0;
 
-  if (!notifs || notifs.length === 0) {
+  if (!notificationsResolved) {
+    const d = document.createElement('div');
+    d.className = 'item';
+    d.innerHTML = `
+      <div class="cuLoadingRow">
+        <span class="cuSpinner" aria-hidden="true"></span>
+        <span>Loading notifications…</span>
+      </div>
+    `;
+    notifList.appendChild(d);
+    return;
+  }
+
+  if (!lastNotifications || lastNotifications.length === 0) {
     const d = document.createElement('div');
     d.className = 'item';
     d.textContent = 'No notifications.';
@@ -3720,7 +3119,7 @@ function renderNotifications(notifs) {
     return;
   }
 
-  for (const n of notifs) {
+  for (const n of lastNotifications) {
     const it = document.createElement('div');
     it.className = 'item';
     it.innerHTML = `
@@ -4095,6 +3494,7 @@ function renderPeers(list) {
 
 // onboarding: security radio choice
 let onboardingSecurityChoice = null; // 'webauthn' | 'skip'
+let onboardingStep = 1;
 
 function setSecurityChoice(which) {
   onboardingSecurityChoice = which;
@@ -4142,7 +3542,7 @@ function scheduleRefreshAll(delayMs = 150) {
 function ensureOnboardingState(ident) {
   if (!ident?.linked) {
     showActivity('onboarding');
-    setOnboardStep(1);
+    setOnboardStep(onboardingStep);
   }
 }
 
@@ -4155,9 +3555,6 @@ async function refreshAll() {
 function applyCoreRefreshState({ st, ident, myLabel }) {
   lastDeviceState = st;
   lastIdentity = ident;
-  if (preparedGatewayInstall && preparedGatewayInstall.identityLabel !== String(ident?.label || '').trim()) {
-    preparedGatewayInstall = null;
-  }
   setDaemonState('online', 'rpc ok');
   deviceDid.textContent = st.did || '';
   deviceDidSummary.textContent = String(myLabel?.label || 'This device').trim() || 'This device';
@@ -4165,10 +3562,8 @@ function applyCoreRefreshState({ st, ident, myLabel }) {
   identityLinkedSummary.textContent = ident?.linked ? currentIdentityHandle() : 'Not signed in';
   updateIdentityChrome(ident);
   deviceLabel.value = myLabel?.label || '';
-  updateGatewayInstallHint();
   renderDeviceList(ident?.devices || []);
-  renderApplianceList(ident?.devices || [], lastSwarmDevices);
-  renderHomeApps();
+  pushRuntimeManagedApplianceSourceSnapshot(ident?.devices || [], lastSwarmDevices);
   ensureOnboardingState(ident);
   renderConnectionModel('refresh');
 }
@@ -4197,6 +3592,8 @@ async function refreshExtendedState(core = null) {
   lastDirectory = directory || [];
   lastZones = zones || [];
   lastSwarmDevices = swarmDevices || [];
+  lastNotifications = Array.isArray(notifs) ? notifs : [];
+  notificationsResolved = true;
   await refreshGatewayGrantViews(ident?.devices || [], lastSwarmDevices).catch(() => {});
   relayBridge?.updateTargets(desiredRelayUrls(ident?.devices || [], lastSwarmDevices), 'refresh');
 
@@ -4214,7 +3611,7 @@ async function refreshExtendedState(core = null) {
   updateZoneCommandUi();
   pushRuntimeManagedApplianceSourceSnapshot(ident?.devices || [], lastSwarmDevices);
   renderPairRequests(reqs || [], ident?.devices || []);
-  renderNotifications(notifs || []);
+  renderNotifications();
 
   const applianceRecords = currentManagedApplianceRecords(ident?.devices || [], lastSwarmDevices);
   const ownedGatewayPksNeedingRefresh = applianceRecords
@@ -4226,7 +3623,6 @@ async function refreshExtendedState(core = null) {
   for (const gatewayPk of ownedGatewayPksNeedingRefresh) {
     requestGatewayInventoryRefresh(gatewayPk).catch(() => {});
   }
-  await autoEnableAppsForIdentityDeviceRoles(ident?.devices || [], swarmDevices || []).catch(() => {});
   if (swarm && ident?.linked) {
     swarm.setLocalPk(st.pk || '');
     swarm.setPeers(swarmDevices || []);
@@ -4235,7 +3631,6 @@ async function refreshExtendedState(core = null) {
     if (!swarmBootRequested) {
       swarmBootRequested = true;
       client.call('swarm.record.request', { want: ['identity', 'device'] }, { timeoutMs: 20000 })
-        .catch(() => client.call('swarm.discovery.request', {}, { timeoutMs: 20000 }))
         .catch(() => {});
     }
   } else {
@@ -4248,8 +3643,9 @@ async function refreshExtendedState(core = null) {
 }
 
 function setOnboardStep(n) {
-  obStepDevice.classList.toggle('hidden', n !== 1);
-  obStepIdentity.classList.toggle('hidden', n !== 2);
+  onboardingStep = n === 2 ? 2 : 1;
+  obStepDevice.classList.toggle('hidden', onboardingStep !== 1);
+  obStepIdentity.classList.toggle('hidden', onboardingStep !== 2);
 }
 
 async function waitForPairAcceptance({ identityLabel, myDevicePk, timeoutMs = 90000 }) {
@@ -4273,7 +3669,7 @@ async function ensureOnboardingFlow() {
   const hasDevice = Boolean(String(st?.pk || '').trim() || String(st?.did || '').trim());
   if (linked && hasDevice) return true;
   showActivity('onboarding');
-  setOnboardStep(1);
+  setOnboardStep(onboardingStep);
   return false;
 }
 
@@ -4578,24 +3974,22 @@ async function runWebAuthnSetup() {
 }
 
 function wireUi() {
-  if (identityHandle) {
-    identityHandle.addEventListener('click', async () => {
-      const rawId = String(lastIdentity?.id || '').trim();
-      if (!rawId) return;
-      try {
-        await navigator.clipboard.writeText(rawId);
-        identityHandleCopied = true;
-        updateIdentityChrome(lastIdentity);
-      } catch {}
+  if (accountRailButton) {
+    accountRailButton.addEventListener('click', (event) => {
+      event.stopPropagation();
+      toggleAccountCenter();
     });
-    identityHandle.addEventListener('mouseleave', resetIdentityHandleCopyHint);
   }
 
-  if (btnGatewayBasicsClose) btnGatewayBasicsClose.addEventListener('click', closeGatewayBasicsModal);
-  if (resourceModalBackdrop) resourceModalBackdrop.addEventListener('click', closeGatewayBasicsModal);
+  document.addEventListener('click', (event) => {
+    const target = event.target;
+    if (accountCenterOpen && target instanceof Node && !accountCenterMenu.contains(target) && !accountRailButton.contains(target)) {
+      closeAccountCenter();
+    }
+  });
 
   // drawer nav
-  for (const b of drawer.querySelectorAll('.navbtn')) {
+  for (const b of navButtons) {
     b.addEventListener('click', () => {
       showActivity(b.dataset.activity);
       closeDrawer();
@@ -4617,72 +4011,6 @@ function wireUi() {
         setPairCodeStatus('Claim sent. Wait for the pairing request, then approve it below.');
       } catch (e) {
         setPairCodeStatus(`Claim failed: ${String(e?.message || e)}`, true);
-      }
-    };
-  }
-
-  if (btnAddAppRepo) {
-    btnAddAppRepo.onclick = () => addAppRepoFromInput().catch((e) => console.error(e));
-  }
-  if (appRepoInput) {
-    appRepoInput.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') {
-        e.preventDefault();
-        addAppRepoFromInput().catch((err) => console.error(err));
-      }
-    });
-  }
-
-  updateGatewayInstallHint();
-
-  if (btnGatewayInstallOpen) {
-    btnGatewayInstallOpen.onclick = async () => {
-      try {
-        const identityLabel = String(lastIdentity?.label || '').trim();
-        if (!String(lastIdentity?.id || '').trim() || !identityLabel) {
-          throw new Error('link an identity before preparing gateway install command');
-        }
-
-        const command = buildGatewayOperatorInstallCommand(identityLabel);
-        if (!command) {
-          throw new Error('could not build operator install command');
-        }
-
-        preparedGatewayInstall = {
-          identityLabel,
-          command,
-          preparedAt: Date.now(),
-        };
-
-        const info = currentGatewayUtilityDownloadInfo();
-        if (!info) {
-          throw new Error(`installer utility is unavailable for ${operatorPlatformLabel()} operators`);
-        }
-
-        const resolved = await resolveGatewayUtilityAssetUrl(info.asset);
-        const downloadUrl = String(resolved?.url || info.fallbackUrl || '').trim();
-        if (!downloadUrl) {
-          throw new Error('could not resolve a utility download URL');
-        }
-
-        const a = document.createElement('a');
-        a.href = downloadUrl;
-        a.rel = 'noopener noreferrer';
-        a.target = '_blank';
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-
-        const releaseRef = String(resolved?.tag || 'latest').trim() || 'latest';
-        const releaseMeta = resolved?.prerelease ? `${releaseRef} (pre-release)` : releaseRef;
-
-        setGatewayInstallCommandPreview(command);
-        setGatewayInstallStatus(
-          `Downloading ${info.asset} from ${releaseMeta}. Run the command below with the downloaded utility. The installer will print a generated pairing code if pairing is pending.`,
-          false,
-        );
-      } catch (err) {
-        setGatewayInstallStatus(`Utility download failed: ${String(err?.message || err)}`, true);
       }
     };
   }
@@ -5033,20 +4361,26 @@ function startSharedRelayPipe(client, initialRelayUrls) {
   startRelayRuntime('init');
   updateTargets(initialRelayUrls, 'init');
 
-  function flushBootState() {
-    if (!clientReady || !relayBridgeOwner) return;
+  async function flushBootState() {
+    if (!clientReady || !updateRelayBridgeOwner('flush')) return false;
     const relayUrls = Array.isArray(relayPoolSnapshot?.urls) ? relayPoolSnapshot.urls : [];
     const relayDetails = (relayPoolSnapshot?.relays && typeof relayPoolSnapshot.relays === 'object')
       ? relayPoolSnapshot.relays
       : {};
-    client.call('relay.status', {
-      state: relayPoolSnapshot?.state || relayState,
-      url: '',
-      urls: relayUrls,
-      relays: relayDetails,
-      code: null,
-      reason: relayPoolSnapshot?.reason || '',
-    }, { timeoutMs: 20000 }).catch((e) => console.error('relay.status rpc failed', e));
+    try {
+      await client.call('relay.status', {
+        state: relayPoolSnapshot?.state || relayState,
+        url: '',
+        urls: relayUrls,
+        relays: relayDetails,
+        code: null,
+        reason: relayPoolSnapshot?.reason || '',
+      }, { timeoutMs: 20000 });
+    } catch (e) {
+      console.error('relay.status rpc failed', e);
+      return false;
+    }
+    return true;
   }
 
   return {
@@ -5063,6 +4397,7 @@ function startSharedRelayPipe(client, initialRelayUrls) {
   markShellBoot('shell.boot.start');
 
   client = new IdentityClient({
+    debug: shellBootDebugEnabled,
     onEvent: (evt) => {
       if (evt?.type === 'log') {
         return;
@@ -5107,7 +4442,7 @@ function startSharedRelayPipe(client, initialRelayUrls) {
   loadGatewayExtraZones();
   wireUi();
   renderConnectionModel('init');
-  void hydrateAppCatalogInBackground();
+  renderNotifications();
 
   // Default radio selection: webauthn if supported
   setSecurityChoice('webauthn');
@@ -5117,16 +4452,32 @@ function startSharedRelayPipe(client, initialRelayUrls) {
     clientReady = client.isServiceWorkerAvailable();
     markShellBoot('shell.client-ready');
     if (clientReady) {
-      relayBridge = startSharedRelayPipe(client, desiredRelayUrls([], []));
+      if (!relayBridge) {
+        relayBridge = startSharedRelayPipe(client, desiredRelayUrls([], []));
+      } else {
+        relayBridge.updateTargets?.(desiredRelayUrls(lastIdentity?.devices || [], lastSwarmDevices || []), 'client-ready');
+      }
     } else {
       setDaemonState('offline', 'sw unavailable');
     }
 
-    const core = await refreshCoreState();
-    bootRefreshSettled = true;
-    relayBridge?.flushBootState?.();
-    clearShellBootFallbackTimer();
-    tryDismissShellBootSplash('shell.first-paint.core');
+    let core = null;
+    try {
+      core = await refreshCoreState();
+      bootRefreshSettled = true;
+      relayBridge?.flushBootState?.();
+      clearShellBootFallbackTimer();
+      tryDismissShellBootSplash('shell.first-paint.core');
+    } catch (coreError) {
+      console.warn('shell core refresh failed', coreError);
+      setDaemonState('offline', 'rpc failed');
+      bootRefreshSettled = true;
+      clearShellBootFallbackTimer();
+      renderConnectionModel('core-refresh-failed');
+      tryDismissShellBootSplash('shell.first-paint.core-failed');
+      scheduleRefreshAll(3000);
+      return;
+    }
 
     const linked = await ensureOnboardingFlow();
     if (linked) {
@@ -5141,10 +4492,8 @@ function startSharedRelayPipe(client, initialRelayUrls) {
       renderConnectionModel('extended-refresh-failed');
     });
   } catch (e) {
-    console.error('shell boot failed', e);
+    console.error('shell client boot failed', e);
     setDaemonState('offline', 'rpc failed');
-    showActivity('onboarding');
-    setOnboardStep(1);
     bootRefreshSettled = true;
     clearShellBootFallbackTimer();
     tryDismissShellBootSplash('shell.first-paint.error');
@@ -5157,8 +4506,7 @@ function startSharedRelayPipe(client, initialRelayUrls) {
       setDaemonState('online', 'rpc ok');
     } catch {
       setDaemonState('offline', 'rpc fail');
-      showActivity('onboarding');
-      setOnboardStep(1);
+      renderConnectionModel('health-check-failed');
     }
   }, 10000);
 })();

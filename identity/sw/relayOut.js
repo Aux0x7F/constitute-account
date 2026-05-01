@@ -14,9 +14,8 @@ export function getAppTag() { return APP_TAG; }
 
 export async function relaySend(sw, frameArr) {
   const frame = JSON.stringify(frameArr);
-  sw.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clients) => {
-    for (const c of clients) c.postMessage({ type: 'relay.tx', data: frame });
-  });
+  const clients = await sw.clients.matchAll({ type: 'window', includeUncontrolled: true });
+  for (const c of clients) c.postMessage({ type: 'relay.tx', data: frame });
 }
 
 export async function subscribeOnRelayOpen(sw, ident, logFn) {

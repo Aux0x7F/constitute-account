@@ -1,4 +1,4 @@
-const RUNTIME_VERSION = Object.freeze({ major: 2, minor: 8 });
+const RUNTIME_VERSION = Object.freeze({ major: 2, minor: 9 });
 const RUNTIME_WORKER_BUILD_ID = `runtime-${RUNTIME_VERSION.major}.${RUNTIME_VERSION.minor}`;
 const CONTEXT_TTL_FALLBACK_MS = 2 * 60 * 1000;
 const APPLIANCE_DISCOVERY_MAX_AGE_MS = 60 * 60 * 1000;
@@ -7,9 +7,29 @@ const RUNTIME_META_KEY = `runtime.shared.meta.v${RUNTIME_VERSION.major}`;
 
 const DB_NAME = 'constitute_db';
 const DB_VER = 1;
+const IDB_OPERATION_TIMEOUT_MS = 1500;
+let runtimeHydrationWarningLogged = false;
+
+function withTimeout(label, work, timeoutMs = IDB_OPERATION_TIMEOUT_MS) {
+  return new Promise((resolve, reject) => {
+    const timer = self.setTimeout(() => {
+      reject(new Error(`${label}: timed out`));
+    }, timeoutMs);
+    Promise.resolve()
+      .then(work)
+      .then((value) => {
+        self.clearTimeout(timer);
+        resolve(value);
+      })
+      .catch((error) => {
+        self.clearTimeout(timer);
+        reject(error);
+      });
+  });
+}
 
 function openDB() {
-  return new Promise((resolve, reject) => {
+  return withTimeout('indexedDB.open', () => new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, DB_VER);
     req.onupgradeneeded = () => {
       const db = req.result;
@@ -17,7 +37,8 @@ function openDB() {
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
-  });
+    req.onblocked = () => reject(new Error('indexedDB.open blocked'));
+  }));
 }
 
 async function withDbRetry(label, work, attempts = 2) {
@@ -69,13 +90,13 @@ function normalizeRole(value) {
 }
 
 function isGatewayRecord(rec) {
-  const role = normalizeRole(rec?.role || rec?.nodeType || rec?.type || '');
+  const role = normalizeRole(rec?.role || rec?.type || '');
   const service = normalizeRole(rec?.service || '');
   return role === 'gateway' || service === 'gateway';
 }
 
 function isNvrRecord(rec) {
-  const role = normalizeRole(rec?.role || rec?.nodeType || rec?.type || '');
+  const role = normalizeRole(rec?.role || rec?.type || '');
   const service = normalizeRole(rec?.service || '');
   return role === 'nvr' || service === 'nvr';
 }
@@ -130,6 +151,20 @@ function safeClone(value) {
   }
 }
 
+function stableJson(value) {
+  try {
+    return JSON.stringify(value ?? null);
+  } catch {
+    return '';
+  }
+}
+
+function withoutUpdatedAt(value) {
+  const out = value && typeof value === 'object' ? safeClone(value) : {};
+  delete out.updatedAt;
+  return out;
+}
+
 function isLocalhostRuntime() {
   try {
     const host = String(self.location?.hostname || '').trim().toLowerCase();
@@ -170,7 +205,7 @@ function gatewayHostedSnapshot(record) {
 }
 
 function applyGatewayHostedSnapshot(record) {
-  const role = String(record?.role || record?.nodeType || record?.type || '').trim().toLowerCase();
+  const role = String(record?.role || record?.type || '').trim().toLowerCase();
   const service = String(record?.service || '').trim().toLowerCase();
   const isGateway = role === 'gateway' || service === 'gateway';
   if (!isGateway) return record;
@@ -276,7 +311,7 @@ function mergeGatewayHostedServiceRecord(actualRecord, hostedRecord, gatewayReco
     devicePk: String(hosted.devicePk || hosted.device_pk || actual.devicePk || actual.pk || '').trim(),
     deviceLabel: String(hosted.deviceLabel || hosted.device_label || actual.deviceLabel || actual.label || hosted.service || 'service').trim(),
     deviceKind: String(hosted.deviceKind || hosted.device_kind || actual.deviceKind || actual.device_kind || 'service').trim() || 'service',
-    role: String(hosted.service || actual.role || actual.nodeType || actual.type || '').trim(),
+    role: String(hosted.service || actual.role || actual.type || '').trim(),
     service: String(hosted.service || actual.service || '').trim(),
     hostGatewayPk: gatewayPk,
     serviceVersion: String(hosted.serviceVersion || hosted.service_version || actual.serviceVersion || actual.service_version || '').trim(),
@@ -616,7 +651,10 @@ async function hydrateRuntimeState() {
 
 function ensureHydrated() {
   if (!hydratePromise) {
-    hydratePromise = hydrateRuntimeState().catch((error) => {
+    hydratePromise = hydrateRuntimeState().then(() => {
+      broadcastSnapshot();
+      return true;
+    }).catch((error) => {
       hydratePromise = null;
       throw error;
     });
@@ -624,14 +662,26 @@ function ensureHydrated() {
   return hydratePromise;
 }
 
+function startHydrationInBackground() {
+  void ensureHydrated().catch((error) => {
+    if (runtimeHydrationWarningLogged) return;
+    runtimeHydrationWarningLogged = true;
+    console.warn('[runtime] hydration failed', String(error?.message || error));
+  });
+}
+
 function handleStatusPut(message, endpoint) {
   const role = String(message.role || message.surface || endpoint?.surface || '').trim().toLowerCase();
   const payload = message.status && typeof message.status === 'object' ? message.status : {};
-  touchRuntime();
 
   if (role === 'shell') {
+    const next = withoutUpdatedAt(payload);
+    if (stableJson(withoutUpdatedAt(runtimeStatus.shell)) === stableJson(next)) {
+      return { ok: true, result: runtimeSnapshot(), unchanged: true };
+    }
+    touchRuntime();
     runtimeStatus.shell = {
-      ...safeClone(payload),
+      ...next,
       updatedAt: runtimeUpdatedAt,
     };
     schedulePersist();
@@ -643,9 +693,16 @@ function handleStatusPut(message, endpoint) {
   if (!service) {
     return { ok: false, error: 'missing service status target' };
   }
-  runtimeStatus.services[service] = {
-    ...safeClone(payload),
+  const next = {
+    ...withoutUpdatedAt(payload),
     service,
+  };
+  if (stableJson(withoutUpdatedAt(runtimeStatus.services[service])) === stableJson(next)) {
+    return { ok: true, result: runtimeSnapshot(), unchanged: true };
+  }
+  touchRuntime();
+  runtimeStatus.services[service] = {
+    ...next,
     updatedAt: runtimeUpdatedAt,
   };
   schedulePersist();
@@ -685,7 +742,11 @@ function handleLaunchContextDelete(message) {
 }
 
 function handleManagedSourceSnapshotPut(message) {
-  managedState.sourceSnapshot = normalizeManagedSourceSnapshot(message.sourceSnapshot);
+  const next = normalizeManagedSourceSnapshot(message.sourceSnapshot);
+  if (stableJson(managedState.sourceSnapshot) === stableJson(next)) {
+    return { ok: true, result: runtimeSnapshot(), unchanged: true };
+  }
+  managedState.sourceSnapshot = next;
   rebuildManagedApplianceSnapshot();
   touchRuntime();
   schedulePersist();
@@ -737,28 +798,30 @@ function handleBrokerResponse(kind, message) {
 }
 
 async function handleControlMessage(message, endpoint) {
-  await ensureHydrated();
-
   const type = String(message?.type || '').trim();
   if (!type) return;
+
+  if (type === 'runtime.attach') {
+    const clientId = String(message.clientId || '').trim();
+    const entry = ensureEndpoint(clientId, endpoint, {
+      surface: message.surface,
+      broker: message.broker === true,
+    });
+    startHydrationInBackground();
+    endpointPost(endpoint, {
+      type: 'runtime.attached',
+      buildId: RUNTIME_WORKER_BUILD_ID,
+      clientId: entry?.clientId || '',
+      snapshot: runtimeSnapshot(),
+    });
+    return;
+  }
+
+  await ensureHydrated();
 
   let response = null;
 
   switch (type) {
-    case 'runtime.attach': {
-      const clientId = String(message.clientId || '').trim();
-      const entry = ensureEndpoint(clientId, endpoint, {
-        surface: message.surface,
-        broker: message.broker === true,
-      });
-      response = {
-        type: 'runtime.attached',
-        buildId: RUNTIME_WORKER_BUILD_ID,
-        clientId: entry?.clientId || '',
-        snapshot: runtimeSnapshot(),
-      };
-      break;
-    }
     case 'runtime.detach': {
       deleteEndpoint(message.clientId);
       response = {
@@ -824,7 +887,9 @@ async function handleControlMessage(message, endpoint) {
     }
     case 'gateway.signal.request':
     case 'gateway.launch.request':
-    case 'gateway.grant.request': {
+    case 'gateway.grant.request':
+    case 'gateway.service.install.request':
+    case 'gateway.zones.sync.request': {
       const result = forwardBrokerRequest(type, message, endpoint);
       if (!result.ok) {
         response = {
@@ -857,6 +922,22 @@ async function handleControlMessage(message, endpoint) {
         type: 'runtime.ack',
         kind: 'gateway.grant.response',
         ...handleBrokerResponse('gateway.grant.request', message),
+      };
+      break;
+    }
+    case 'gateway.service.install.response': {
+      response = {
+        type: 'runtime.ack',
+        kind: 'gateway.service.install.response',
+        ...handleBrokerResponse('gateway.service.install.request', message),
+      };
+      break;
+    }
+    case 'gateway.zones.sync.response': {
+      response = {
+        type: 'runtime.ack',
+        kind: 'gateway.zones.sync.response',
+        ...handleBrokerResponse('gateway.zones.sync.request', message),
       };
       break;
     }

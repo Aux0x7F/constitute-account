@@ -12,7 +12,6 @@ export function status(sw, message) {
 }
 
 export function log(sw, message) {
-  console.log('[SW]', message);
   emit(sw, { type: 'log', message });
 }
 

@@ -11,7 +11,7 @@ import {
   bootControllerMode,
 } from "../app/loading.js";
 
-const SERVICE_WORKER_BUILD_ID = "2026-04-06-runtime-stage3";
+const SERVICE_WORKER_BUILD_ID = "2026-04-30-broker-ready";
 
 function currentServiceWorkerUrl() {
   const target = new URL("./sw.js", window.location.href);
@@ -25,8 +25,9 @@ function isLocalDevHost() {
 }
 
 export class IdentityClient {
-  constructor({ onEvent } = {}) {
+  constructor({ onEvent, debug = false } = {}) {
     this.onEvent = onEvent || (() => {});
+    this.debug = debug === true;
     this._reqId = 1;
     this._pending = new Map();
     this._readyPromise = null;
@@ -53,7 +54,7 @@ export class IdentityClient {
         throw new Error("Service Worker not supported in this browser");
       }
 
-      console.log("[client] ready: checking SW registration");
+      this._debug("[client] ready: checking SW registration");
       const desiredScriptUrl = currentServiceWorkerUrl();
 
       if (isLocalDevHost() && "serviceWorker" in navigator) {
@@ -61,10 +62,10 @@ export class IdentityClient {
         for (const reg of regs) {
           const activeUrl = String(reg?.active?.scriptURL || reg?.waiting?.scriptURL || reg?.installing?.scriptURL || "").trim();
           if (!activeUrl) continue;
-          if (!activeUrl.includes("/constitute/sw.js")) continue;
+          if (!activeUrl.includes("/constitute-account/sw.js")) continue;
           if (activeUrl === desiredScriptUrl) continue;
           try {
-            console.log("[client] unregister stale SW", activeUrl);
+            this._debug("[client] unregister stale SW", activeUrl);
             await reg.unregister();
           } catch {}
         }
@@ -78,7 +79,7 @@ export class IdentityClient {
       const needsRegister = !reg || !activeScriptUrl || activeScriptUrl !== desiredScriptUrl;
       if (needsRegister) {
         this.onEvent({ type: "log", message: "registering service worker ./sw.js (module)" });
-        console.log("[client] registering SW", desiredScriptUrl);
+        this._debug("[client] registering SW", desiredScriptUrl);
         reg = await navigator.serviceWorker.register(desiredScriptUrl, {
           scope: "./",
           type: "module",
@@ -88,32 +89,43 @@ export class IdentityClient {
       this._reg = reg;
       const registeredScriptUrl = String(reg?.active?.scriptURL || reg?.waiting?.scriptURL || reg?.installing?.scriptURL || '').trim();
       if (registeredScriptUrl) {
-        console.log("[client] service worker registration", registeredScriptUrl);
+        this._debug("[client] service worker registration", registeredScriptUrl);
       }
-      console.log("[client] waiting for SW ready");
+      this._debug("[client] waiting for SW ready");
       await Promise.race([
         navigator.serviceWorker.ready,
         new Promise((resolve) => setTimeout(resolve, SW_READY_GRACE_MS)),
       ]);
 
-      // Give the controller a short grace window, then continue on the
-      // direct-port path instead of forcing a reload.
-      console.log("[client] waiting for controller");
       let controllerOk = false;
-      try {
-        await this._waitForController(SW_CONTROLLER_GRACE_MS);
-        controllerOk = true;
-      } catch (e) {
-        const mode = bootControllerMode({
-          controllerPresent: Boolean(navigator.serviceWorker.controller),
-        });
-        if (mode === "controller") {
+      const activeWorker = reg?.active || null;
+      const controllerPresent = Boolean(navigator.serviceWorker.controller);
+      const shouldWaitForController = !controllerPresent && (!activeWorker || needsRegister);
+      if (!shouldWaitForController) {
+        if (controllerPresent) {
           controllerOk = true;
         } else {
-          console.warn("[client] controller unavailable; continuing with direct port fallback");
+          this._debug("[client] controller unavailable; using direct port fallback");
+        }
+      } else {
+        // Give the controller a short grace window only when the page is actually
+        // waiting on a newly registered or not-yet-active worker.
+        this._debug("[client] waiting for controller");
+        try {
+          await this._waitForController(SW_CONTROLLER_GRACE_MS);
+          controllerOk = true;
+        } catch (e) {
+          const mode = bootControllerMode({
+            controllerPresent: Boolean(navigator.serviceWorker.controller),
+          });
+          if (mode === "controller") {
+            controllerOk = true;
+          } else {
+            this._debug("[client] controller unavailable; using direct port fallback");
+          }
         }
       }
-      if (controllerOk) console.log("[client] controller ready");
+      if (controllerOk) this._debug("[client] controller ready");
       return reg;
     })();
 
@@ -225,6 +237,11 @@ export class IdentityClient {
     }
   }
 
+  _debug(...args) {
+    if (!this.debug) return;
+    console.debug(...args);
+  }
+
   _waitForController(timeoutMs = 8000) {
     if (navigator.serviceWorker.controller) return Promise.resolve();
 
@@ -234,13 +251,13 @@ export class IdentityClient {
       const tick = () => {
         if (navigator.serviceWorker.controller) {
           cleanup();
-          console.log("[client] controllerchange: controller set");
+          this._debug("[client] controllerchange: controller set");
           resolve();
           return;
         }
         if (Date.now() - start > timeoutMs) {
           cleanup();
-          console.warn("[client] controller wait timeout");
+          this._debug("[client] controller wait timeout");
           reject(new Error("service worker controller not available"));
         }
       };
