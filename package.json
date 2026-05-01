@@ -1,5 +1,5 @@
 {
-  "name": "constitute",
+  "name": "constitute-account",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -8,6 +8,9 @@
     "build": "node ./scripts/build.mjs",
     "preview": "vite preview",
     "test": "node --test app/**/*.test.js"
+  },
+  "dependencies": {
+    "constitute-ui": "file:../constitute-ui"
   },
   "devDependencies": {
     "vite": "^6.2.0"

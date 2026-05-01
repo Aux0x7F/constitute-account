@@ -7,7 +7,7 @@ import { ensureDevice, getDevice } from './deviceStore.js';
 import { getIdentity, setIdentity } from './identityStore.js';
 import { notifAdd, notifClear, notifRemove } from './notifs.js';
 import { pendingAdd, pendingRemove } from './pending.js';
-import { getSubId, getAppTag, subscribeOnRelayOpen as relaySubscribeOnRelayOpen } from './relayOut.js';
+import { getSubId, getAppTag } from './relayOut.js';
 import { emit, log, pokeUi } from './uiBus.js';
 import { blockedAdd, blockedIs, blockedRemove } from './blocklist.js';
 import { kvGet, kvSet } from './idb.js';
@@ -159,12 +159,6 @@ function zoneTagsFromEvent(ev) {
   return out;
 }
 
-
-export async function subscribeOnRelayOpen(sw) {
-  // handled by rpc (relay.status) using relayOut.subscribeOnRelayOpen
-  // kept for compatibility if any caller uses it directly
-  return;
-}
 
 export async function handleRelayFrame(sw, raw) {
   const s = String(raw || '');
@@ -734,12 +728,12 @@ export async function handleRelayFrame(sw, raw) {
     pokeUi(sw);
     return;
   }
-  if (payload.type === 'swarm_record_request' || payload.type === 'swarm_discovery_request') {
+  if (payload.type === 'swarm_record_request') {
     if (!ident?.linked) return;
     const requestId = String(payload.requestId || '').trim();
     const want = Array.isArray(payload.want) && payload.want.length
       ? payload.want.map(String)
-      : (payload.type === 'swarm_record_request' ? ['identity', 'device', 'dht'] : ['identity', 'device']);
+      : ['identity', 'device', 'dht'];
     const wantedIdentityId = String(payload.identityId || '').trim();
     const wantedDevicePk = String(payload.devicePk || '').trim();
 
