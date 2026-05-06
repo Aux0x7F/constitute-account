@@ -960,6 +960,21 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
     return await blockedRemove({ pk, did });
   }
 
+  async function refreshRelayScopedSubscriptions(ident, openRelayUrls) {
+    const dev = await ensureDevice();
+    await subOpen(sw, ident, (m) => log(sw, m));
+    for (const relayUrl of openRelayUrls) openRelaySubscriptionUrls.add(relayUrl);
+    const nbs = await listZones(ident || {});
+    for (const n of nbs) {
+      await addSelfToZoneList(dev, n.key).catch(() => {});
+      await publishZonePresence(sw, ident, dev, n.key).catch(() => {});
+      const list = await getZoneList(n.key);
+      await publishZoneList(sw, ident, n.key, list.members, list.ts, n.name || "").catch(() => {});
+    }
+    await startPresenceLoop();
+    await startSwarmPublishLoop();
+  }
+
   // --- relay pipe ---
   if (method === 'relay.status') {
     const state = String(params?.state || '');
@@ -984,18 +999,9 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
         log(sw, 'relay open; identity-scoped subscriptions deferred until account links');
         return { ok: true };
       }
-      const dev = await ensureDevice();
-      await subOpen(sw, ident, (m) => log(sw, m));
-      for (const relayUrl of openRelayUrls) openRelaySubscriptionUrls.add(relayUrl);
-      const nbs = await listZones(ident || {});
-      for (const n of nbs) {
-        await addSelfToZoneList(dev, n.key).catch(() => {});
-        await publishZonePresence(sw, ident, dev, n.key).catch(() => {});
-        const list = await getZoneList(n.key);
-        await publishZoneList(sw, ident, n.key, list.members, list.ts, n.name || "").catch(() => {});
-      }
-      await startPresenceLoop();
-      await startSwarmPublishLoop();
+      refreshRelayScopedSubscriptions(ident, openRelayUrls).catch((err) => {
+        log(sw, `relay subscription refresh degraded: ${String(err?.message || err)}`);
+      });
     }
     return { ok: true };
   }

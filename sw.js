@@ -1,6 +1,6 @@
 import { startDaemon } from './identity/sw/daemon.js';
 
-const SERVICE_WORKER_BUILD_ID = '2026-04-06-runtime-stage3';
+const SERVICE_WORKER_BUILD_ID = '2026-05-03-servicepk-projection';
 
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', (e) => e.waitUntil(self.clients.claim()));

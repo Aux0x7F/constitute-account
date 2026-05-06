@@ -81,7 +81,7 @@ Browser UI
 - `identity/client.js`
   - window-to-Service Worker RPC bridge
 - `runtime.worker.js`
-  - same-origin shared runtime for managed service access context, cross-surface status, and gateway request brokering
+  - same-origin shared runtime for managed service access context, retained projections, cross-surface status, and gateway request brokering
 - `relay.worker.js`
   - persistent WebSocket relay bridge for relay pool transport only
 
@@ -110,6 +110,7 @@ Service Worker
 - WebRTC is the preferred browser-safe transport direction for managed live media and direct paths
 - shell service access/bootstrap must stay separate from media transport
 - retained runtime projection is first truth for display/session hints until contradicted
+- retained runtime projections are first truth for generic consumable service data, including logging event and health projections
 - privileged service admission still requires valid cryptographic authorization
 - service access uses `constitute-protocol` CAAC primitives for explicit capability state bound to identity, device, gateway, service, scope, expiry, and replay protection
 
@@ -140,6 +141,26 @@ Background hydration owns:
 - managed app surfaces should dismiss full-page splash once service access context and initial surface structure are ready
 - live media connection state belongs to tiles and section-level status after first paint
 - onboarding progress should remain stable while background hydration continues; refresh loops must not snap the user back to step one unless the device truly lost its local authority
+
+## Runtime Projection Contract
+
+The shared runtime owns retained projection storage for browser-safe, capability-scoped data that can be consumed by multiple first-party app surfaces.
+
+Current projection rules:
+- projection channels are named and typed by `constitute-protocol`
+- projection payloads stay domain-generic where the domain supports it; logging uses generic log event envelopes instead of per-service UI schemas
+- browser apps render retained/materialized projections first and observe runtime updates
+- account/runtime syncs missing, stale, or incomplete projections through service-owned CAAC exchange, with Gateway only routing and attesting
+- broker/control exists for service access and projection sync/repair; it is not the primary product data interface
+- runtime stores materialized projections generically by service identity, channel, and policy id; it does not own Logging, NVR, or Storage domain semantics
+- runtime owns browser-side IndexedDB materialization, coverage tracking, and observer updates
+- service-owned projection responses are authoritative for their policy; runtime replaces that materialized event set rather than unioning stale rows forever
+- semantically unchanged projections must not trigger persistence, snapshots, or observer updates
+- UI surfaces do not coordinate chunks, cursors, scroll paging, or service query windows
+
+Initial projection channels:
+- `logging.events`
+- `logging.health`
 
 ## Discovery and Directory
 Zones remain the discovery scope:
@@ -184,6 +205,7 @@ Current convergence work is focused on:
 - gateway-management extraction into `constitute-gateway-ui`
 - managed NVR service access into `constitute-nvr-ui`
 - shared non-UI protocol/security/control primitives in `constitute-protocol`
+- runtime-propagated logging projections for `constitute-logging-ui`
 - WebRTC live preview as the managed browser media direction
 
 ## Design Principles
