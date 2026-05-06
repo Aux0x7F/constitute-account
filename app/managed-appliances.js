@@ -35,6 +35,16 @@ export function createManagedApplianceModel({
     return role === 'nvr' || service === 'nvr';
   }
 
+  function isManagedServiceRecord(rec) {
+    if (!rec || typeof rec !== 'object') return false;
+    if (isGatewayRecord(rec)) return false;
+    const deviceKind = normalizeRole(rec?.deviceKind || rec?.device_kind || '');
+    const service = normalizeRole(rec?.service || '');
+    const hostGatewayPk = String(rec?.hostGatewayPk || rec?.host_gateway_pk || '').trim();
+    const servicePk = String(rec?.servicePk || rec?.service_pk || '').trim();
+    return Boolean(service && service !== 'none' && (deviceKind === 'service' || hostGatewayPk || servicePk));
+  }
+
   function ownedPkSet(identityDevices) {
     return new Set(
       (Array.isArray(identityDevices) ? identityDevices : [])
@@ -108,7 +118,7 @@ export function createManagedApplianceModel({
     if (!gatewayPk) return baseSeen;
     let hostedSeen = 0;
     for (const candidate of Array.isArray(allRecords) ? allRecords : []) {
-      if (!isNvrRecord(candidate)) continue;
+      if (!isManagedServiceRecord(candidate)) continue;
       const hostGatewayPk = String(candidate?.hostGatewayPk || candidate?.host_gateway_pk || '').trim();
       if (!hostGatewayPk || hostGatewayPk !== gatewayPk) continue;
       hostedSeen = Math.max(hostedSeen, applianceSeenAt(candidate));
@@ -155,8 +165,15 @@ export function createManagedApplianceModel({
     return '';
   }
 
+  function looksLikePublicKey(value) {
+    return /^[0-9a-fA-F]{64}$/.test(String(value || '').trim());
+  }
+
   function managedServicePkForRecord(record) {
-    return String(record?.devicePk || record?.pk || '').trim();
+    const explicit = String(record?.servicePk || record?.service_pk || '').trim();
+    if (explicit) return explicit;
+    const fallback = String(record?.devicePk || record?.pk || '').trim();
+    return looksLikePublicKey(fallback) ? fallback : '';
   }
 
   function mergeGatewayHostedServiceRecord(actualRecord, hostedRecord, gatewayRecord) {
@@ -176,6 +193,7 @@ export function createManagedApplianceModel({
     return {
       ...actual,
       devicePk: String(hosted.devicePk || hosted.device_pk || actual.devicePk || actual.pk || '').trim(),
+      servicePk: String(hosted.servicePk || hosted.service_pk || actual.servicePk || actual.service_pk || '').trim(),
       deviceLabel: String(hosted.deviceLabel || hosted.device_label || actual.deviceLabel || actual.label || hosted.service || 'service').trim(),
       deviceKind: String(hosted.deviceKind || hosted.device_kind || actual.deviceKind || actual.device_kind || 'service').trim() || 'service',
       role: String(hosted.service || actual.role || actual.type || '').trim(),
@@ -203,7 +221,7 @@ export function createManagedApplianceModel({
       const rec = applyHostedSnapshot(rawRec);
       const pk = String(rec?.devicePk || rec?.pk || '').trim();
       if (!pk || seen.has(pk)) continue;
-      if (!(isGatewayRecord(rec) || isNvrRecord(rec))) continue;
+      if (!(isGatewayRecord(rec) || isManagedServiceRecord(rec))) continue;
       const ownedRec = owned.has(pk) || owned.has(String(rec?.hostGatewayPk || rec?.host_gateway_pk || '').trim());
       const seenAt = applianceSeenAt(rec);
       const ageMs = seenAt ? Math.max(0, Date.now() - seenAt) : Number.POSITIVE_INFINITY;
@@ -313,6 +331,7 @@ export function createManagedApplianceModel({
     formatAgeShort,
     formatReleaseMeta,
     isGatewayRecord,
+    isManagedServiceRecord,
     isNvrRecord,
     managedGatewayPkForRecord,
     mergeGatewayHostedServiceRecord,

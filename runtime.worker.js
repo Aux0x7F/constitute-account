@@ -1,11 +1,20 @@
-import { BROKER } from "constitute-protocol";
+import { BROKER, PROJECTION, assertProjectionPolicy, assertProjectionRecord } from "constitute-protocol";
 
-const RUNTIME_VERSION = Object.freeze({ major: 2, minor: 9 });
+const RUNTIME_VERSION = Object.freeze({ major: 2, minor: 12 });
 const RUNTIME_WORKER_BUILD_ID = `runtime-${RUNTIME_VERSION.major}.${RUNTIME_VERSION.minor}`;
 const CONTEXT_TTL_FALLBACK_MS = 2 * 60 * 1000;
 const APPLIANCE_DISCOVERY_MAX_AGE_MS = 60 * 60 * 1000;
 const RUNTIME_STATE_KEY = `runtime.shared.state.v${RUNTIME_VERSION.major}`;
 const RUNTIME_META_KEY = `runtime.shared.meta.v${RUNTIME_VERSION.major}`;
+const PROJECTION_POLICY_PUT = 'projection.policy.put';
+const PROJECTION_SYNC_REQUEST_TIMEOUT_MS = 45_000;
+const PROJECTION_SYNC_RETRY_MS = 5_000;
+const DEFAULT_LOGGING_SYNC_TARGET_COUNT = 2_500;
+const DEFAULT_LOGGING_POLICY_ID = 'logging.default.72h.low';
+const LOGGING_SYNC_CHANNELS = Object.freeze([
+  PROJECTION.CHANNEL.LOGGING_EVENTS,
+  PROJECTION.CHANNEL.LOGGING_HEALTH,
+]);
 
 const DB_NAME = 'constitute_db';
 const DB_VER = 1;
@@ -103,6 +112,16 @@ function isNvrRecord(rec) {
   return role === 'nvr' || service === 'nvr';
 }
 
+function isManagedServiceRecord(rec) {
+  if (!rec || typeof rec !== 'object') return false;
+  if (isGatewayRecord(rec)) return false;
+  const deviceKind = normalizeRole(rec?.deviceKind || rec?.device_kind || '');
+  const service = normalizeRole(rec?.service || '');
+  const hostGatewayPk = String(rec?.hostGatewayPk || rec?.host_gateway_pk || '').trim();
+  const servicePk = String(rec?.servicePk || rec?.service_pk || '').trim();
+  return Boolean(service && service !== 'none' && (deviceKind === 'service' || hostGatewayPk || servicePk));
+}
+
 function ownedPkSet(identityDevices) {
   return new Set(
     (Array.isArray(identityDevices) ? identityDevices : [])
@@ -113,7 +132,10 @@ function ownedPkSet(identityDevices) {
 
 const endpoints = new Map();
 const pendingBrokerRequests = new Map();
+const projectionPolicies = new Map();
+const pendingProjectionSyncRequests = new Map();
 const serviceAccessContexts = new Map();
+const retainedProjections = new Map();
 const runtimeStatus = {
   shell: null,
   services: {},
@@ -139,6 +161,7 @@ let brokerClientId = '';
 let runtimeUpdatedAt = 0;
 let hydratePromise = null;
 let persistTimer = 0;
+let projectionSyncTimer = 0;
 
 function nowMs() {
   return Date.now();
@@ -190,6 +213,442 @@ function touchRuntime() {
 
 function managedServiceAccessContextObject() {
   return Object.fromEntries(Array.from(serviceAccessContexts.entries()).map(([contextId, context]) => [contextId, safeClone(context)]));
+}
+
+function retainedProjectionObject() {
+  const out = {};
+  for (const [key, projection] of retainedProjections.entries()) {
+    const cloned = safeClone(projection);
+    out[key] = cloned;
+    const channelId = String(projection?.channelId || '').trim();
+    if (channelId && !out[channelId]) out[channelId] = cloned;
+    const servicePk = String(projection?.servicePk || projection?.service_pk || '').trim();
+    const service = String(projection?.service || '').trim();
+    if ((servicePk || service) && channelId) {
+      const serviceChannelKey = [servicePk || service, channelId].join('|');
+      if (!out[serviceChannelKey]) out[serviceChannelKey] = cloned;
+    }
+  }
+  return out;
+}
+
+function retainedProjectionStoreObject() {
+  return Object.fromEntries(Array.from(retainedProjections.entries()).map(([key, projection]) => [key, safeClone(projection)]));
+}
+
+function retainedProjectionCoverageObject() {
+  return Object.fromEntries(Array.from(retainedProjections.entries()).map(([key, projection]) => [key, projectionCoverage(projection)]));
+}
+
+function projectionPolicyObject() {
+  return Object.fromEntries(Array.from(projectionPolicies.entries()).map(([key, policy]) => [key, safeClone(policy)]));
+}
+
+function projectionStoreKey(projection) {
+  const servicePk = String(projection?.servicePk || projection?.service_pk || '').trim();
+  const service = String(projection?.service || '').trim();
+  const channelId = String(projection?.channelId || '').trim();
+  const policyId = projectionPolicyId(projection);
+  return [servicePk || service, channelId, policyId].filter(Boolean).join('|');
+}
+
+function projectionPolicyId(projection) {
+  const policy = normalizeObject(projection?.payload?.policy || projection?.scope);
+  return String(projection?.policyId || policy.policyId || 'default').trim();
+}
+
+function projectionPayloadCount(projection) {
+  const payload = projection?.payload;
+  if (Array.isArray(payload)) return payload.length;
+  if (Array.isArray(payload?.events)) return payload.events.length;
+  if (Array.isArray(payload?.items)) return payload.items.length;
+  return 0;
+}
+
+function projectionReplacesEventSet(projection) {
+  return Array.isArray(projection?.payload?.events)
+    && Boolean(projection?.payload?.policy || projection?.scope || projection?.payload?.coverage);
+}
+
+function projectionEventArray(projection) {
+  const events = projection?.payload?.events;
+  return Array.isArray(events) ? events : [];
+}
+
+function projectionEventKey(event) {
+  const direct = String(event?.eventId || event?.event_id || event?.logEventId || event?.id || '').trim();
+  if (direct) return `id:${direct}`;
+  const cursor = String(event?.cursor?.value || event?.cursor || '').trim();
+  if (cursor) return `cursor:${cursor}`;
+  return `shape:${stableJson({
+    occurredAt: event?.occurredAt || event?.occurred_at || event?.ts || '',
+    severity: event?.severity || '',
+    category: event?.category || '',
+    outcome: event?.outcome || '',
+    producer: event?.producer || '',
+    subject: event?.subject || null,
+    resource: event?.resource || null,
+    correlation: event?.correlation || null,
+    tags: event?.tags || [],
+    safeFacts: event?.safeFacts || event?.safe_facts || {},
+  })}`;
+}
+
+function projectionEventTimeSeconds(event) {
+  const raw = Number(event?.occurredAt || event?.occurred_at || event?.ts || event?.timestamp || 0);
+  if (Number.isFinite(raw) && raw > 0) return raw > 9_999_999_999 ? Math.floor(raw / 1000) : raw;
+  const parsed = Date.parse(String(event?.occurredAt || event?.occurred_at || ''));
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed / 1000) : 0;
+}
+
+function mergeProjectionEvents(existingEvents, nextEvents) {
+  const byKey = new Map();
+  for (const event of Array.isArray(existingEvents) ? existingEvents : []) {
+    const key = projectionEventKey(event);
+    if (key) byKey.set(key, event);
+  }
+  for (const event of Array.isArray(nextEvents) ? nextEvents : []) {
+    const key = projectionEventKey(event);
+    if (!key) continue;
+    const existing = byKey.get(key);
+    byKey.set(key, existing && typeof existing === 'object'
+      ? { ...existing, ...event }
+      : event);
+  }
+  return Array.from(byKey.values()).sort((left, right) => projectionEventTimeSeconds(right) - projectionEventTimeSeconds(left));
+}
+
+function mergeProjectionRecord(existing, next) {
+  if (!existing || typeof existing !== 'object') return next;
+  if (!next || typeof next !== 'object') return existing;
+  const existingChannel = String(existing?.channelId || '').trim();
+  const nextChannel = String(next?.channelId || '').trim();
+  const sameChannel = existingChannel && existingChannel === nextChannel;
+  const existingServicePk = String(existing?.servicePk || existing?.service_pk || '').trim();
+  const nextServicePk = String(next?.servicePk || next?.service_pk || '').trim();
+  const existingService = String(existing?.service || '').trim();
+  const nextService = String(next?.service || '').trim();
+  const sameService = (existingServicePk || existingService) === (nextServicePk || nextService);
+  if (!sameChannel || !sameService) return next;
+  const merged = {
+    ...existing,
+    ...next,
+    payload: {
+      ...(existing?.payload && typeof existing.payload === 'object' ? existing.payload : {}),
+      ...(next?.payload && typeof next.payload === 'object' ? next.payload : {}),
+    },
+    safeFacts: {
+      ...(existing?.safeFacts && typeof existing.safeFacts === 'object' ? existing.safeFacts : {}),
+      ...(next?.safeFacts && typeof next.safeFacts === 'object' ? next.safeFacts : {}),
+    },
+  };
+  const nextEvents = projectionEventArray(next);
+  const replacesEventSet = projectionReplacesEventSet(next);
+  const mergedEvents = replacesEventSet
+    ? nextEvents.slice().sort((left, right) => projectionEventTimeSeconds(right) - projectionEventTimeSeconds(left))
+    : mergeProjectionEvents(projectionEventArray(existing), nextEvents);
+  if (mergedEvents.length) {
+    const existingCoverage = existing?.payload?.coverage && typeof existing.payload.coverage === 'object' ? existing.payload.coverage : {};
+    const nextCoverage = next?.payload?.coverage && typeof next.payload.coverage === 'object' ? next.payload.coverage : {};
+    const targetCount = Math.max(
+      replacesEventSet ? 0 : Number(existingCoverage.targetCount || 0),
+      Number(nextCoverage.targetCount || 0),
+      mergedEvents.length,
+    );
+    const completionRatio = targetCount > 0 ? Math.min(1, mergedEvents.length / targetCount) : 1;
+    merged.payload = {
+      ...merged.payload,
+      events: mergedEvents,
+      coverage: {
+        ...existingCoverage,
+        ...nextCoverage,
+        materializedCount: mergedEvents.length,
+        targetCount,
+        completionRatio,
+        syncState: completionRatio >= 1 ? 'completeEnough' : String(nextCoverage.syncState || existingCoverage.syncState || 'syncing'),
+      },
+    };
+  }
+  return merged;
+}
+
+function projectionSemanticShape(projection) {
+  const clone = projection && typeof projection === 'object' ? safeClone(projection) : {};
+  delete clone.retainedAt;
+  delete clone.requestId;
+  if (clone.cursor && typeof clone.cursor === 'object') delete clone.cursor.updatedAt;
+  if (clone.freshness && typeof clone.freshness === 'object') {
+    delete clone.freshness.updatedAt;
+    delete clone.freshness.staleAfter;
+  }
+  return clone;
+}
+
+function projectionSemanticallyEqual(left, right) {
+  return stableJson(projectionSemanticShape(left)) === stableJson(projectionSemanticShape(right));
+}
+
+function projectionCoverage(projection) {
+  const coverage = projection?.payload?.coverage && typeof projection.payload.coverage === 'object'
+    ? projection.payload.coverage
+    : {};
+  const materializedCount = projectionPayloadCount(projection);
+  const targetCount = Math.max(Number(coverage.targetCount || 0), materializedCount);
+  const completionRatio = targetCount > 0
+    ? Math.min(1, materializedCount / targetCount)
+    : 1;
+  return {
+    ...safeClone(coverage),
+    materializedCount,
+    targetCount,
+    completionRatio,
+    syncState: String(coverage.syncState || (completionRatio >= 1 ? 'completeEnough' : 'syncing')),
+  };
+}
+
+function projectionFreshness(projection) {
+  const freshness = projection?.freshness && typeof projection.freshness === 'object' ? projection.freshness : {};
+  return {
+    state: String(freshness.state || 'fresh'),
+    updatedAt: Number(freshness.updatedAt || projection?.retainedAt || nowMs()),
+    ...(freshness.staleAfter ? { staleAfter: Number(freshness.staleAfter) } : {}),
+    ...(freshness.reason ? { reason: String(freshness.reason) } : {}),
+  };
+}
+
+function projectionObserverUpdate(projection, changedCount) {
+  return {
+    projectionKey: projectionStoreKey(projection),
+    changedCount: Math.max(0, Number(changedCount || 0)),
+    coverage: projectionCoverage(projection),
+    freshness: projectionFreshness(projection),
+  };
+}
+
+function randomOpaqueId(prefix) {
+  try {
+    const bytes = new Uint8Array(12);
+    self.crypto.getRandomValues(bytes);
+    const token = Array.from(bytes, (value) => value.toString(16).padStart(2, '0')).join('');
+    return `${prefix}-${token}`;
+  } catch {
+    return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  }
+}
+
+function projectionPolicyStoreKey(policy) {
+  return [
+    String(policy?.service || '').trim(),
+    String(policy?.channelId || '').trim(),
+    String(policy?.policyId || '').trim(),
+  ].filter(Boolean).join('|');
+}
+
+function projectionPolicyForChannel(policy, channelId) {
+  const targetChannelId = String(channelId || policy?.channelId || '').trim();
+  const basePolicyId = String(policy?.policyId || 'default').trim() || 'default';
+  return {
+    ...safeClone(policy),
+    service: String(policy?.service || 'logging').trim() || 'logging',
+    channelId: targetChannelId,
+    policyId: targetChannelId === String(policy?.channelId || '').trim()
+      ? basePolicyId
+      : `${basePolicyId}.${targetChannelId.replace(/[^a-z0-9]+/gi, '.')}`,
+  };
+}
+
+function normalizeProjectionPolicyForRuntime(value) {
+  const raw = value && typeof value === 'object' ? value : {};
+  const policy = {
+    ...safeClone(raw),
+    service: String(raw.service || 'logging').trim() || 'logging',
+    channelId: String(raw.channelId || PROJECTION.CHANNEL.LOGGING_EVENTS).trim(),
+    policyId: String(raw.policyId || DEFAULT_LOGGING_POLICY_ID).trim() || DEFAULT_LOGGING_POLICY_ID,
+    scope: raw.scope && typeof raw.scope === 'object' && !Array.isArray(raw.scope) ? safeClone(raw.scope) : {},
+    syncDepthTarget: raw.syncDepthTarget && typeof raw.syncDepthTarget === 'object' && !Array.isArray(raw.syncDepthTarget)
+      ? safeClone(raw.syncDepthTarget)
+      : { mode: 'policyComplete', targetCount: DEFAULT_LOGGING_SYNC_TARGET_COUNT },
+    retentionTarget: raw.retentionTarget && typeof raw.retentionTarget === 'object' && !Array.isArray(raw.retentionTarget)
+      ? safeClone(raw.retentionTarget)
+      : {},
+  };
+  assertProjectionPolicy(policy);
+  return policy;
+}
+
+function syncTargetCountForPolicy(policy) {
+  const target = Number(policy?.syncDepthTarget?.targetCount || DEFAULT_LOGGING_SYNC_TARGET_COUNT);
+  return Number.isFinite(target) && target > 0 ? Math.min(target, 5_000) : DEFAULT_LOGGING_SYNC_TARGET_COUNT;
+}
+
+function projectionForPolicyChannel(policy, channelId) {
+  const channelPolicy = projectionPolicyForChannel(policy, channelId);
+  const service = String(channelPolicy.service || '').trim();
+  const policyId = String(channelPolicy.policyId || '').trim();
+  const directKey = [service, String(channelPolicy.channelId || '').trim(), policyId].filter(Boolean).join('|');
+  if (retainedProjections.has(directKey)) return retainedProjections.get(directKey);
+  let fallback = null;
+  for (const projection of retainedProjections.values()) {
+    if (String(projection?.service || '').trim() !== service) continue;
+    if (String(projection?.channelId || '').trim() !== String(channelPolicy.channelId || '').trim()) continue;
+    if (projectionPolicyId(projection) === policyId) return projection;
+    if (!fallback || Number(projection?.retainedAt || 0) > Number(fallback?.retainedAt || 0)) {
+      fallback = projection;
+    }
+  }
+  return fallback;
+}
+
+function projectionNeedsRuntimeSync(projection, policy, channelId) {
+  if (!projection) return true;
+  const freshness = projectionFreshness(projection);
+  const staleAfter = Number(freshness.staleAfter || 0);
+  const staleAfterMs = staleAfter > 0 && staleAfter < 9_999_999_999 ? staleAfter * 1000 : staleAfter;
+  if (freshness.state === 'missing' || freshness.state === 'error') return true;
+  if (staleAfterMs && staleAfterMs < nowMs()) return true;
+  if (String(channelId || '') !== PROJECTION.CHANNEL.LOGGING_EVENTS) return false;
+  const coverage = projectionCoverage(projection);
+  const targetCount = syncTargetCountForPolicy(policy);
+  return coverage.materializedCount < Math.min(targetCount, Number(coverage.targetCount || targetCount));
+}
+
+function syncChannelsForPolicy(policy) {
+  const service = String(policy?.service || '').trim();
+  if (service === 'logging') return LOGGING_SYNC_CHANNELS;
+  return [String(policy?.channelId || '').trim()].filter(Boolean);
+}
+
+function broadcastProjectionSyncDiagnostic(operation, detail = {}) {
+  broadcast({
+    type: 'projection.sync.diagnostic',
+    operation,
+    detail: safeClone(detail),
+  });
+}
+
+function scheduleProjectionSync(delayMs = 0) {
+  if (projectionSyncTimer) return;
+  projectionSyncTimer = self.setTimeout(() => {
+    projectionSyncTimer = 0;
+    startProjectionSync();
+  }, Math.max(0, Number(delayMs || 0)));
+}
+
+function startProjectionSync() {
+  const broker = brokerClientId ? endpoints.get(brokerClientId) : null;
+  if (!broker) {
+    if (projectionPolicies.size) {
+      broadcastProjectionSyncDiagnostic('projection.sync.waiting_for_broker', {
+        policyCount: projectionPolicies.size,
+      });
+      scheduleProjectionSync(PROJECTION_SYNC_RETRY_MS);
+    }
+    return;
+  }
+  for (const policy of projectionPolicies.values()) {
+    for (const channelId of syncChannelsForPolicy(policy)) {
+      queueProjectionSyncRequest(policy, channelId, broker);
+    }
+  }
+}
+
+function queueProjectionSyncRequest(policy, channelId, broker) {
+  const channelPolicy = projectionPolicyForChannel(policy, channelId);
+  const pendingKey = projectionPolicyStoreKey(channelPolicy);
+  for (const pending of pendingProjectionSyncRequests.values()) {
+    if (pending.pendingKey === pendingKey) return;
+  }
+  const existing = projectionForPolicyChannel(policy, channelId);
+  if (!projectionNeedsRuntimeSync(existing, channelPolicy, channelId)) return;
+  const requestId = randomOpaqueId('projection');
+  const limit = channelId === PROJECTION.CHANNEL.LOGGING_EVENTS
+    ? syncTargetCountForPolicy(policy)
+    : undefined;
+  const payload = {
+    requestId,
+    channelId,
+    service: String(channelPolicy.service || '').trim(),
+    ...(limit ? { limit } : {}),
+    filters: {},
+    policy: channelPolicy,
+  };
+  const timer = self.setTimeout(() => {
+    pendingProjectionSyncRequests.delete(requestId);
+    broadcastProjectionSyncDiagnostic('projection.sync.degraded', {
+      channelId,
+      requestId,
+      error: 'projection request timed out',
+    });
+    scheduleProjectionSync(PROJECTION_SYNC_RETRY_MS);
+  }, PROJECTION_SYNC_REQUEST_TIMEOUT_MS);
+  pendingProjectionSyncRequests.set(requestId, {
+    pendingKey,
+    channelId,
+    policyId: channelPolicy.policyId,
+    service: channelPolicy.service,
+    createdAt: nowMs(),
+    timer,
+  });
+  broadcastProjectionSyncDiagnostic('projection.sync.request.sent', {
+    channelId,
+    requestId,
+    limit: limit || 0,
+  });
+  endpointPost(broker, {
+    type: 'runtime.broker.request',
+    requestId,
+    kind: BROKER.SERVICE_PROJECTION_REQUEST,
+    payload,
+    sourceClientId: 'runtime-projection-sync',
+  });
+}
+
+function normalizeProjectionRecord(value) {
+  const source = value?.projection && typeof value.projection === 'object' ? value.projection : value;
+  if (!source || typeof source !== 'object') throw new Error('projection result missing');
+  const projection = {
+    ...safeClone(source),
+    channelId: String(source.channelId || '').trim(),
+    service: String(source.service || '').trim(),
+    servicePk: String(source.servicePk || source.service_pk || '').trim(),
+  };
+  assertProjectionRecord(projection);
+  return projection;
+}
+
+function storeProjectionRecord(value) {
+  const projection = normalizeProjectionRecord(value);
+  const key = projectionStoreKey(projection);
+  const existing = retainedProjections.get(key);
+  const existingCount = projectionPayloadCount(existing);
+  const mergedProjection = mergeProjectionRecord(retainedProjections.get(key), projection);
+  const storedProjection = {
+    ...mergedProjection,
+    retainedAt: nowMs(),
+  };
+  if (existing && projectionSemanticallyEqual(existing, storedProjection)) {
+    const refreshedProjection = {
+      ...existing,
+      retainedAt: storedProjection.retainedAt,
+      cursor: storedProjection.cursor || existing.cursor,
+      freshness: storedProjection.freshness || existing.freshness,
+    };
+    retainedProjections.set(key, refreshedProjection);
+    schedulePersist();
+    return safeClone(refreshedProjection);
+  }
+  retainedProjections.set(key, storedProjection);
+  const stored = retainedProjections.get(key);
+  const changedCount = Math.max(0, projectionPayloadCount(stored) - existingCount);
+  touchRuntime();
+  schedulePersist();
+  broadcast({
+    type: 'projection.observer.update',
+    update: projectionObserverUpdate(stored, changedCount),
+    projection: safeClone(stored),
+  });
+  broadcastSnapshot();
+  return safeClone(stored);
 }
 
 function normalizeHostedServices(value) {
@@ -286,7 +745,7 @@ function effectiveApplianceSeenAt(rec, allRecords = []) {
   if (!gatewayPk) return baseSeen;
   let hostedSeen = 0;
   for (const candidate of Array.isArray(allRecords) ? allRecords : []) {
-    if (!isNvrRecord(candidate)) continue;
+    if (!isManagedServiceRecord(candidate)) continue;
     const hostGatewayPk = String(candidate?.hostGatewayPk || candidate?.host_gateway_pk || '').trim();
     if (!hostGatewayPk || hostGatewayPk !== gatewayPk) continue;
     hostedSeen = Math.max(hostedSeen, applianceSeenAt(candidate));
@@ -311,6 +770,7 @@ function mergeGatewayHostedServiceRecord(actualRecord, hostedRecord, gatewayReco
   return {
     ...actual,
     devicePk: String(hosted.devicePk || hosted.device_pk || actual.devicePk || actual.pk || '').trim(),
+    servicePk: String(hosted.servicePk || hosted.service_pk || actual.servicePk || actual.service_pk || '').trim(),
     deviceLabel: String(hosted.deviceLabel || hosted.device_label || actual.deviceLabel || actual.label || hosted.service || 'service').trim(),
     deviceKind: String(hosted.deviceKind || hosted.device_kind || actual.deviceKind || actual.device_kind || 'service').trim() || 'service',
     role: String(hosted.service || actual.role || actual.type || '').trim(),
@@ -338,7 +798,7 @@ function buildApplianceRecords(identityDevices, swarmDevices, grantedRecords = [
     const rec = applyGatewayHostedSnapshot(rawRec);
     const pk = String(rec?.devicePk || rec?.pk || '').trim();
     if (!pk || seen.has(pk)) continue;
-    if (!(isGatewayRecord(rec) || isNvrRecord(rec))) continue;
+    if (!(isGatewayRecord(rec) || isManagedServiceRecord(rec))) continue;
     const ownedRec = owned.has(pk) || owned.has(String(rec?.hostGatewayPk || rec?.host_gateway_pk || '').trim());
     const seenAt = applianceSeenAt(rec);
     const ageMs = seenAt ? Math.max(0, Date.now() - seenAt) : Number.POSITIVE_INFINITY;
@@ -498,14 +958,22 @@ function runtimeSnapshot() {
     touchRuntime();
     schedulePersist();
   }
+  const brokerEndpoint = brokerClientId ? endpoints.get(brokerClientId) : null;
   return {
     buildId: RUNTIME_WORKER_BUILD_ID,
     updatedAt: runtimeUpdatedAt || nowMs(),
+    broker: {
+      available: Boolean(brokerEndpoint),
+      surface: String(brokerEndpoint?.surface || '').trim(),
+    },
     shell: safeClone(runtimeStatus.shell),
     services: safeClone(runtimeStatus.services),
     managedAppliances: safeClone(managedState.applianceSnapshot),
     resourceNames: safeClone(managedState.resourceNames),
     managedServiceIssue: safeClone(managedState.managedServiceIssue),
+    projections: retainedProjectionObject(),
+    projectionCoverage: retainedProjectionCoverageObject(),
+    projectionPolicies: projectionPolicyObject(),
     serviceAccessContextCount: serviceAccessContexts.size,
   };
 }
@@ -573,6 +1041,9 @@ function serializedRuntimeState() {
     managedServiceIssue: safeClone(managedState.managedServiceIssue),
     hostedGatewaySnapshots: safeClone(managedState.hostedGatewaySnapshots),
     serviceAccessContexts: managedServiceAccessContextObject(),
+    projections: retainedProjectionStoreObject(),
+    projectionCoverage: retainedProjectionCoverageObject(),
+    projectionPolicies: projectionPolicyObject(),
   };
 }
 
@@ -642,6 +1113,34 @@ async function hydrateRuntimeState() {
       const key = String(contextId || '').trim();
       if (!key || !context || typeof context !== 'object') continue;
       serviceAccessContexts.set(key, safeClone(context));
+    }
+    retainedProjections.clear();
+    const persistedProjections = payload.projections && typeof payload.projections === 'object'
+      ? payload.projections
+      : {};
+    for (const [channelId, projection] of Object.entries(persistedProjections)) {
+      try {
+        const stored = normalizeProjectionRecord({
+          channelId,
+          ...(projection && typeof projection === 'object' ? projection : {}),
+        });
+        const key = projectionStoreKey(stored) || stored.channelId;
+        const nextProjection = {
+          ...stored,
+          retainedAt: Number(projection?.retainedAt || 0) || Number(stored.freshness?.updatedAt || 0) || nowMs(),
+        };
+        retainedProjections.set(key, mergeProjectionRecord(retainedProjections.get(key), nextProjection));
+      } catch {}
+    }
+    projectionPolicies.clear();
+    const persistedPolicies = payload.projectionPolicies && typeof payload.projectionPolicies === 'object'
+      ? payload.projectionPolicies
+      : {};
+    for (const policy of Object.values(persistedPolicies)) {
+      try {
+        const normalized = normalizeProjectionPolicyForRuntime(policy);
+        projectionPolicies.set(projectionPolicyStoreKey(normalized), normalized);
+      } catch {}
     }
   }
   rebuildManagedApplianceSnapshot();
@@ -743,6 +1242,127 @@ function handleServiceAccessContextDelete(message) {
   return { ok: true, result: { deleted: existed } };
 }
 
+function handleProjectionPut(message) {
+  try {
+    const projection = storeProjectionRecord(message.projection || message.result || message.payload);
+    return { ok: true, result: projection };
+  } catch (error) {
+    return { ok: false, error: String(error?.message || error || 'invalid projection') };
+  }
+}
+
+function handleProjectionGet(message) {
+  const channelId = String(message.channelId || message?.payload?.channelId || '').trim();
+  const servicePk = String(message.servicePk || message?.payload?.servicePk || '').trim();
+  const service = String(message.service || message?.payload?.service || '').trim();
+  const policyId = String(message.policyId || message?.payload?.policyId || '').trim();
+  if (channelId && (servicePk || service || policyId)) {
+    const candidates = [];
+    if (servicePk) candidates.push([servicePk, channelId, policyId || 'default'].filter(Boolean).join('|'));
+    if (service) candidates.push([service, channelId, policyId || 'default'].filter(Boolean).join('|'));
+    for (const candidate of candidates) {
+      if (retainedProjections.has(candidate)) {
+        return { ok: true, result: safeClone(retainedProjections.get(candidate)) };
+      }
+    }
+  }
+  if (channelId) {
+    for (const projection of retainedProjections.values()) {
+      if (String(projection?.channelId || '').trim() === channelId) {
+        return { ok: true, result: safeClone(projection) };
+      }
+    }
+    return { ok: true, result: null };
+  }
+  return { ok: true, result: retainedProjectionObject() };
+}
+
+function handleProjectionPolicyPut(message) {
+  try {
+    const policy = normalizeProjectionPolicyForRuntime(message.policy || message?.payload?.policy || message.payload);
+    const key = projectionPolicyStoreKey(policy);
+    if (!key) return { ok: false, error: 'missing projection policy key' };
+    const existing = projectionPolicies.get(key);
+    projectionPolicies.set(key, policy);
+    touchRuntime();
+    schedulePersist();
+    broadcastSnapshot();
+    broadcastProjectionSyncDiagnostic('projection.policy.applied', {
+      policyId: policy.policyId,
+      service: policy.service,
+      channelId: policy.channelId,
+    });
+    if (stableJson(existing) !== stableJson(policy)) {
+      scheduleProjectionSync(0);
+    }
+    return { ok: true, result: safeClone(policy) };
+  } catch (error) {
+    return { ok: false, error: String(error?.message || error || 'invalid projection policy') };
+  }
+}
+
+function handleRuntimeProjectionSyncResponse(message) {
+  const requestId = String(message.requestId || '').trim();
+  const pending = pendingProjectionSyncRequests.get(requestId);
+  if (!pending) return null;
+  pendingProjectionSyncRequests.delete(requestId);
+  self.clearTimeout(pending.timer);
+  if (message.ok === false) {
+    broadcastProjectionSyncDiagnostic('projection.sync.degraded', {
+      channelId: pending.channelId,
+      requestId,
+      error: String(message.error || 'projection request failed'),
+    });
+    scheduleProjectionSync(PROJECTION_SYNC_RETRY_MS);
+    return { ok: true };
+  }
+  const source = message?.result?.projection || message?.result || null;
+  try {
+    const stored = storeProjectionRecord(source);
+    broadcastProjectionSyncDiagnostic('projection.sync.batch.received', {
+      channelId: pending.channelId,
+      requestId,
+      materialized: projectionCoverage(stored).materializedCount,
+      targetCount: projectionCoverage(stored).targetCount,
+      syncState: projectionCoverage(stored).syncState,
+    });
+    scheduleProjectionSync(250);
+    return { ok: true };
+  } catch (error) {
+    broadcastProjectionSyncDiagnostic('projection.sync.degraded', {
+      channelId: pending.channelId,
+      requestId,
+      error: String(error?.message || error || 'invalid service projection response'),
+    });
+    scheduleProjectionSync(PROJECTION_SYNC_RETRY_MS);
+    return { ok: false, error: String(error?.message || error || 'invalid service projection response') };
+  }
+}
+
+function handleServiceProjectionResponse(message) {
+  const runtimeSyncResult = handleRuntimeProjectionSyncResponse(message);
+  if (runtimeSyncResult) return runtimeSyncResult;
+  const source = message?.result?.projection || message?.result || null;
+  let stored = null;
+  if (message.ok !== false && source && typeof source === 'object') {
+    try {
+      stored = storeProjectionRecord(source);
+    } catch (error) {
+      return { ok: false, error: String(error?.message || error || 'invalid service projection response') };
+    }
+  }
+  const responseMessage = stored
+    ? {
+        ...message,
+        result: {
+          ...(message.result && typeof message.result === 'object' ? message.result : {}),
+          projection: stored,
+        },
+      }
+    : message;
+  return handleBrokerResponse(BROKER.SERVICE_PROJECTION_REQUEST, responseMessage);
+}
+
 function handleManagedSourceSnapshotPut(message) {
   const next = normalizeManagedSourceSnapshot(message.sourceSnapshot);
   if (stableJson(managedState.sourceSnapshot) === stableJson(next)) {
@@ -753,6 +1373,7 @@ function handleManagedSourceSnapshotPut(message) {
   touchRuntime();
   schedulePersist();
   broadcastSnapshot();
+  scheduleProjectionSync(0);
   return { ok: true, result: runtimeSnapshot() };
 }
 
@@ -805,6 +1426,7 @@ async function handleControlMessage(message, endpoint) {
 
   if (type === 'runtime.attach') {
     const clientId = String(message.clientId || '').trim();
+    const brokerWasAvailable = Boolean(brokerClientId && endpoints.get(brokerClientId));
     const entry = ensureEndpoint(clientId, endpoint, {
       surface: message.surface,
       broker: message.broker === true,
@@ -816,10 +1438,18 @@ async function handleControlMessage(message, endpoint) {
       clientId: entry?.clientId || '',
       snapshot: runtimeSnapshot(),
     });
+    const brokerIsAvailable = Boolean(brokerClientId && endpoints.get(brokerClientId));
+    if (brokerWasAvailable !== brokerIsAvailable || entry?.broker) {
+      broadcastSnapshot();
+      scheduleProjectionSync(0);
+    }
     return;
   }
 
-  await ensureHydrated();
+  // Hydration repairs retained state, but it must not gate runtime writes,
+  // broker forwarding, or projection repair. A slow gateway/relay path should
+  // never make local runtime put/get messages time out.
+  startHydrationInBackground();
 
   let response = null;
 
@@ -878,6 +1508,33 @@ async function handleControlMessage(message, endpoint) {
       };
       break;
     }
+    case BROKER.PROJECTION_PUT: {
+      response = {
+        type: 'runtime.response',
+        requestId: String(message.requestId || '').trim(),
+        kind: BROKER.PROJECTION_PUT,
+        ...handleProjectionPut(message),
+      };
+      break;
+    }
+    case BROKER.PROJECTION_GET: {
+      response = {
+        type: 'runtime.response',
+        requestId: String(message.requestId || '').trim(),
+        kind: BROKER.PROJECTION_GET,
+        ...handleProjectionGet(message),
+      };
+      break;
+    }
+    case PROJECTION_POLICY_PUT: {
+      response = {
+        type: 'runtime.response',
+        requestId: String(message.requestId || '').trim(),
+        kind: PROJECTION_POLICY_PUT,
+        ...handleProjectionPolicyPut(message),
+      };
+      break;
+    }
     case 'managedAppliances.sourceSnapshot.put': {
       response = {
         type: 'runtime.response',
@@ -889,6 +1546,7 @@ async function handleControlMessage(message, endpoint) {
     }
     case BROKER.SERVICE_SIGNAL_REQUEST:
     case BROKER.SERVICE_ACCESS_REQUEST:
+    case BROKER.SERVICE_PROJECTION_REQUEST:
     case 'gateway.grant.request':
     case 'gateway.service.install.request':
     case 'gateway.zones.sync.request': {
@@ -908,6 +1566,14 @@ async function handleControlMessage(message, endpoint) {
         type: 'runtime.ack',
         kind: BROKER.SERVICE_SIGNAL_RESPONSE,
         ...handleBrokerResponse(BROKER.SERVICE_SIGNAL_REQUEST, message),
+      };
+      break;
+    }
+    case BROKER.SERVICE_PROJECTION_RESPONSE: {
+      response = {
+        type: 'runtime.ack',
+        kind: BROKER.SERVICE_PROJECTION_RESPONSE,
+        ...handleServiceProjectionResponse(message),
       };
       break;
     }

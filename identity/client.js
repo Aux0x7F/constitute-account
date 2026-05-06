@@ -11,7 +11,7 @@ import {
   bootControllerMode,
 } from "../app/loading.js";
 
-const SERVICE_WORKER_BUILD_ID = "2026-04-30-broker-ready";
+const SERVICE_WORKER_BUILD_ID = "2026-05-03-servicepk-projection";
 
 function currentServiceWorkerUrl() {
   const target = new URL("./sw.js", window.location.href);

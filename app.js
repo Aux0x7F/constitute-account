@@ -5,7 +5,7 @@ import {
   renderFirstPartyShell,
   setConnectionStateText,
 } from "constitute-ui";
-import { BROKER, SERVICE_ACCESS_EVENTS } from "constitute-protocol";
+import { BROKER, PROJECTION, SERVICE_ACCESS_EVENTS, SERVICE_EXCHANGE, makeServiceExchangeFrame } from "constitute-protocol";
 import { IdentityClient } from './identity/client.js';
 import {
   SHELL_BOOT_FALLBACK_TIMEOUT_MS,
@@ -291,12 +291,14 @@ const SWARM_ICE_SERVERS = [
 ];
 
 const SHELL_BUILD_ID = '2026-04-06-runtime-stage3';
-const PLATFORM_RUNTIME_VERSION = Object.freeze({ major: 2, minor: 9 });
+const PLATFORM_RUNTIME_VERSION = Object.freeze({ major: 2, minor: 12 });
 const PLATFORM_RUNTIME_BUILD_ID = `runtime-${PLATFORM_RUNTIME_VERSION.major}.${PLATFORM_RUNTIME_VERSION.minor}`;
 const RUNTIME_ATTACH_TIMEOUT_MS = 15_000;
 const RUNTIME_WRITE_TIMEOUT_MS = 12_000;
 const MANAGED_SERVICE_ACCESS_REQUEST_TIMEOUT_MS = 90_000;
 const GATEWAY_SIGNAL_REQUEST_TIMEOUT_MS = 135_000;
+const PROJECTION_SERVICE_ACCESS_TIMEOUT_MS = 25_000;
+const PROJECTION_SIGNAL_REQUEST_TIMEOUT_MS = 30_000;
 const BROKER_READY_TIMEOUT_MS = 45_000;
 const BROKER_RELAY_READY_TIMEOUT_MS = 30_000;
 const BROKER_READY_POLL_MS = 250;
@@ -328,6 +330,7 @@ let swarmBootRequested = false;
 const GATEWAY_EXTRA_ZONES_KEY = 'constitute.gateway.extraZones';
 const MANAGED_APP_SURFACES = Object.freeze({
   nvr: 'constitute-nvr-ui',
+  logging: 'constitute-logging-ui',
 });
 const MANAGED_SERVICE_ACCESS_TTL_MS = 2 * 60 * 1000;
 const GATEWAY_INVENTORY_REFRESH_TTL_MS = 15_000;
@@ -350,6 +353,7 @@ let runtimeStatusSnapshot = {
   services: {},
   managedAppliances: { owned: [], granted: [], discoverable: [] },
   resourceNames: {},
+  projections: {},
   managedServiceIssue: null,
   serviceAccessContextCount: 0,
 };
@@ -408,6 +412,18 @@ function runtimeManagedApplianceRecords() {
 
 function identityOwnedDevicePks() {
   return Array.from(ownedPkSet(lastIdentity?.devices || []));
+}
+
+function runtimeOwnedDevicePks() {
+  return runtimeManagedApplianceBucket('owned')
+    .flatMap((record) => [
+      record?.devicePk,
+      record?.pk,
+      record?.hostGatewayPk,
+      record?.host_gateway_pk,
+    ])
+    .map((value) => String(value || '').trim())
+    .filter(Boolean);
 }
 
 function currentManagedApplianceRecords(identityDevices = lastIdentity?.devices || [], swarmDevices = lastSwarmDevices || []) {
@@ -1625,6 +1641,23 @@ function createPendingRequest(map, requestId, label, timeoutMs = 20_000) {
   });
 }
 
+function observePendingRequest(promise) {
+  const state = {
+    error: null,
+    promise: Promise.resolve(promise).catch((error) => {
+      state.error = error;
+      return undefined;
+    }),
+  };
+  return state;
+}
+
+async function awaitObservedPendingRequest(state) {
+  const result = await state.promise;
+  if (state.error) throw state.error;
+  return result;
+}
+
 async function waitForBrokerCondition(predicate, timeoutMs, label) {
   const deadline = Date.now() + Math.max(0, Number(timeoutMs) || 0);
   while (true) {
@@ -1810,6 +1843,17 @@ function startPlatformRuntimeBridge() {
     }
   };
 
+  const runtimeWriteWarnings = new Map();
+  function warnRuntimeWriteFailure(key, err) {
+    const now = Date.now();
+    const prior = runtimeWriteWarnings.get(key) || { count: 0, lastAt: 0 };
+    const next = { count: prior.count + 1, lastAt: now };
+    runtimeWriteWarnings.set(key, next);
+    if (now - prior.lastAt < 30_000) return;
+    const suffix = next.count > 1 ? ` (${next.count} recent failures)` : '';
+    console.warn(`[runtime] ${key} failed${suffix}`, err);
+  }
+
   function runtimeCall(type, payload = {}, timeoutMs = 20_000) {
     const requestId = `${clientId}-${type}-${bridge.requestId++}`;
     return new Promise((resolve, reject) => {
@@ -1830,13 +1874,13 @@ function startPlatformRuntimeBridge() {
   bridge.pushStatus = async (status) => {
     if (!(await bridge.whenReadyQuietly())) return;
     await runtimeCall('runtime.status.put', { role: 'shell', status }, RUNTIME_WRITE_TIMEOUT_MS).catch((err) => {
-      console.warn('[runtime] runtime.status.put failed', err);
+      warnRuntimeWriteFailure('runtime.status.put', err);
     });
   };
   bridge.putManagedApplianceSourceSnapshot = async (sourceSnapshot) => {
     if (!(await bridge.whenReadyQuietly())) return;
     await runtimeCall('managedAppliances.sourceSnapshot.put', { sourceSnapshot }, RUNTIME_WRITE_TIMEOUT_MS).catch((err) => {
-      console.warn('[runtime] managedAppliances.sourceSnapshot.put failed', err);
+      warnRuntimeWriteFailure('managedAppliances.sourceSnapshot.put', err);
     });
   };
 
@@ -1880,13 +1924,14 @@ function startPlatformRuntimeBridge() {
     if (msg.type === 'runtime.broker.request') {
       handleRuntimeBrokerRequest(msg).catch((err) => {
         const kind = String(msg?.kind || '').trim();
-        const responseType = kind === BROKER.SERVICE_ACCESS_REQUEST
-          ? BROKER.SERVICE_ACCESS_RESPONSE
-          : (kind === 'gateway.grant.request'
-            ? 'gateway.grant.response'
-            : (kind === 'gateway.service.install.request'
-              ? 'gateway.service.install.response'
-              : (kind === 'gateway.zones.sync.request' ? 'gateway.zones.sync.response' : BROKER.SERVICE_SIGNAL_RESPONSE)));
+        const responseTypes = {
+          [BROKER.SERVICE_ACCESS_REQUEST]: BROKER.SERVICE_ACCESS_RESPONSE,
+          [BROKER.SERVICE_PROJECTION_REQUEST]: BROKER.SERVICE_PROJECTION_RESPONSE,
+          'gateway.grant.request': 'gateway.grant.response',
+          'gateway.service.install.request': 'gateway.service.install.response',
+          'gateway.zones.sync.request': 'gateway.zones.sync.response',
+        };
+        const responseType = responseTypes[kind] || BROKER.SERVICE_SIGNAL_RESPONSE;
         port.postMessage({
           type: responseType,
           clientId,
@@ -1944,6 +1989,17 @@ async function handleRuntimeBrokerRequest(message) {
     const result = await requestGatewayServiceAccess(payload.record || payload, payload.options || {});
     runtimeBridge.port.postMessage({
       type: BROKER.SERVICE_ACCESS_RESPONSE,
+      clientId: runtimeBridge.clientId,
+      requestId,
+      ok: true,
+      result,
+    });
+    return;
+  }
+  if (kind === BROKER.SERVICE_PROJECTION_REQUEST) {
+    const result = await requestServiceProjection(payload);
+    runtimeBridge.port.postMessage({
+      type: BROKER.SERVICE_PROJECTION_RESPONSE,
       clientId: runtimeBridge.clientId,
       requestId,
       ok: true,
@@ -2475,13 +2531,15 @@ async function requestGatewayServiceAccess(record, opts = {}) {
   const servicePk = managedServicePkForRecord(record);
   const service = String(opts?.service || record?.service || 'nvr').trim() || 'nvr';
   const capability = String(opts?.capability || `${service}.view`).trim() || `${service}.view`;
+  const timeoutMs = Number(opts?.timeoutMs || 0) || MANAGED_SERVICE_ACCESS_REQUEST_TIMEOUT_MS;
   if (!gatewayPk) throw new Error('host gateway is not known for this service yet');
   if (!servicePk) throw new Error('service public key is missing');
   if (!String(lastIdentity?.id || '').trim()) throw new Error('link an identity before opening managed services');
   if (!String(lastDeviceState?.pk || '').trim()) throw new Error('device key is not ready yet');
   const requestServiceAccessOnce = async () => {
     const requestId = randomOpaqueId('gw-service-access');
-    const pending = createPendingRequest(pendingServiceAccesses, requestId, 'service access', MANAGED_SERVICE_ACCESS_REQUEST_TIMEOUT_MS);
+    const pending = createPendingRequest(pendingServiceAccesses, requestId, 'service access', timeoutMs);
+    const observedPending = observePendingRequest(pending);
     try {
       await client.call('gateway.serviceAccess.request', {
         requestId,
@@ -2494,12 +2552,12 @@ async function requestGatewayServiceAccess(record, opts = {}) {
           shell: 'constitute',
           surface: managedAppSurfaceRepoForService(service),
         },
-      }, { timeoutMs: MANAGED_SERVICE_ACCESS_REQUEST_TIMEOUT_MS });
+      }, { timeoutMs });
     } catch (err) {
       settlePending(pendingServiceAccesses, requestId, err);
       throw err;
     }
-    return await pending;
+    return await awaitObservedPendingRequest(observedPending);
   };
   for (let attempt = 1; attempt <= 3; attempt += 1) {
     try {
@@ -2522,9 +2580,11 @@ async function requestGatewaySignal(req) {
   const requestId = String(req?.requestId || '').trim() || randomOpaqueId('gw-signal');
   const signalType = String(req?.signalType || '').trim().toLowerCase();
   if (!signalType) throw new Error('missing signal type');
-  const pendingTimeoutMs = signalType === 'offer' ? 30_000 : GATEWAY_SIGNAL_REQUEST_TIMEOUT_MS;
-  const callTimeoutMs = signalType === 'offer' ? 30_000 : GATEWAY_SIGNAL_REQUEST_TIMEOUT_MS;
+  const requestedTimeoutMs = Number(req?.timeoutMs || 0);
+  const pendingTimeoutMs = requestedTimeoutMs || (signalType === 'offer' ? 30_000 : GATEWAY_SIGNAL_REQUEST_TIMEOUT_MS);
+  const callTimeoutMs = requestedTimeoutMs || (signalType === 'offer' ? 30_000 : GATEWAY_SIGNAL_REQUEST_TIMEOUT_MS);
   const pending = createPendingRequest(pendingGatewaySignals, requestId, `gateway ${signalType}`, pendingTimeoutMs);
+  const observedPending = observePendingRequest(pending);
   try {
     await client.call(BROKER.SERVICE_SIGNAL_REQUEST, {
       requestId,
@@ -2539,7 +2599,163 @@ async function requestGatewaySignal(req) {
     settlePending(pendingGatewaySignals, requestId, err);
     throw err;
   }
-  return await pending;
+  return await awaitObservedPendingRequest(observedPending);
+}
+
+function findManagedServiceRecordForProjection(service = 'logging') {
+  const targetService = String(service || 'logging').trim().toLowerCase() || 'logging';
+  const records = currentManagedApplianceRecords(lastIdentity?.devices || [], lastSwarmDevices || []);
+  const owned = new Set([
+    ...ownedPkSet(lastIdentity?.devices || []),
+    ...runtimeOwnedDevicePks(),
+  ]);
+  const hosted = records.find((rec) => {
+    if (String(rec?.service || '').trim().toLowerCase() !== targetService) return false;
+    const gatewayPk = managedGatewayPkForRecord(rec);
+    const servicePk = managedServicePkForRecord(rec);
+    return Boolean(servicePk) && (owned.has(gatewayPk) || rec?.grantedRecord === true || rec?.sharedProjection === true);
+  }) || records.find((rec) => {
+    if (String(rec?.service || '').trim().toLowerCase() !== targetService) return false;
+    return Boolean(managedGatewayPkForRecord(rec)) && Boolean(managedServicePkForRecord(rec));
+  });
+  if (hosted) return hosted;
+  const projectedService = retainedProjectionServiceRecord(targetService);
+  const recordWithoutServicePk = records.find((rec) => {
+    if (String(rec?.service || '').trim().toLowerCase() !== targetService) return false;
+    return Boolean(managedGatewayPkForRecord(rec));
+  });
+  if (projectedService?.servicePk && recordWithoutServicePk) {
+    return {
+      ...recordWithoutServicePk,
+      servicePk: projectedService.servicePk,
+      hostGatewayPk: managedGatewayPkForRecord(recordWithoutServicePk) || projectedService.hostGatewayPk,
+      service: targetService,
+    };
+  }
+  const gateway = freshestOwnedGatewayRecord();
+  const gatewayPk = managedGatewayPkForRecord(gateway);
+  if (!gatewayPk && !projectedService?.hostGatewayPk) return null;
+  if (!projectedService?.servicePk) return null;
+  return {
+    role: targetService,
+    service: targetService,
+    hostGatewayPk: gatewayPk || projectedService.hostGatewayPk,
+    servicePk: projectedService.servicePk,
+    devicePk: `${targetService}:${gatewayPk || projectedService.hostGatewayPk}`,
+    deviceLabel: projectedService.label || targetService,
+    hostedSynthetic: true,
+  };
+}
+
+async function discoverManagedServiceRecordForProjection(service = 'logging') {
+  const targetService = String(service || 'logging').trim().toLowerCase() || 'logging';
+  let record = findManagedServiceRecordForProjection(targetService);
+  if (record) return record;
+
+  const records = currentManagedApplianceRecords(lastIdentity?.devices || [], lastSwarmDevices || []);
+  const owned = ownedPkSet(lastIdentity?.devices || []);
+  const gatewayPks = Array.from(new Set(
+    records
+      .filter((rec) => isGatewayRecord(rec))
+      .map((rec) => String(rec?.devicePk || rec?.pk || '').trim())
+      .filter((pk) => pk && owned.has(pk)),
+  ));
+  if (gatewayPks.length === 0) return null;
+
+  await Promise.all(gatewayPks.map((gatewayPk) => requestGatewayInventoryRefresh(gatewayPk, { force: true }).catch(() => false)));
+  const startedAt = Date.now();
+  while ((Date.now() - startedAt) < MANAGED_SERVICE_RESOLVE_TIMEOUT_MS) {
+    await refreshManagedApplianceProjection({ refreshGrantViews: false }).catch(() => []);
+    record = findManagedServiceRecordForProjection(targetService);
+    if (record) return record;
+    await new Promise((resolve) => window.setTimeout(resolve, MANAGED_SERVICE_RESOLVE_POLL_MS));
+  }
+  return findManagedServiceRecordForProjection(targetService);
+}
+
+function retainedProjectionServiceRecord(service = 'logging') {
+  const targetService = String(service || 'logging').trim().toLowerCase() || 'logging';
+  const projections = runtimeStatusSnapshot?.projections && typeof runtimeStatusSnapshot.projections === 'object'
+    ? runtimeStatusSnapshot.projections
+    : {};
+  for (const projection of Object.values(projections)) {
+    if (!projection || typeof projection !== 'object') continue;
+    if (String(projection?.service || '').trim().toLowerCase() !== targetService) continue;
+    const servicePk = String(projection?.servicePk || projection?.service_pk || '').trim();
+    if (!servicePk) continue;
+    return {
+      service: targetService,
+      servicePk,
+      hostGatewayPk: String(projection?.hostGatewayPk || projection?.host_gateway_pk || '').trim(),
+      label: String(projection?.display?.name || projection?.displayName || projection?.label || targetService).trim(),
+    };
+  }
+  return null;
+}
+
+async function requestServiceProjection(req) {
+  const channelId = String(req?.channelId || '').trim();
+  const service = String(req?.service || 'logging').trim().toLowerCase() || 'logging';
+  if (!channelId) {
+    throw new Error('missing projection channel');
+  }
+  const record = await discoverManagedServiceRecordForProjection(service);
+  if (!record) throw new Error(`${service} service is not available from this account runtime yet`);
+  const serviceLabel = String(record?.deviceLabel || record?.label || service).trim() || service;
+  const resolvedRecord = withManagedServiceAccessKeys(
+    await resolveManagedServiceForAccess(record, { serviceLabel, requireGatewayAuthority: false }),
+    record,
+  );
+  const gatewayPk = managedGatewayPkForRecord(resolvedRecord);
+  const servicePk = managedServicePkForRecord(resolvedRecord);
+  const capability = String(req?.capability || `${service}.view`).trim().toLowerCase();
+  const access = await requestGatewayServiceAccess(resolvedRecord, {
+    service,
+    capability,
+    timeoutMs: PROJECTION_SERVICE_ACCESS_TIMEOUT_MS,
+  });
+  const requestPayload = {
+    requestId: String(req?.requestId || '').trim(),
+    channelId,
+    service,
+    cursor: req?.cursor && typeof req.cursor === 'object'
+      ? req.cursor
+      : String(req?.cursor || '').trim(),
+    limit: Number(req?.limit || 0) || 100,
+    filters: req?.filters && typeof req.filters === 'object' ? req.filters : {},
+    policy: req?.policy && typeof req.policy === 'object' ? req.policy : {},
+  };
+  const frame = makeServiceExchangeFrame({
+    kind: SERVICE_EXCHANGE.KIND.PROJECTION_REQUEST,
+    issuerPk: String(lastDeviceState?.pk || lastIdentity?.devicePk || '').trim() || 'account-runtime',
+    recipientServicePk: String(access?.servicePk || servicePk || '').trim(),
+    hostGatewayPk: String(access?.gatewayPk || gatewayPk || '').trim(),
+    requestId: requestPayload.requestId,
+    traceId: String(req?.traceId || '').trim(),
+    sealedPayload: requestPayload,
+  });
+  const signal = await requestGatewaySignal({
+    gatewayPk: String(access?.gatewayPk || gatewayPk || '').trim(),
+    servicePk: String(access?.servicePk || servicePk || '').trim(),
+    service,
+    signalType: 'service_projection',
+    payload: {
+      frame,
+    },
+    serviceCapability: String(access?.serviceCapability || '').trim(),
+    timeoutMs: PROJECTION_SIGNAL_REQUEST_TIMEOUT_MS,
+  });
+  const payload = signal?.payload && typeof signal.payload === 'object' ? signal.payload : {};
+  const projection = payload.projection && typeof payload.projection === 'object' ? payload.projection : payload;
+  return {
+    projection: {
+      ...projection,
+      requestId: String(req?.requestId || projection?.requestId || signal?.requestId || '').trim(),
+      channelId: String(projection?.channelId || channelId).trim(),
+      service: String(projection?.service || service).trim(),
+      servicePk: String(projection?.servicePk || access?.servicePk || servicePk || '').trim(),
+    },
+  };
 }
 
 function managedServiceProjectionKey(record) {
@@ -2652,6 +2868,7 @@ async function requestGatewayGrantAction(record, opts = {}) {
   if (!action) throw new Error('missing grant action');
   const requestId = String(opts?.requestId || '').trim() || randomOpaqueId('gw-grant');
   const pending = createPendingRequest(pendingGatewayGrantRequests, requestId, `gateway ${action}`, 12_000);
+  const observedPending = observePendingRequest(pending);
   try {
     await client.call('gateway.grants.request', {
       requestId,
@@ -2668,7 +2885,7 @@ async function requestGatewayGrantAction(record, opts = {}) {
     settlePending(pendingGatewayGrantRequests, requestId, err);
     throw err;
   }
-  return await pending;
+  return await awaitObservedPendingRequest(observedPending);
 }
 
 async function refreshGatewayGrantViews(identityDevices, swarmDevices) {
@@ -2953,10 +3170,22 @@ function resolvedManagedServiceRecord(record, applianceRecords = []) {
   if (direct && isFreshManagedServiceRecord(direct)) return direct;
   if (gatewayPk) {
     const hosted = findGatewayHostedServiceRecord(gatewayPk, records, service);
-    if (hosted && isFreshManagedServiceRecord(hosted)) return hosted;
-    return hosted || direct;
+    if (hosted && isFreshManagedServiceRecord(hosted)) return withManagedServiceAccessKeys(hosted, record);
+    return hosted ? withManagedServiceAccessKeys(hosted, record) : direct;
   }
   return direct;
+}
+
+function withManagedServiceAccessKeys(record, fallbackRecord) {
+  const source = (record && typeof record === 'object') ? record : {};
+  const fallback = (fallbackRecord && typeof fallbackRecord === 'object') ? fallbackRecord : {};
+  const gatewayPk = managedGatewayPkForRecord(source) || managedGatewayPkForRecord(fallback);
+  const servicePk = managedServicePkForRecord(source) || managedServicePkForRecord(fallback);
+  return {
+    ...source,
+    hostGatewayPk: gatewayPk || String(source?.hostGatewayPk || source?.host_gateway_pk || '').trim(),
+    servicePk,
+  };
 }
 
 function isGatewayAuthoritativeManagedServiceRecord(record) {
@@ -2966,6 +3195,7 @@ function isGatewayAuthoritativeManagedServiceRecord(record) {
 async function resolveManagedServiceForAccess(record, opts = {}) {
   const gatewayPk = managedGatewayPkForRecord(record);
   const serviceLabel = String(opts?.serviceLabel || 'Security Cameras').trim() || 'Security Cameras';
+  const requireGatewayAuthority = opts?.requireGatewayAuthority !== false;
   if (!gatewayPk) {
     throw new Error(`${serviceLabel} is not attached to a gateway yet.`);
   }
@@ -2973,7 +3203,7 @@ async function resolveManagedServiceForAccess(record, opts = {}) {
     record,
     currentManagedApplianceRecords(lastIdentity?.devices || [], lastSwarmDevices || []),
   );
-  if (candidate && isFreshManagedServiceRecord(candidate) && isGatewayAuthoritativeManagedServiceRecord(candidate)) {
+  if (candidate && isFreshManagedServiceRecord(candidate) && (!requireGatewayAuthority || isGatewayAuthoritativeManagedServiceRecord(candidate))) {
     return candidate;
   }
 
@@ -2985,13 +3215,17 @@ async function resolveManagedServiceForAccess(record, opts = {}) {
       record,
       currentManagedApplianceRecords(lastIdentity?.devices || [], lastSwarmDevices || []),
     );
-    if (candidate && isFreshManagedServiceRecord(candidate) && isGatewayAuthoritativeManagedServiceRecord(candidate)) {
+    if (candidate && isFreshManagedServiceRecord(candidate) && (!requireGatewayAuthority || isGatewayAuthoritativeManagedServiceRecord(candidate))) {
       return candidate;
     }
     await new Promise((resolve) => window.setTimeout(resolve, MANAGED_SERVICE_RESOLVE_POLL_MS));
   }
 
   if (candidate && isGatewayAuthoritativeManagedServiceRecord(candidate)) {
+    return candidate;
+  }
+
+  if (candidate && !requireGatewayAuthority) {
     return candidate;
   }
 
@@ -3626,7 +3860,7 @@ async function refreshExtendedState(core = null) {
     .filter((rec) => isGatewayRecord(rec))
     .map((rec) => summarizeAppliance(rec, ownedPkSet(ident?.devices || []).has(String(rec?.devicePk || rec?.pk || '').trim())))
     .filter((info) => info.owned)
-    .filter((info) => !findGatewayHostedServiceRecord(info.pk, applianceRecords, 'nvr'))
+    .filter((info) => Object.keys(MANAGED_APP_SURFACES).some((service) => !findGatewayHostedServiceRecord(info.pk, applianceRecords, service)))
     .map((info) => info.pk);
   for (const gatewayPk of ownedGatewayPksNeedingRefresh) {
     requestGatewayInventoryRefresh(gatewayPk).catch(() => {});
