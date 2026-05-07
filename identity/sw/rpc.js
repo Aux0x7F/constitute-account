@@ -87,6 +87,20 @@ async function expireActivePairClaim(sw, reason = 'expired') {
   return projected;
 }
 
+async function projectPairClaimFailure(sw, ident) {
+  await kvSet(PAIR_CLAIM_ACTIVE_KEY, null);
+  const projected = {
+    state: 'failed',
+    identityLabel: String(ident?.label || '').trim(),
+    message: 'Pairing claim failed. Check relay connectivity and try again.',
+    updatedAt: Date.now(),
+  };
+  await kvSet(PAIR_CLAIM_STATUS_KEY, projected);
+  status(sw, 'pair claim failed');
+  pokeUi(sw);
+  return projected;
+}
+
 function schedulePairClaimExpiry(sw, claim) {
   if (pairClaimExpiryTimer) clearTimeout(pairClaimExpiryTimer);
   pairClaimExpiryTimer = null;
@@ -948,11 +962,17 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
     const code = String(params?.code || '').trim();
     if (!code) throw new Error('code required');
 
-    const claim = await activatePairClaim(sw, ident, code, {
-      ttlMs: params?.ttlMs,
-      autoApprove: !!params?.autoApprove,
-      publishClaim: params?.publishClaim !== false,
-    });
+    let claim;
+    try {
+      claim = await activatePairClaim(sw, ident, code, {
+        ttlMs: params?.ttlMs,
+        autoApprove: !!params?.autoApprove,
+        publishClaim: params?.publishClaim !== false,
+      });
+    } catch (err) {
+      await projectPairClaimFailure(sw, ident);
+      throw err;
+    }
 
     status(sw, claim.autoApprove ? 'pair claim sent (auto-approve armed)' : 'pair claim sent');
     pokeUi(sw);

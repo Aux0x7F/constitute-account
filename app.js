@@ -56,7 +56,10 @@ const ACCOUNT_MAIN_HTML = `
           <div class="small muted">Enter the pairing code from a device you want to claim and link to this identity.</div>
           <div class="row u-mt-sm">
             <input id="pairCodeInput" type="text" inputmode="numeric" autocomplete="one-time-code" placeholder="Enter code from new device" />
-            <button id="btnClaimPairCode" type="button">Claim Code</button>
+            <button id="btnClaimPairCode" class="pairClaimButton" type="button" aria-label="Claim">
+              <span class="pairClaimButtonLabel">Claim</span>
+              <span class="inlineSpinner pairClaimButtonSpinner hidden" aria-hidden="true"></span>
+            </button>
           </div>
           <div id="pairCodeStatus" class="small muted u-mt-sm"></div>
         </div>
@@ -1505,6 +1508,17 @@ function setPairCodeStatus(msg, error = false) {
   if (!pairCodeStatus) return;
   pairCodeStatus.textContent = String(msg || '');
   pairCodeStatus.classList.toggle('warn', !!error);
+}
+
+function setPairClaimButtonBusy(busy) {
+  if (!btnClaimPairCode) return;
+  const label = btnClaimPairCode.querySelector('.pairClaimButtonLabel');
+  const spinner = btnClaimPairCode.querySelector('.pairClaimButtonSpinner');
+  btnClaimPairCode.disabled = !!busy;
+  btnClaimPairCode.setAttribute('aria-busy', busy ? 'true' : 'false');
+  btnClaimPairCode.setAttribute('aria-label', busy ? 'Claiming' : 'Claim');
+  label?.classList.toggle('hidden', !!busy);
+  spinner?.classList.toggle('hidden', !busy);
 }
 
 function setGatewayInstallStatus(msg, error = false) {
@@ -3470,6 +3484,10 @@ function renderPairClaimStatus(claimStatus, reqs = []) {
     setPairCodeStatus('Pairing code expired. Enter a fresh code from the device.', true);
     return;
   }
+  if (state === 'failed') {
+    setPairCodeStatus(String(claimStatus?.message || 'Pairing claim failed. Try again.'), true);
+    return;
+  }
   if (state === 'active') {
     setPairCodeStatus('Claim sent. Wait for the pairing request, then approve it below.');
   }
@@ -4276,12 +4294,16 @@ function wireUi() {
         setPairCodeStatus('Enter a code from the new device.', true);
         return;
       }
+      setPairClaimButtonBusy(true);
+      setPairCodeStatus('');
       try {
         const claim = await client.call('pairing.claimCode', { code }, { timeoutMs: 20000 });
         lastPairClaimStatus = { state: 'active', ...claim };
-        setPairCodeStatus('Claim sent. Wait for the pairing request, then approve it below.');
+        renderPairClaimStatus(lastPairClaimStatus);
       } catch (e) {
         setPairCodeStatus(`Claim failed: ${String(e?.message || e)}`, true);
+      } finally {
+        setPairClaimButtonBusy(false);
       }
     };
   }
