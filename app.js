@@ -14,6 +14,7 @@ import {
   shellBootCanDismiss,
 } from './app/loading.js';
 import { createManagedApplianceModel } from './app/managed-appliances.js';
+import { normalizePairCodeInput } from './app/pairing-ui.js';
 
 const ACCOUNT_MAIN_HTML = `
   <section id="viewHome" class="activity hidden">
@@ -54,7 +55,7 @@ const ACCOUNT_MAIN_HTML = `
           <div class="cardTitle">Add Device</div>
           <div class="small muted">Enter the pairing code from a device you want to claim and link to this identity.</div>
           <div class="row u-mt-sm">
-            <input id="pairCodeInput" type="text" placeholder="Enter code from new device" />
+            <input id="pairCodeInput" type="text" inputmode="numeric" autocomplete="one-time-code" placeholder="Enter code from new device" />
             <button id="btnClaimPairCode" type="button">Claim Code</button>
           </div>
           <div id="pairCodeStatus" class="small muted u-mt-sm"></div>
@@ -323,6 +324,7 @@ let lastDirectory = [];
 let lastZones = [];
 let activeZoneKey = '';
 let pendingZoneNav = false;
+let lastPairClaimStatus = null;
 let swarm = null;
 let clientReady = false;
 let swarmBootRequested = false;
@@ -3386,23 +3388,8 @@ function renderNotifications() {
   }
 }
 
-function filterPendingPairRequests(reqs, identityDevices) {
-  const knownPks = new Set((identityDevices || []).map(d => d.pk).filter(Boolean));
-  const knownDids = new Set((identityDevices || []).map(d => d.did).filter(Boolean));
-
-  return (reqs || []).filter(r => {
-    if (r.status && r.status !== 'pending') return false;
-    if (r.state && r.state !== 'pending') return false;
-    if (r.resolved === true) return false;
-    if (r.approved === true || r.rejected === true) return false;
-    if (r.devicePk && knownPks.has(r.devicePk)) return false;
-    if (r.deviceDid && knownDids.has(r.deviceDid)) return false;
-    return true;
-  });
-}
-
 function renderPairRequests(reqs, identityDevices) {
-  const pending = filterPendingPairRequests(reqs, identityDevices);
+  const pending = Array.isArray(reqs) ? reqs : [];
 
   clear(pairingList);
   if (pairingEmpty) pairingEmpty.textContent = 'No pending pairing requests.';
@@ -3470,6 +3457,21 @@ function renderPairRequests(reqs, identityDevices) {
     top.append(left, actions);
     item.append(top);
     pairingList.appendChild(item);
+  }
+}
+
+function renderPairClaimStatus(claimStatus, reqs = []) {
+  const state = String(claimStatus?.state || '').trim();
+  if ((Array.isArray(reqs) && reqs.length > 0) || state === 'matched') {
+    setPairCodeStatus('Pairing request received. Review and approve it below.');
+    return;
+  }
+  if (state === 'expired') {
+    setPairCodeStatus('Pairing code expired. Enter a fresh code from the device.', true);
+    return;
+  }
+  if (state === 'active') {
+    setPairCodeStatus('Claim sent. Wait for the pairing request, then approve it below.');
   }
 }
 
@@ -3824,6 +3826,7 @@ async function refreshExtendedState(core = null) {
   const st = core?.st || lastDeviceState || await client.call('device.getState', {}, { timeoutMs: 20000 });
   const ident = core?.ident || lastIdentity || await client.call('identity.get', {}, { timeoutMs: 20000 });
   const reqs = await client.call('pairing.list', {}, { timeoutMs: 20000 });
+  const pairClaimStatus = await client.call('pairing.claimStatus', {}, { timeoutMs: 20000 }).catch(() => null);
   const blocked = await client.call('blocked.list', {}, { timeoutMs: 20000 });
   const directory = await client.call('directory.list', {}, { timeoutMs: 20000 });
   const zones = await client.call('zones.list', {}, { timeoutMs: 20000 });
@@ -3833,6 +3836,7 @@ async function refreshExtendedState(core = null) {
 
   lastDirectory = directory || [];
   lastZones = zones || [];
+  lastPairClaimStatus = pairClaimStatus || null;
   lastSwarmDevices = swarmDevices || [];
   lastNotifications = Array.isArray(notifs) ? notifs : [];
   notificationsResolved = true;
@@ -3853,6 +3857,7 @@ async function refreshExtendedState(core = null) {
   updateZoneCommandUi();
   pushRuntimeManagedApplianceSourceSnapshot(ident?.devices || [], lastSwarmDevices);
   renderPairRequests(reqs || [], ident?.devices || []);
+  renderPairClaimStatus(lastPairClaimStatus, reqs || []);
   renderNotifications();
 
   const applianceRecords = currentManagedApplianceRecords(ident?.devices || [], lastSwarmDevices);
@@ -4241,15 +4246,39 @@ function wireUi() {
   // settings tabs
   for (const b of tabButtons) b.addEventListener('click', () => setSettingsTab(b.dataset.tab));
 
+  if (pairCodeInput) {
+    pairCodeInput.addEventListener('paste', (event) => {
+      const text = event.clipboardData?.getData('text') || '';
+      const normalized = normalizePairCodeInput(text);
+      if (!normalized) return;
+      event.preventDefault();
+      pairCodeInput.value = normalized;
+      setPairCodeStatus('');
+    });
+    pairCodeInput.addEventListener('input', () => {
+      const normalized = normalizePairCodeInput(pairCodeInput.value);
+      if (normalized !== pairCodeInput.value) pairCodeInput.value = normalized;
+      if (pairCodeStatus?.textContent) setPairCodeStatus('');
+    });
+    pairCodeInput.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        btnClaimPairCode?.click();
+      }
+    });
+  }
+
   if (btnClaimPairCode) {
     btnClaimPairCode.onclick = async () => {
-      const code = String(pairCodeInput?.value || '').trim();
+      const code = normalizePairCodeInput(pairCodeInput?.value || '');
+      if (pairCodeInput) pairCodeInput.value = code;
       if (!code) {
         setPairCodeStatus('Enter a code from the new device.', true);
         return;
       }
       try {
-        await client.call('pairing.claimCode', { code }, { timeoutMs: 20000 });
+        const claim = await client.call('pairing.claimCode', { code }, { timeoutMs: 20000 });
+        lastPairClaimStatus = { state: 'active', ...claim };
         setPairCodeStatus('Claim sent. Wait for the pairing request, then approve it below.');
       } catch (e) {
         setPairCodeStatus(`Claim failed: ${String(e?.message || e)}`, true);

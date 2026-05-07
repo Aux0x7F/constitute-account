@@ -8,7 +8,7 @@ import { getIdentity, setIdentity } from './identityStore.js';
 import { notifAdd, notifClear, notifRemove } from './notifs.js';
 import { pendingAdd, pendingRemove } from './pending.js';
 import { getSubId, getAppTag } from './relayOut.js';
-import { emit, log, pokeUi } from './uiBus.js';
+import { emit, log, pokeUi, status } from './uiBus.js';
 import { blockedAdd, blockedIs, blockedRemove } from './blocklist.js';
 import { kvGet, kvSet } from './idb.js';
 import { directoryUpsert } from './directory.js';
@@ -22,6 +22,7 @@ const REPLAY_SKEW_SEC = 2 * 60;
 const REPLAY_CAP = 400;
 const PAIR_OFFER_KEY = 'pairOffer';
 const PAIR_CLAIM_ACTIVE_KEY = 'pairClaimActive';
+const PAIR_CLAIM_STATUS_KEY = 'pairClaimStatus';
 
 
 function pairingTags(identityLabel, zones = [], toPk = '') {
@@ -522,6 +523,14 @@ export async function handleRelayFrame(sw, raw) {
       }
       autoApprove = !!activeClaim?.autoApprove;
       await kvSet(PAIR_CLAIM_ACTIVE_KEY, null);
+      await kvSet(PAIR_CLAIM_STATUS_KEY, {
+        state: 'matched',
+        identityLabel: String(payload.identity || '').trim(),
+        claimId: String(activeClaim.claimId || '').trim(),
+        codeHash,
+        matchedAt: nowMs,
+      });
+      status(sw, 'pair request received');
     }
 
     const reqId = String(payload.requestId || '').trim()
