@@ -388,6 +388,17 @@ input[type="checkbox"]{
   animation:bootSpin 0.9s linear infinite;
 }
 
+.pairClaimButton{
+  min-width:5.75rem;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+}
+
+.pairClaimButtonSpinner{
+  flex:0 0 auto;
+}
+
 .modal{
   position:fixed;
   inset:50% auto auto 50%;

@@ -56,14 +56,96 @@ function pairingTags(identityLabel, zones = [], toPk = '') {
 
 const PAIR_OFFER_KEY = 'pairOffer';
 const PAIR_CLAIM_ACTIVE_KEY = 'pairClaimActive';
+const PAIR_CLAIM_STATUS_KEY = 'pairClaimStatus';
 const PAIR_OFFER_TTL_MS = 10 * 60 * 1000;
 const PAIR_CLAIM_TTL_MS = 2 * 60 * 1000;
 const PAIR_CLAIM_MAX_TTL_MS = 10 * 60 * 1000;
+let pairClaimExpiryTimer = null;
 
 async function pairCodeHash(identityLabel, code) {
   return await sha256B64Url(`${String(identityLabel || '').trim()}|${String(code || '').trim()}`);
 }
 
+async function expireActivePairClaim(sw, reason = 'expired') {
+  const claim = (await kvGet(PAIR_CLAIM_ACTIVE_KEY)) || null;
+  if (!claim) return null;
+  const now = Date.now();
+  const expiresAt = Number(claim.expiresAt || 0);
+  if (expiresAt && now < expiresAt && reason === 'expired') return claim;
+  await kvSet(PAIR_CLAIM_ACTIVE_KEY, null);
+  const projected = {
+    state: reason,
+    identityLabel: String(claim.identityLabel || '').trim(),
+    claimId: String(claim.claimId || '').trim(),
+    codeHash: String(claim.codeHash || '').trim(),
+    expiresAt,
+    updatedAt: now,
+  };
+  await kvSet(PAIR_CLAIM_STATUS_KEY, projected);
+  status(sw, reason === 'matched' ? 'pair request received' : 'pair claim expired');
+  pokeUi(sw);
+  return projected;
+}
+
+async function projectPairClaimFailure(sw, ident) {
+  await kvSet(PAIR_CLAIM_ACTIVE_KEY, null);
+  const projected = {
+    state: 'failed',
+    identityLabel: String(ident?.label || '').trim(),
+    message: 'Pairing claim failed. Check relay connectivity and try again.',
+    updatedAt: Date.now(),
+  };
+  await kvSet(PAIR_CLAIM_STATUS_KEY, projected);
+  status(sw, 'pair claim failed');
+  pokeUi(sw);
+  return projected;
+}
+
+function schedulePairClaimExpiry(sw, claim) {
+  if (pairClaimExpiryTimer) clearTimeout(pairClaimExpiryTimer);
+  pairClaimExpiryTimer = null;
+  const expiresAt = Number(claim?.expiresAt || 0);
+  if (!expiresAt) return;
+  const delayMs = Math.max(0, expiresAt - Date.now() + 50);
+  pairClaimExpiryTimer = setTimeout(() => {
+    pairClaimExpiryTimer = null;
+    expireActivePairClaim(sw, 'expired').catch((err) => log(sw, `pair claim expiry degraded: ${String(err?.message || err)}`));
+  }, delayMs);
+}
+
+async function projectPairClaimStatus({ consumeExpired = false } = {}) {
+  const claim = (await kvGet(PAIR_CLAIM_ACTIVE_KEY)) || null;
+  const now = Date.now();
+  if (claim) {
+    const expiresAt = Number(claim.expiresAt || 0);
+    if (expiresAt && now > expiresAt) {
+      await kvSet(PAIR_CLAIM_ACTIVE_KEY, null);
+      const projected = {
+        state: 'expired',
+        identityLabel: String(claim.identityLabel || '').trim(),
+        claimId: String(claim.claimId || '').trim(),
+        codeHash: String(claim.codeHash || '').trim(),
+        expiresAt,
+        updatedAt: now,
+      };
+      await kvSet(PAIR_CLAIM_STATUS_KEY, consumeExpired ? null : projected);
+      return projected;
+    }
+    return {
+      state: 'active',
+      identityLabel: String(claim.identityLabel || '').trim(),
+      claimId: String(claim.claimId || '').trim(),
+      codeHash: String(claim.codeHash || '').trim(),
+      autoApprove: !!claim.autoApprove,
+      createdAt: Number(claim.createdAt || 0),
+      expiresAt,
+      updatedAt: now,
+    };
+  }
+  const last = (await kvGet(PAIR_CLAIM_STATUS_KEY)) || null;
+  if (last && consumeExpired) await kvSet(PAIR_CLAIM_STATUS_KEY, null);
+  return last || { state: 'idle', updatedAt: now };
+}
 
 function clampPairClaimTtl(ttlMs) {
   const raw = Number(ttlMs || PAIR_CLAIM_TTL_MS);
@@ -89,6 +171,8 @@ async function activatePairClaim(sw, ident, code, options = {}) {
     createdAt: now,
     expiresAt: now + ttlMs,
   });
+  await kvSet(PAIR_CLAIM_STATUS_KEY, null);
+  schedulePairClaimExpiry(sw, { expiresAt: now + ttlMs });
 
   if (publishClaim) {
     const zones = await listZones(ident || {}).catch(() => []);
@@ -878,15 +962,27 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
     const code = String(params?.code || '').trim();
     if (!code) throw new Error('code required');
 
-    const claim = await activatePairClaim(sw, ident, code, {
-      ttlMs: params?.ttlMs,
-      autoApprove: !!params?.autoApprove,
-      publishClaim: params?.publishClaim !== false,
-    });
+    let claim;
+    try {
+      claim = await activatePairClaim(sw, ident, code, {
+        ttlMs: params?.ttlMs,
+        autoApprove: !!params?.autoApprove,
+        publishClaim: params?.publishClaim !== false,
+      });
+    } catch (err) {
+      await projectPairClaimFailure(sw, ident);
+      throw err;
+    }
 
     status(sw, claim.autoApprove ? 'pair claim sent (auto-approve armed)' : 'pair claim sent');
     pokeUi(sw);
     return { ok: true, ...claim };
+  }
+
+  if (method === 'pairing.claimStatus') {
+    const projected = await projectPairClaimStatus({ consumeExpired: params?.consumeExpired !== false });
+    if (projected?.state === 'active') schedulePairClaimExpiry(sw, projected);
+    return projected;
   }
 
   if (method === 'pairing.prepareInstall') {
@@ -1056,6 +1152,7 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
 
     await pendingRemove(rid);
     await notifRemove(`n-pair-${rid}`);
+    await kvSet(PAIR_CLAIM_STATUS_KEY, null);
     status(sw, 'rejected');
     pokeUi(sw);
     return { ok: true };
@@ -1113,6 +1210,7 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
 
     await pendingRemove(rid);
     await notifRemove(`n-pair-${rid}`);
+    await kvSet(PAIR_CLAIM_STATUS_KEY, null);
 
     status(sw, 'approved');
     pokeUi(sw);

@@ -189,6 +189,11 @@ Used for:
 - discovery and zone presence
 - service access/signaling coordination
 
+Pairing UX remains action-oriented:
+- pairing codes can be pasted from operator tools and are normalized before claim
+- pairing claim/request expiry is owned by Service Worker state and projected to UI
+- stale pair requests stop rendering after their advertised TTL
+
 ## Security Model
 - device-level signing remains mandatory
 - Service Worker remains the cryptographic authority for shell state
