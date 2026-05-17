@@ -654,6 +654,10 @@ test('runtime attach declares snapshot materialization budget per surface', asyn
     entry.budgetId === attached.materializationBudget.budgetId
       && entry.clientId === 'surface-materialization-test'
   )), true);
+  assert.equal(snapshot.result.resource.kind, 'runtime.resource.postureSummary');
+  assert.equal(snapshot.result.resource.cleanupAllowed, false);
+  assert.equal(snapshot.result.retention.kind, 'runtime.retention.postureSummary');
+  assert.equal(snapshot.result.retention.releaseRequired, true);
 });
 
 test('runtime diagnostics subscription filters by event plane before replay and delivery', async () => {
@@ -1132,6 +1136,7 @@ test('runtime reduces media fulfillment evidence as stream posture', async () =>
   });
   assert.equal(pending.ok, true);
   assert.equal(pending.result.state, protocol.SWARM.MEDIA_FULFILLMENT_STATE.PENDING);
+  assert.equal(pending.result.postureState, 'waitingRender');
   assert.equal(pending.result.trackLive, true);
   assert.equal(pending.result.visibleFrame, false);
 
@@ -1156,6 +1161,7 @@ test('runtime reduces media fulfillment evidence as stream posture', async () =>
   });
   assert.equal(visible.ok, true);
   assert.equal(visible.result.state, protocol.SWARM.MEDIA_FULFILLMENT_STATE.USABLE);
+  assert.equal(visible.result.postureState, 'adapterLive');
   assert.equal(visible.result.visibleFrame, true);
 
   const blocked = await send(runtime.port, {
@@ -1176,6 +1182,7 @@ test('runtime reduces media fulfillment evidence as stream posture', async () =>
   });
   assert.equal(blocked.ok, true);
   assert.equal(blocked.result.state, protocol.SWARM.MEDIA_FULFILLMENT_STATE.BLOCKED);
+  assert.equal(blocked.result.postureState, 'mediaPathBlocked');
   assert.deepEqual(blocked.result.blockedReasons, ['iceFailed']);
 
   const snapshot = await send(runtime.port, { type: 'runtime.snapshot.get' });
@@ -1219,10 +1226,11 @@ test('runtime applies media fulfillment posture to owning activation', async () 
   assert.equal(blocked.ok, true);
   let snapshot = await send(runtime.port, { type: 'runtime.snapshot.get' });
   let activation = snapshot.result.activationResolutions['stream-intent-media-fulfillment'];
-  assert.equal(activation.state, 'mediaBlocked');
+  assert.equal(activation.state, 'mediaPathBlocked');
   assert.equal(activation.mediaState, protocol.SWARM.MEDIA_FULFILLMENT_STATE.BLOCKED);
+  assert.equal(activation.mediaPostureState, 'mediaPathBlocked');
   assert.equal(activation.mediaFulfillment.routePromiseId, routePromiseId);
-  assert.equal(activation.lastError.code, 'media.blocked');
+  assert.equal(activation.lastError.code, 'media.pathBlocked');
 
   await send(runtime.port, {
     type: 'runtime.media.fulfillment.evidence.put',
@@ -1263,8 +1271,54 @@ test('runtime applies media fulfillment posture to owning activation', async () 
   activation = snapshot.result.activationResolutions['stream-intent-media-fulfillment'];
   assert.equal(activation.state, 'adapterLive');
   assert.equal(activation.mediaState, protocol.SWARM.MEDIA_FULFILLMENT_STATE.USABLE);
+  assert.equal(activation.mediaPostureState, 'adapterLive');
   assert.equal(activation.lastError, null);
   assert.ok(snapshot.result.runtimeEvents.some((entry) => entry.kind === 'activation.media.fulfillment.applied'));
+});
+
+test('runtime distinguishes render-blocked media posture from path-blocked media posture', async () => {
+  const runtime = loadRuntime(new Map());
+  await attach(runtime.port);
+  const queued = await send(runtime.port, {
+    type: 'swarm.frame.queue',
+    payload: frameInput({
+      correlationId: 'stream-intent-render-blocked',
+      channelId: 'nvr.streams',
+      capability: protocol.SWARM.CORE_CAPABILITY.MEDIA_STREAM_PREVIEW,
+    }),
+  });
+  assert.equal(queued.ok, true);
+  const response = await send(runtime.port, {
+    type: 'runtime.media.fulfillment.evidence.put',
+    payload: {
+      kind: protocol.SWARM.RECORD_KIND.MEDIA_FULFILLMENT_EVIDENCE,
+      evidenceId: 'media-proof-render-blocked',
+      evidenceKind: protocol.SWARM.MEDIA_FULFILLMENT_EVIDENCE_KIND.RENDER_STATE,
+      state: protocol.SWARM.MEDIA_FULFILLMENT_STATE.BLOCKED,
+      blockedReason: 'renderPlaybackStalled',
+      correlationId: queued.result.frameId,
+      routePromiseId: 'route:stream-intent-render-blocked',
+      adapterRef: 'adapter:media-webrtc:browser',
+      safeFacts: {
+        readinessState: 'renderBlocked',
+        videoWidth: 640,
+        videoHeight: 360,
+        visibleFrame: true,
+        playbackAdvanced: false,
+      },
+      observedAt: 1_700_000_007,
+      expiresAt: 1_700_060_007,
+    },
+  });
+  assert.equal(response.ok, true);
+  assert.equal(response.result.state, protocol.SWARM.MEDIA_FULFILLMENT_STATE.BLOCKED);
+  assert.equal(response.result.postureState, 'renderBlocked');
+  assert.equal(response.result.blockedCategory, 'render');
+  const snapshot = await send(runtime.port, { type: 'runtime.snapshot.get' });
+  const activation = snapshot.result.activationResolutions['stream-intent-render-blocked'];
+  assert.equal(activation.state, 'renderBlocked');
+  assert.equal(activation.mediaPostureState, 'renderBlocked');
+  assert.equal(activation.lastError.code, 'media.renderBlocked');
 });
 
 test('runtime reduces service media transport observations into stream fulfillment posture', async () => {
@@ -1319,6 +1373,7 @@ test('runtime reduces service media transport observations into stream fulfillme
   assert.equal(received.ok, true, JSON.stringify(received));
   const posture = received.result.mediaFulfillment['nvr-preview-service-observation'];
   assert.equal(posture.state, protocol.SWARM.MEDIA_FULFILLMENT_STATE.BLOCKED);
+  assert.equal(posture.postureState, 'mediaPathBlocked');
   assert.equal(posture.serviceRef, `service:${SERVICE_PK}`);
   assert.deepEqual(posture.blockedReasons, ['peerConnectionFailed']);
   assert.equal(posture.latestEvidence.safeFacts.observationState, protocol.SWARM.MEDIA_TRANSPORT_OBSERVATION_STATE.FAILED);
@@ -1360,6 +1415,7 @@ test('runtime accepts browser media transport observations as shared stream post
 
   assert.equal(response.ok, true, JSON.stringify(response));
   assert.equal(response.result.state, protocol.SWARM.MEDIA_FULFILLMENT_STATE.BLOCKED);
+  assert.equal(response.result.postureState, 'mediaPathBlocked');
   assert.equal(response.result.adapterRef, 'adapter:media-webrtc:browser');
   assert.deepEqual(response.result.blockedReasons, ['inboundRtpStalled']);
   const snapshot = await send(runtime.port, { type: 'runtime.snapshot.get' });

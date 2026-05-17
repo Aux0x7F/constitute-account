@@ -4,7 +4,6 @@ import {
   renderFirstPartyShell,
   setConnectionStateText,
 } from "constitute-ui";
-import { createRuntimeSurfaceClient } from "../constitute-ui/src/runtime-surface-client.js";
 import { IdentityClient } from './identity/client.js';
 import {
   SHELL_BOOT_FALLBACK_TIMEOUT_MS,
@@ -35,7 +34,10 @@ import {
   browserStorageShellContext,
   deriveRuntimeShellState,
 } from './runtime-shell-state.js';
-import { accountSurfaceAttachContext } from './surface-app-contract.js';
+import {
+  accountRuntimeClientModule,
+  accountSurfaceAttachContext,
+} from './surface-app-contract.js';
 
 const ACCOUNT_MAIN_HTML = `
   <section id="viewHome" class="activity hidden">
@@ -149,6 +151,14 @@ const ACCOUNT_MAIN_HTML = `
         <div class="kv">
           <div class="k">Projection</div>
           <div class="v" id="runtimeProjectionStatus">unknown</div>
+        </div>
+        <div class="kv">
+          <div class="k">Resource</div>
+          <div class="v" id="runtimeResourceStatus">unknown</div>
+        </div>
+        <div class="kv">
+          <div class="k">Retention</div>
+          <div class="v" id="runtimeRetentionStatus">unknown</div>
         </div>
         <div class="small muted" id="runtimeStatusDetail">Runtime snapshot updates automatically.</div>
         <div id="runtimeServiceCatalogList" class="list u-mt-sm"></div>
@@ -307,6 +317,8 @@ const runtimeServiceCatalogListEl = document.getElementById('runtimeServiceCatal
 const runtimeEdgeStatusEl = document.getElementById('runtimeEdgeStatus');
 const runtimeQueueStatusEl = document.getElementById('runtimeQueueStatus');
 const runtimeProjectionStatusEl = document.getElementById('runtimeProjectionStatus');
+const runtimeResourceStatusEl = document.getElementById('runtimeResourceStatus');
+const runtimeRetentionStatusEl = document.getElementById('runtimeRetentionStatus');
 const runtimeStatusDetailEl = document.getElementById('runtimeStatusDetail');
 
 const joinDeviceLabelEl = document.getElementById('joinDeviceLabel');
@@ -744,6 +756,8 @@ function renderRuntimeStatusSnapshot() {
     edgeStatusEl: runtimeEdgeStatusEl,
     queueStatusEl: runtimeQueueStatusEl,
     projectionStatusEl: runtimeProjectionStatusEl,
+    resourceStatusEl: runtimeResourceStatusEl,
+    retentionStatusEl: runtimeRetentionStatusEl,
     runtimeStatusDetailEl,
   }, runtimeStatusSnapshot, document);
 }
@@ -2077,7 +2091,7 @@ function startPlatformRuntimeBridge() {
     return false;
   }
 
-  const runtimeClient = createRuntimeSurfaceClient({
+  const runtimeClient = accountRuntimeClientModule.createRuntimeSurfaceClient({
     clientId,
     surface: 'shell',
     broker: true,

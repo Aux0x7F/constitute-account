@@ -54,7 +54,8 @@ test('account runtime publishes cached swarm service records before identity ref
 });
 
 test('account bridge and shared runtime use the same worker build id', () => {
-  assert.match(source, /createRuntimeSurfaceClient/);
+  assert.match(source, /accountRuntimeClientModule\.createRuntimeSurfaceClient/);
+  assert.doesNotMatch(source, /runtime-surface-client\.js/);
   assert.match(source, /from '\.\/runtime-contract\.js'/);
   assert.match(runtimeContractSource, /PLATFORM_RUNTIME_VERSION = Object\.freeze\(\{ major: 2, minor: 57 \}\)/);
   assert.match(workerSource, /const RUNTIME_VERSION = Object\.freeze\(\{ major: 2, minor: 57 \}\)/);
