@@ -129,7 +129,7 @@ function loadRuntime(store = new Map(), options = {}) {
     });
   }
   const source = `${shellStateSource}\n${raw
-    .replace(/^import[\s\S]*?from "constitute-protocol";/, 'const { SWARM, STREAM_SESSION_LIFECYCLE_PHASE, applyProjectionDelta, assertConsumerFloor, assertEventAdmissionEnvelope, assertMaterializationBudget, assertProjectionDelta, assertProjectionPolicy, assertProjectionRecord, assertProjectionSnapshot, assertResolvedMemberRef, assertProjectionRepairPosture, assertResourcePosture, assertResourceProfile, assertRetentionReleasePosture, assertRoutePromise, assertRuntimeActivationRequest, assertSelfCapabilityAssessment, assertMediaFulfillmentEvidence, assertMediaTransportObservation, assertContributionLifecycle, assertStreamSessionCandidate, assertSubscriptionContract, assertSwarmActivation, assertSwarmFrame, assertSwarmInteraction, makeLogEventEnvelope, openEnvelope, makeProjectionRepairRequest, makeSwarmFrame, pubkeyFromSecretKey, sealEnvelope, eventPlaneForRecordKind, streamSessionLifecycleRecordFromCarrier, streamSessionLifecyclePhase } = __protocol;')
+    .replace(/^import[\s\S]*?from "constitute-protocol";/, 'const { PROJECTION, SERVICE_REGISTRY, SWARM, STREAM_SESSION_LIFECYCLE_PHASE, applyProjectionDelta, assertConsumerFloor, assertEventAdmissionEnvelope, assertMaterializationBudget, assertProjectionDelta, assertProjectionPolicy, assertProjectionRecord, assertProjectionSnapshot, assertResolvedMemberRef, assertProjectionRepairPosture, assertResourcePosture, assertResourceProfile, assertRetentionReleasePosture, assertRoutePromise, assertRuntimeActivationRequest, assertSelfCapabilityAssessment, assertMediaFulfillmentEvidence, assertMediaTransportObservation, assertContributionLifecycle, assertServiceRegistryClaim, assertServiceRegistryMaterialization, assertStreamSessionCandidate, assertSubscriptionContract, assertSwarmActivation, assertSwarmFrame, assertSwarmInteraction, makeLogEventEnvelope, openEnvelope, makeProjectionRepairRequest, makeSwarmFrame, pubkeyFromSecretKey, sealEnvelope, eventPlaneForRecordKind, streamSessionLifecycleRecordFromCarrier, streamSessionLifecyclePhase } = __protocol;')
     .replace(/^import \{ deriveRuntimeShellState \} from "\.\/runtime-shell-state\.js";\s*/m, '')}`;
   const runtimeTimers = makeRuntimeTimers();
   const webSockets = [];
@@ -2747,6 +2747,21 @@ test('runtime stream activation derives route fields from retained service catal
   assert.equal(opened.authority.servicePk, SERVICE_PK);
   assert.equal(opened.authority.gatewayPk, GATEWAY_PK);
   assert.equal(opened.authority.identityId, 'identity-1');
+});
+
+test('runtime service catalog exposes service registry materialization posture', async () => {
+  const runtime = loadRuntime(new Map());
+  await attach(runtime.port);
+  await seedNvrServiceCatalog(runtime.port);
+  await seedNvrEdgeDirectory(runtime.port);
+
+  const catalog = await send(runtime.port, { type: 'service.catalog.get' });
+  assert.equal(catalog.ok, true);
+  assert.equal(catalog.result.registry.kind, protocol.SWARM.RECORD_KIND.SERVICE_REGISTRY_MATERIALIZATION);
+  assert.equal(catalog.result.registry.state, protocol.SERVICE_REGISTRY.MATERIALIZATION_STATE.READY);
+  assert.equal(catalog.result.registry.claimRefs.length, 1);
+  assert.equal(catalog.result.registry.serviceRefs[0], `service:nvr:${SERVICE_PK}`);
+  assert.equal(Array.isArray(catalog.result.registry.entries), true);
 });
 
 test('runtime stream activation resolves NVR source ids through service contract baseline', async () => {
