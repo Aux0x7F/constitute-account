@@ -4,7 +4,6 @@ import {
   renderFirstPartyShell,
   setConnectionStateText,
 } from "constitute-ui";
-import { createRuntimeSurfaceClient } from "../constitute-ui/src/runtime-surface-client.js";
 import { IdentityClient } from './identity/client.js';
 import {
   SHELL_BOOT_FALLBACK_TIMEOUT_MS,
@@ -35,7 +34,10 @@ import {
   browserStorageShellContext,
   deriveRuntimeShellState,
 } from './runtime-shell-state.js';
-import { accountSurfaceAttachContext } from './surface-app-contract.js';
+import {
+  accountRuntimeClientModule,
+  accountSurfaceAttachContext,
+} from './surface-app-contract.js';
 
 const ACCOUNT_MAIN_HTML = `
   <section id="viewHome" class="activity hidden">
@@ -2089,7 +2091,7 @@ function startPlatformRuntimeBridge() {
     return false;
   }
 
-  const runtimeClient = createRuntimeSurfaceClient({
+  const runtimeClient = accountRuntimeClientModule.createRuntimeSurfaceClient({
     clientId,
     surface: 'shell',
     broker: true,
