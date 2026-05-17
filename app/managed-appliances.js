@@ -190,6 +190,8 @@ export function createManagedApplianceModel({
       || '',
     ).trim();
     const hostedUpdatedAt = Number(hosted.updatedAt || hosted.updated_at || gateway.updatedAt || gateway.updated_at || 0);
+    const hostedFacts = hosted.facts && typeof hosted.facts === 'object' ? hosted.facts : null;
+    const actualFacts = actual.facts && typeof actual.facts === 'object' ? actual.facts : null;
     return {
       ...actual,
       devicePk: String(hosted.devicePk || hosted.device_pk || actual.devicePk || actual.pk || '').trim(),
@@ -204,6 +206,10 @@ export function createManagedApplianceModel({
       freshnessMs: Number(hosted.freshnessMs || hosted.freshness_ms || actual.freshnessMs || actual.freshness_ms || 0),
       status: String(hosted.status || actual.status || '').trim(),
       cameraCount: Number(hosted.cameraCount || hosted.camera_count || actual.cameraCount || actual.camera_count || 0),
+      facts: hostedFacts || actualFacts || undefined,
+      health: hosted.health || actual.health || hostedFacts?.health || actualFacts?.health || undefined,
+      sources: hosted.sources || hosted.sourceIds || actual.sources || actual.sourceIds || hostedFacts?.sources || hostedFacts?.sourceIds || actualFacts?.sources || actualFacts?.sourceIds || undefined,
+      cameraDevices: hosted.cameraDevices || hosted.cameras || actual.cameraDevices || actual.cameras || hostedFacts?.cameraDevices || hostedFacts?.cameras || actualFacts?.cameraDevices || actualFacts?.cameras || undefined,
       managedAvailabilityAuthority: 'gateway',
       managedAvailabilityUpdatedAt: hostedUpdatedAt,
       managedAvailabilityGatewayPk: gatewayPk,

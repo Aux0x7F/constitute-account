@@ -4,6 +4,9 @@ import {
   verifyEvent,
 } from 'https://cdn.jsdelivr.net/npm/nostr-tools@2.7.2/+esm';
 
+// Nostr-shaped discovery records are bootstrap/fallback carriers only. Runtime
+// activation, projection, stream, storage, and logging coordination must route
+// through swarm edge frames.
 import { kvGet, kvSet } from '../idb.js';
 import { ensureDevice } from '../deviceStore.js';
 import { getIdentity } from '../identityStore.js';

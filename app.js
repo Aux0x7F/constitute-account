@@ -1,11 +1,10 @@
 import "constitute-ui/styles.css";
 import {
   renderActionList,
-  renderAccountCenterSummary,
   renderFirstPartyShell,
   setConnectionStateText,
 } from "constitute-ui";
-import { BROKER, PROJECTION, SERVICE_ACCESS_EVENTS, SERVICE_EXCHANGE, makeServiceExchangeFrame } from "constitute-protocol";
+import { createRuntimeSurfaceClient } from "../constitute-ui/src/runtime-surface-client.js";
 import { IdentityClient } from './identity/client.js';
 import {
   SHELL_BOOT_FALLBACK_TIMEOUT_MS,
@@ -14,6 +13,28 @@ import {
   shellBootCanDismiss,
 } from './app/loading.js';
 import { createManagedApplianceModel } from './app/managed-appliances.js';
+import { normalizePairCodeInput } from './app/pairing-ui.js';
+import {
+  buildRuntimeSnapshotView,
+  renderRuntimeSnapshotView,
+} from './app/runtime-ui.js';
+import {
+  PLATFORM_RUNTIME_BUILD_ID,
+  runtimeSharedWorkerName,
+  runtimeWorkerScriptUrl as accountRuntimeWorkerScriptUrl,
+} from './runtime-contract.js';
+import { RUNTIME_DIAGNOSTIC_OPERATOR_PLANES, attachRuntimeDiagnostics } from './runtime-diagnostics.js';
+import {
+  RELAY_RX_FORWARD_MAX_IN_FLIGHT,
+  RELAY_RX_FORWARD_QUEUE_LIMIT,
+  RELAY_RX_FORWARD_TIMEOUT_MS,
+  relayRxIngressClassification,
+  relayRxLanePriority,
+} from './runtime-relay-admission.js';
+import {
+  browserStorageShellContext,
+  deriveRuntimeShellState,
+} from './runtime-shell-state.js';
 
 const ACCOUNT_MAIN_HTML = `
   <section id="viewHome" class="activity hidden">
@@ -54,8 +75,11 @@ const ACCOUNT_MAIN_HTML = `
           <div class="cardTitle">Add Device</div>
           <div class="small muted">Enter the pairing code from a device you want to claim and link to this identity.</div>
           <div class="row u-mt-sm">
-            <input id="pairCodeInput" type="text" placeholder="Enter code from new device" />
-            <button id="btnClaimPairCode" type="button">Claim Code</button>
+            <input id="pairCodeInput" type="text" inputmode="numeric" autocomplete="one-time-code" placeholder="Enter code from new device" />
+            <button id="btnClaimPairCode" class="pairClaimButton" type="button" aria-label="Claim">
+              <span class="pairClaimButtonLabel">Claim</span>
+              <span class="inlineSpinner pairClaimButtonSpinner hidden" aria-hidden="true"></span>
+            </button>
           </div>
           <div id="pairCodeStatus" class="small muted u-mt-sm"></div>
         </div>
@@ -105,6 +129,28 @@ const ACCOUNT_MAIN_HTML = `
           <div class="v" id="networkStatusServices">unknown</div>
         </div>
         <div class="small muted" id="networkStatusDetail">Updates automatically.</div>
+      </div>
+
+      <div class="card">
+        <div class="cardTitle">Runtime</div>
+        <div class="kv">
+          <div class="k">Catalog</div>
+          <div class="v" id="runtimeServiceCatalogStatus">unknown</div>
+        </div>
+        <div class="kv">
+          <div class="k">Edge</div>
+          <div class="v" id="runtimeEdgeStatus">unknown</div>
+        </div>
+        <div class="kv">
+          <div class="k">Queue</div>
+          <div class="v" id="runtimeQueueStatus">unknown</div>
+        </div>
+        <div class="kv">
+          <div class="k">Projection</div>
+          <div class="v" id="runtimeProjectionStatus">unknown</div>
+        </div>
+        <div class="small muted" id="runtimeStatusDetail">Runtime snapshot updates automatically.</div>
+        <div id="runtimeServiceCatalogList" class="list u-mt-sm"></div>
       </div>
 
       <div class="card">
@@ -194,6 +240,7 @@ const shell = renderFirstPartyShell(app, {
     { id: "zones", label: "Zones" },
   ],
   mainHtml: ACCOUNT_MAIN_HTML,
+  accountCenterTitle: "",
 });
 
 const panePathEl = shell.panePathEl;
@@ -254,6 +301,12 @@ const networkStatusRelayEl = document.getElementById('networkStatusRelay');
 const networkStatusGatewayMeshEl = document.getElementById('networkStatusGatewayMesh');
 const networkStatusServicesEl = document.getElementById('networkStatusServices');
 const networkStatusDetailEl = document.getElementById('networkStatusDetail');
+const runtimeServiceCatalogStatusEl = document.getElementById('runtimeServiceCatalogStatus');
+const runtimeServiceCatalogListEl = document.getElementById('runtimeServiceCatalogList');
+const runtimeEdgeStatusEl = document.getElementById('runtimeEdgeStatus');
+const runtimeQueueStatusEl = document.getElementById('runtimeQueueStatus');
+const runtimeProjectionStatusEl = document.getElementById('runtimeProjectionStatus');
+const runtimeStatusDetailEl = document.getElementById('runtimeStatusDetail');
 
 const joinDeviceLabelEl = document.getElementById('joinDeviceLabel');
 
@@ -291,18 +344,15 @@ const SWARM_ICE_SERVERS = [
 ];
 
 const SHELL_BUILD_ID = '2026-04-06-runtime-stage3';
-const PLATFORM_RUNTIME_VERSION = Object.freeze({ major: 2, minor: 12 });
-const PLATFORM_RUNTIME_BUILD_ID = `runtime-${PLATFORM_RUNTIME_VERSION.major}.${PLATFORM_RUNTIME_VERSION.minor}`;
 const RUNTIME_ATTACH_TIMEOUT_MS = 15_000;
 const RUNTIME_WRITE_TIMEOUT_MS = 12_000;
-const MANAGED_SERVICE_ACCESS_REQUEST_TIMEOUT_MS = 90_000;
-const GATEWAY_SIGNAL_REQUEST_TIMEOUT_MS = 135_000;
-const PROJECTION_SERVICE_ACCESS_TIMEOUT_MS = 25_000;
-const PROJECTION_SIGNAL_REQUEST_TIMEOUT_MS = 30_000;
-const BROKER_READY_TIMEOUT_MS = 45_000;
-const BROKER_RELAY_READY_TIMEOUT_MS = 30_000;
-const BROKER_READY_POLL_MS = 250;
-const BROKER_RELAY_SETTLE_MS = 500;
+const RUNTIME_SWARM_EDGE_ATTACH_RETRY_MS = 30_000;
+const RUNTIME_SWARM_EDGE_ATTACH_MAX_RETRY_MS = 120_000;
+const RUNTIME_STREAM_OPEN = 'runtime.stream.open';
+const RUNTIME_STREAM_CONTROL = 'runtime.stream.control';
+const RUNTIME_STREAM_CLOSE = 'runtime.stream.close';
+const RUNTIME_AUTHORITY_DEVICE_PUT = 'runtime.authority.device.put';
+const SWARM_EDGE_ATTACH = 'swarm.edge.attach';
 const DEFAULT_PUBLIC_RELAYS = Object.freeze([
   'wss://nos.lol',
   'wss://relay.primal.net',
@@ -323,6 +373,7 @@ let lastDirectory = [];
 let lastZones = [];
 let activeZoneKey = '';
 let pendingZoneNav = false;
+let lastPairClaimStatus = null;
 let swarm = null;
 let clientReady = false;
 let swarmBootRequested = false;
@@ -332,9 +383,9 @@ const MANAGED_APP_SURFACES = Object.freeze({
   nvr: 'constitute-nvr-ui',
   logging: 'constitute-logging-ui',
 });
-const MANAGED_SERVICE_ACCESS_TTL_MS = 2 * 60 * 1000;
 const GATEWAY_INVENTORY_REFRESH_TTL_MS = 15_000;
 const GATEWAY_INVENTORY_STABLE_TTL_MS = 2 * 60 * 1000;
+const GATEWAY_GRANT_VIEW_REFRESH_TTL_MS = 60_000;
 const RELAY_BRIDGE_LEASE_KEY = 'constitute.relayBridge.owner';
 const RELAY_BRIDGE_LEASE_MS = 12_000;
 const RELAY_BRIDGE_HEARTBEAT_MS = 4_000;
@@ -343,8 +394,9 @@ const RELAY_WORKER_QUIET_TIMEOUT_MS = 1_500;
 const APPLIANCE_DISCOVERY_MAX_AGE_MS = 60 * 60 * 1000;
 
 let relayBridge = null;
-let relayPoolSnapshot = { version: '', urls: [], relays: {}, state: 'offline', reason: '' };
+let relayPoolSnapshot = { version: '', urls: [], relays: {}, state: 'offline', reason: '', ingress: null };
 let runtimeBridge = null;
+let runtimeDiagnosticsAgent = null;
 let runtimeAttached = false;
 let runtimeStatusSnapshot = {
   buildId: '',
@@ -355,15 +407,23 @@ let runtimeStatusSnapshot = {
   resourceNames: {},
   projections: {},
   managedServiceIssue: null,
-  serviceAccessContextCount: 0,
 };
 let lastManagedServiceIssue = null;
 let lastRuntimeShellStatusKey = '';
 let runtimeAttachWarningLogged = false;
 let shellRuntimeSnapshotMarked = false;
 let bootSplashDismissed = false;
+let runtimeEdgeAttachTarget = '';
+let runtimeEdgeAttachInFlight = null;
+let runtimeEdgeAttachAttemptedAt = 0;
+let runtimeEdgeAttachBackoffUntil = 0;
+let runtimeEdgeAttachFailureCount = 0;
+let runtimeEdgeAttachLastWarnAt = 0;
+let runtimeAuthorityDevicePk = '';
 const resolvedResourceNames = new Map();
-const shellBootDebugEnabled = new URLSearchParams(window.location.search || '').get('debug') === '1';
+const urlParams = new URLSearchParams(window.location.search || '');
+const accountBridgeMode = urlParams.get('bridge') === '1';
+const shellBootDebugEnabled = urlParams.get('debug') === '1';
 
 function debugLog(...args) {
   if (!shellBootDebugEnabled) return;
@@ -410,6 +470,90 @@ function runtimeManagedApplianceRecords() {
   ];
 }
 
+function runtimeServiceCatalogRecords() {
+  const catalog = buildRuntimeSnapshotView(runtimeStatusSnapshot).catalog;
+  const updatedAt = Number(runtimeStatusSnapshot?.serviceCatalog?.updatedAt || runtimeStatusSnapshot?.updatedAt || Date.now());
+  return catalog
+    .filter((service) => service.service && service.servicePk)
+    .map((service) => ({
+      devicePk: service.servicePk,
+      servicePk: service.servicePk,
+      deviceLabel: service.title,
+      deviceKind: 'service',
+      role: service.service,
+      service: service.service,
+      hostGatewayPk: service.hostGatewayPk,
+      status: service.health,
+      summary: service.summary,
+      surfaceChannel: service.surfaceChannel,
+      surfaceNodes: service.nodes,
+      updatedAt,
+      managedAvailabilityAuthority: 'runtime',
+      managedAvailabilityUpdatedAt: updatedAt,
+      managedAvailabilityGatewayPk: service.hostGatewayPk,
+      runtimeCatalogRecord: true,
+    }));
+}
+
+function currentSwarmDeviceRecords() {
+  const liveRecords = Array.isArray(lastSwarmDevices) ? lastSwarmDevices : [];
+  if (liveRecords.length > 0) return liveRecords;
+  const cachedRecords = Array.isArray(swarm?.deviceCache) ? swarm.deviceCache : [];
+  return cachedRecords;
+}
+
+function managedRecordKey(record) {
+  const service = normalizeRole(record?.service || record?.slug || record?.name || '');
+  const servicePk = String(record?.servicePk || record?.service_pk || record?.devicePk || record?.pk || '').trim();
+  const gatewayPk = String(record?.hostGatewayPk || record?.host_gateway_pk || '').trim();
+  if (service && service !== 'gateway') return ['service', gatewayPk, service, servicePk || service].join('|');
+  const pk = String(record?.devicePk || record?.pk || record?.gatewayPk || '').trim();
+  return ['gateway', pk || String(record?.label || record?.deviceLabel || '').trim()].join('|');
+}
+
+function managedRecordRichness(record) {
+  const facts = record?.facts && typeof record.facts === 'object' ? record.facts : {};
+  const health = record?.health && typeof record.health === 'object' ? record.health : {};
+  const hosted = Array.isArray(record?.hostedServices || record?.hosted_services)
+    ? (record.hostedServices || record.hosted_services)
+    : [];
+  const cameraDevices = [
+    ...(Array.isArray(record?.cameraDevices || record?.cameras) ? (record.cameraDevices || record.cameras) : []),
+    ...(Array.isArray(facts.cameraDevices || facts.cameras) ? (facts.cameraDevices || facts.cameras) : []),
+    ...(Array.isArray(health.cameraDevices || health.cameras) ? (health.cameraDevices || health.cameras) : []),
+  ];
+  const sources = [
+    ...(Array.isArray(record?.sources || record?.sourceIds) ? (record.sources || record.sourceIds) : []),
+    ...(Array.isArray(facts.sources || facts.sourceIds) ? (facts.sources || facts.sourceIds) : []),
+  ];
+  return (hosted.length * 20)
+    + (cameraDevices.length * 10)
+    + (sources.length * 5)
+    + Number(record?.cameraCount || record?.camera_count || facts.cameraCount || facts.configuredSources || 0)
+    + (Object.keys(facts).length > 0 ? 3 : 0)
+    + (String(record?.managedAvailabilityAuthority || '').toLowerCase() === 'gateway' ? 2 : 0);
+}
+
+function dedupeManagedRecords(records) {
+  const sorted = (Array.isArray(records) ? records : [])
+    .filter((record) => record && typeof record === 'object')
+    .slice()
+    .sort((left, right) => {
+      const richnessDelta = managedRecordRichness(right) - managedRecordRichness(left);
+      if (richnessDelta) return richnessDelta;
+      return applianceSeenAt(right) - applianceSeenAt(left);
+    });
+  const out = [];
+  const seen = new Set();
+  for (const record of sorted) {
+    const key = managedRecordKey(record);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(record);
+  }
+  return out;
+}
+
 function identityOwnedDevicePks() {
   return Array.from(ownedPkSet(lastIdentity?.devices || []));
 }
@@ -426,10 +570,14 @@ function runtimeOwnedDevicePks() {
     .filter(Boolean);
 }
 
-function currentManagedApplianceRecords(identityDevices = lastIdentity?.devices || [], swarmDevices = lastSwarmDevices || []) {
+function currentManagedApplianceRecords(identityDevices = lastIdentity?.devices || [], swarmDevices = currentSwarmDeviceRecords()) {
   const runtimeRecords = runtimeManagedApplianceRecords();
-  if (runtimeRecords.length > 0) return runtimeRecords;
-  return buildApplianceRecords(identityDevices, swarmDevices, grantedManagedServiceRecords());
+  const catalogRecords = runtimeServiceCatalogRecords();
+  const effectiveSwarmDevices = Array.isArray(swarmDevices) && swarmDevices.length > 0
+    ? swarmDevices
+    : currentSwarmDeviceRecords();
+  const sourceRecords = buildApplianceRecords(identityDevices, effectiveSwarmDevices, grantedManagedServiceRecords());
+  return dedupeManagedRecords([...sourceRecords, ...runtimeRecords, ...catalogRecords]);
 }
 
 function setBootSplash(title = 'Loading', status = '') {
@@ -581,10 +729,22 @@ function absorbRuntimeSnapshot(snapshot) {
       rememberResolvedResourceName(pk, label);
     }
   }
+  renderRuntimeStatusSnapshot();
   if (!shellRuntimeSnapshotMarked) {
     shellRuntimeSnapshotMarked = true;
     markShellBoot('shell.runtime-snapshot');
   }
+}
+
+function renderRuntimeStatusSnapshot() {
+  renderRuntimeSnapshotView({
+    catalogStatusEl: runtimeServiceCatalogStatusEl,
+    catalogListEl: runtimeServiceCatalogListEl,
+    edgeStatusEl: runtimeEdgeStatusEl,
+    queueStatusEl: runtimeQueueStatusEl,
+    projectionStatusEl: runtimeProjectionStatusEl,
+    runtimeStatusDetailEl,
+  }, runtimeStatusSnapshot, document);
 }
 
 function updateBootSplash(reason = '') {
@@ -598,9 +758,9 @@ const gatewayInventoryRefreshAt = new Map();
 const gatewayInventoryStableAt = new Map();
 const pendingGatewayServiceInstalls = new Map();
 const pendingGatewayZoneSyncs = new Map();
-const pendingServiceAccesses = new Map();
 const pendingGatewayGrantRequests = new Map();
-const pendingGatewaySignals = new Map();
+const gatewayGrantViewCache = new Map();
+const gatewayGrantViewInFlight = new Map();
 const sharedManagedServicesByGatewayPk = new Map();
 const ownedGatewayGrantInventoryByServiceKey = new Map();
 const managedServiceActionStates = new Map();
@@ -1014,6 +1174,48 @@ function freshestOwnedGatewayRecord() {
   return ownedApplianceRecords().find((rec) => isGatewayRecord(rec) && owned.has(String(rec?.devicePk || rec?.pk || '').trim())) || null;
 }
 
+function pushUniqueGatewayCandidate(out, seen, record) {
+  if (!record || typeof record !== 'object' || !isGatewayRecord(record)) return;
+  const pk = String(record?.devicePk || record?.pk || '').trim();
+  const edgeEndpoint = gatewayEdgeEndpointForRecord(record);
+  const key = `${pk}|${edgeEndpoint}`;
+  if (!pk || !edgeEndpoint || seen.has(key)) return;
+  seen.add(key);
+  out.push(record);
+}
+
+function bestSwarmEdgeGatewayRecord() {
+  const owned = new Set([
+    ...ownedPkSet(lastIdentity?.devices || []),
+    ...runtimeOwnedDevicePks(),
+  ]);
+  const gatewayRefs = new Set(owned);
+  const runtimeRecords = runtimeManagedApplianceRecords();
+  const catalogRecords = runtimeServiceCatalogRecords();
+  const swarmDeviceRecords = currentSwarmDeviceRecords();
+  const builtRecords = buildApplianceRecords(lastIdentity?.devices || [], swarmDeviceRecords, grantedManagedServiceRecords());
+  for (const rec of [...runtimeRecords, ...catalogRecords, ...builtRecords]) {
+    const gatewayPk = managedGatewayPkForRecord(rec);
+    if (gatewayPk) gatewayRefs.add(gatewayPk);
+  }
+
+  const candidates = [];
+  const seen = new Set();
+  for (const source of [runtimeRecords, swarmDeviceRecords, builtRecords, lastDirectory || []]) {
+    for (const rec of Array.isArray(source) ? source : []) {
+      pushUniqueGatewayCandidate(candidates, seen, rec);
+    }
+  }
+  candidates.sort((left, right) => {
+    const leftPk = String(left?.devicePk || left?.pk || '').trim();
+    const rightPk = String(right?.devicePk || right?.pk || '').trim();
+    const leftScore = gatewayRefs.has(leftPk) ? 1 : 0;
+    const rightScore = gatewayRefs.has(rightPk) ? 1 : 0;
+    return rightScore - leftScore || Number(applianceSeenAt(right) || 0) - Number(applianceSeenAt(left) || 0);
+  });
+  return candidates[0] || null;
+}
+
 function summarizeOwnedGateway() {
   const rec = freshestOwnedGatewayRecord();
   if (!rec) {
@@ -1082,6 +1284,22 @@ function summarizeGatewayMesh(gatewaySummary) {
 }
 
 function summarizeServices(gatewaySummary) {
+  const runtimeView = buildRuntimeSnapshotView(runtimeStatusSnapshot);
+  if (runtimeView.catalog.length > 0) {
+    const unhealthy = runtimeView.catalog.filter((service) => {
+      const health = String(service.health || '').trim().toLowerCase();
+      return ['error', 'failed', 'rejected', 'offline', 'degraded'].includes(health);
+    });
+    const serviceNames = runtimeView.catalog.map((service) => service.title).filter(Boolean).slice(0, 3).join(', ');
+    const more = runtimeView.catalog.length > 3 ? ` +${runtimeView.catalog.length - 3}` : '';
+    const hasHealthy = runtimeView.catalog.some((service) => !unhealthy.includes(service));
+    return {
+      code: unhealthy.length ? 'degraded' : 'healthy',
+      label: runtimeView.catalog.length === 1 ? runtimeView.catalog[0].health : `${runtimeView.catalog.length} services`,
+      reason: `${serviceNames || 'Runtime service catalog'}${more} retained by runtime snapshot.`,
+      usable: hasHealthy,
+    };
+  }
   const runtimeNvr = runtimeStatusSnapshot?.services?.nvr || null;
   const runtimeState = String(runtimeNvr?.state || '').trim().toLowerCase();
   if (runtimeNvr && runtimeState && runtimeState !== 'idle' && (Date.now() - Number(runtimeNvr.updatedAt || 0)) < GATEWAY_INVENTORY_STABLE_TTL_MS) {
@@ -1096,7 +1314,7 @@ function summarizeServices(gatewaySummary) {
     return {
       code: 'degraded',
       label: 'degraded',
-      reason: String(runtimeStatusSnapshot.managedServiceIssue.reason || 'Managed NVR service access failed.').trim(),
+      reason: String(runtimeStatusSnapshot.managedServiceIssue.reason || 'Managed NVR stream intent failed.').trim(),
       usable: false,
     };
   }
@@ -1199,26 +1417,36 @@ function connectionTextClass(code) {
 
 function renderConnectionModel(reason = '') {
   const summary = connectionSummary();
-  const conciseReason = conciseConnectionReason(summary);
+  const shellState = deriveAccountShellState(summary);
+  const conciseReason = shellState.connection.reason || conciseConnectionReason(summary);
+  updateIdentityChrome(lastIdentity, shellState);
   if (connStateText) {
     setConnectionStateText(connStateText, {
-      label: summary.label,
-      toneClass: connectionTextClass(summary.code),
+      label: shellState.connection.label,
+      toneClass: shellState.connection.toneClass || connectionTextClass(summary.code),
     });
   }
-  if (networkStatusConnectionEl) networkStatusConnectionEl.textContent = summary.label;
-  if (networkStatusRelayEl) networkStatusRelayEl.textContent = summary.relay.label;
-  if (networkStatusGatewayMeshEl) networkStatusGatewayMeshEl.textContent = summary.gatewayMesh.label;
-  if (networkStatusServicesEl) networkStatusServicesEl.textContent = summary.services.label;
+  if (networkStatusConnectionEl) networkStatusConnectionEl.textContent = shellState.connection.label;
+  if (networkStatusRelayEl) networkStatusRelayEl.textContent = shellState.relay.state;
+  if (networkStatusGatewayMeshEl) networkStatusGatewayMeshEl.textContent = shellState.gateway.gatewayPk || shellState.gateway.state;
+  if (networkStatusServicesEl) {
+    networkStatusServicesEl.textContent = shellState.services.count > 0
+      ? `${shellState.services.count} available`
+      : shellState.services.state;
+  }
   if (networkStatusDetailEl) {
     networkStatusDetailEl.textContent = conciseReason;
   }
 
-  if (popConnection) popConnection.textContent = summary.label;
+  if (popConnection) popConnection.textContent = shellState.connection.label;
   if (popConnectionReason) popConnectionReason.textContent = conciseReason;
-  if (popRelay) popRelay.textContent = summary.relay.label;
-  if (popGateway) popGateway.textContent = summary.gateway.label;
-  if (popServices) popServices.textContent = summary.services.label;
+  if (popRelay) popRelay.textContent = shellState.relay.state;
+  if (popGateway) popGateway.textContent = shellState.gateway.gatewayPk || shellState.gateway.state;
+  if (popServices) {
+    popServices.textContent = shellState.services.count > 0
+      ? `${shellState.services.count} available`
+      : shellState.services.state;
+  }
   renderAccountCenter();
 
   const runtimeShellStatus = buildRuntimeShellStatus(summary);
@@ -1227,6 +1455,22 @@ function renderConnectionModel(reason = '') {
     lastRuntimeShellStatusKey = runtimeShellStatusKey;
     runtimeBridge?.pushStatus?.(runtimeShellStatus).catch(() => {});
   }
+}
+
+function deriveAccountShellState(summary = connectionSummary(), ident = lastIdentity) {
+  const rawId = String(ident?.id || '').trim();
+  const shellStatus = buildRuntimeShellStatus(summary);
+  return deriveRuntimeShellState({
+    shell: {
+      ...shellStatus,
+      identity: {
+        ...shellStatus.identity,
+        linked: Boolean(ident?.linked || rawId),
+        identityId: rawId,
+        label: String(ident?.label || '').trim(),
+      },
+    },
+  }, { context: browserStorageShellContext() });
 }
 
 function buildRuntimeShellStatus(summary = connectionSummary()) {
@@ -1246,12 +1490,20 @@ function buildRuntimeShellStatus(summary = connectionSummary()) {
       state: daemonState,
       linked: Boolean(lastIdentity?.linked),
       identityId: String(lastIdentity?.id || '').trim(),
+      devicePk: String(lastDeviceState?.pk || lastDeviceState?.devicePk || '').trim(),
       label: String(lastIdentity?.label || '').trim(),
     },
     ownedGateway: {
       state: summary.gateway.label,
       reason: summary.gateway.reason,
       gatewayPk: String(summary.gateway?.gatewayPk || '').trim(),
+    },
+    zones: {
+      activeZoneKey: String(activeZoneKey || '').trim(),
+      joined: (Array.isArray(lastZones) ? lastZones : []).map((zone) => ({
+        key: String(zone?.key || '').trim(),
+        name: String(zone?.name || '').trim(),
+      })).filter((zone) => zone.key),
     },
     gatewayMesh: {
       state: summary.gatewayMesh.label,
@@ -1275,6 +1527,7 @@ function setRelayState(s, reason = '', meta = null) {
       version: String(meta.version || relayPoolSnapshot.version || '').trim(),
       urls: Array.isArray(meta.urls) ? meta.urls.slice() : (relayPoolSnapshot.urls || []),
       relays: (meta.relays && typeof meta.relays === 'object') ? meta.relays : (relayPoolSnapshot.relays || {}),
+      ingress: (meta.ingress && typeof meta.ingress === 'object') ? meta.ingress : (relayPoolSnapshot.ingress || null),
       state: relayState,
       reason: String(reason || '').trim(),
     };
@@ -1285,6 +1538,7 @@ function setRelayState(s, reason = '', meta = null) {
   window.__constituteRelayStates = (relayPoolSnapshot?.relays && typeof relayPoolSnapshot.relays === 'object')
     ? { ...relayPoolSnapshot.relays }
     : {};
+  window.__constituteRelayIngress = relayPoolSnapshot?.ingress || null;
   const relayUrls = Array.isArray(relayPoolSnapshot.urls) ? relayPoolSnapshot.urls : [];
   const openCount = relayUrls.filter((relayUrl) => String(relayPoolSnapshot?.relays?.[relayUrl]?.state || '') === 'open').length;
   if (popRelay) {
@@ -1389,18 +1643,17 @@ function setSettingsTab(name) {
 function currentIdentityHandle() {
   const label = String(lastIdentity?.label || '').trim();
   if (label) return `@${label}`;
+  if (String(lastIdentity?.id || '').trim()) return '@linked';
   return '@unlinked';
 }
 
-function updateIdentityChrome(ident = lastIdentity) {
+function updateIdentityChrome(ident = lastIdentity, shellState = deriveAccountShellState(connectionSummary(), ident)) {
   if (!identityHandle) return;
-  const linked = Boolean(ident?.linked && String(ident?.id || '').trim());
-  const rawId = String(ident?.id || '').trim();
-  identityHandle.textContent = linked ? currentIdentityHandle() : '@unlinked';
-  identityHandle.classList.toggle('identityHandle-linked', linked);
-  identityHandle.classList.toggle('identityHandle-unlinked', !linked);
-  identityHandle.title = rawId ? 'Open account center' : 'Identity not linked yet';
-  identityHandle.setAttribute('aria-label', rawId ? `Identity ${rawId}` : 'Identity not linked');
+  identityHandle.textContent = shellState.identity.handle;
+  identityHandle.classList.toggle('identityHandle-linked', shellState.identity.linked);
+  identityHandle.classList.toggle('identityHandle-unlinked', !shellState.identity.linked);
+  identityHandle.title = shellState.identity.title;
+  identityHandle.setAttribute('aria-label', shellState.identity.ariaLabel);
   renderAccountCenter();
 }
 
@@ -1424,75 +1677,18 @@ function toggleAccountCenter() {
   openAccountCenter();
 }
 
-async function copyIdentityId() {
-  const rawId = String(lastIdentity?.id || '').trim();
-  if (!rawId) return;
-  try {
-    await navigator.clipboard.writeText(rawId);
-    addNotification('good', 'Identity copied', 'Copied linked identity ID.');
-  } catch (error) {
-    addNotification('bad', 'Identity copy failed', String(error?.message || error));
-  }
-}
-
 function renderAccountCenter() {
   if (!accountCenterSummary || !accountCenterActions) return;
-  const rawId = String(lastIdentity?.id || '').trim();
-  const connection = String(connStateText?.textContent || 'Offline').trim() || 'Offline';
-  renderAccountCenterSummary(accountCenterSummary, {
-    handle: rawId ? currentIdentityHandle() : '@unlinked',
-    linked: Boolean(rawId),
-    connectionLabel: connection,
-    connectionToneClass: connectionTextClass(connectionSummary().code),
-  });
+  accountCenterSummary.replaceChildren();
   renderActionList(accountCenterActions, [
     {
       id: 'account.open_home',
-      label: 'Open Account Overview',
+      label: 'Open Account Center',
       description: 'Show the account overview.',
       onSelect: () => {
         closeAccountCenter();
         closeDrawer();
         showActivity('home');
-      },
-    },
-    {
-      id: 'account.open_devices',
-      label: 'Open Devices',
-      description: 'Show paired and pending devices.',
-      onSelect: () => {
-        closeAccountCenter();
-        closeDrawer();
-        showActivity('devices');
-      },
-    },
-    {
-      id: 'account.open_zones',
-      label: 'Open Zones',
-      description: 'Show identity-owned zone state.',
-      onSelect: () => {
-        closeAccountCenter();
-        closeDrawer();
-        showActivity('zones');
-      },
-    },
-    {
-      id: 'account.open_notifications',
-      label: 'Open Notifications',
-      description: 'Show notifications.',
-      onSelect: () => {
-        closeAccountCenter();
-        notifMenu.classList.remove('hidden');
-      },
-    },
-    {
-      id: 'account.copy_identity',
-      label: 'Copy Identity ID',
-      description: 'Copy the linked identity ID.',
-      disabled: !rawId,
-      onSelect: () => {
-        closeAccountCenter();
-        void copyIdentityId();
       },
     },
   ]);
@@ -1503,6 +1699,17 @@ function setPairCodeStatus(msg, error = false) {
   if (!pairCodeStatus) return;
   pairCodeStatus.textContent = String(msg || '');
   pairCodeStatus.classList.toggle('warn', !!error);
+}
+
+function setPairClaimButtonBusy(busy) {
+  if (!btnClaimPairCode) return;
+  const label = btnClaimPairCode.querySelector('.pairClaimButtonLabel');
+  const spinner = btnClaimPairCode.querySelector('.pairClaimButtonSpinner');
+  btnClaimPairCode.disabled = !!busy;
+  btnClaimPairCode.setAttribute('aria-busy', busy ? 'true' : 'false');
+  btnClaimPairCode.setAttribute('aria-label', busy ? 'Claiming' : 'Claim');
+  label?.classList.toggle('hidden', !!busy);
+  spinner?.classList.toggle('hidden', !busy);
 }
 
 function setGatewayInstallStatus(msg, error = false) {
@@ -1534,16 +1741,7 @@ function browserPrefersDedicatedRelayWorker() {
 }
 
 function runtimeWorkerScriptUrl() {
-  const target = new URL('./runtime.worker.js', window.location.href);
-  target.searchParams.set('v', PLATFORM_RUNTIME_BUILD_ID);
-  return target.toString();
-}
-
-function createRuntimeSharedWorker() {
-  return new SharedWorker(runtimeWorkerScriptUrl(), {
-    type: 'module',
-    name: `constitute-account-runtime-${PLATFORM_RUNTIME_BUILD_ID}`,
-  });
+  return accountRuntimeWorkerScriptUrl(window.location.origin);
 }
 
 function managedAppSurfaceCandidates(repoName) {
@@ -1604,10 +1802,9 @@ async function resolveManagedAppSurfaceBaseUrl(repoName) {
   }
 }
 
-async function buildManagedAppSurfaceUrl(repoName, contextId, opts = {}) {
+async function buildManagedAppSurfaceUrl(repoName, opts = {}) {
   const target = new URL(await resolveManagedAppSurfaceBaseUrl(repoName));
   const params = new URLSearchParams();
-  params.set('serviceAccess', String(contextId || '').trim());
   const activity = String(opts?.activity || '').trim();
   const settingsTab = String(opts?.settingsTab || '').trim();
   const camera = String(opts?.camera || '').trim();
@@ -1658,102 +1855,6 @@ async function awaitObservedPendingRequest(state) {
   return result;
 }
 
-async function waitForBrokerCondition(predicate, timeoutMs, label) {
-  const deadline = Date.now() + Math.max(0, Number(timeoutMs) || 0);
-  while (true) {
-    if (predicate()) return true;
-    if (Date.now() >= deadline) {
-      throw new Error(`${label} is not ready`);
-    }
-    await delay(BROKER_READY_POLL_MS);
-  }
-}
-
-async function withBrokerTimeout(promise, timeoutMs, label) {
-  let timer = 0;
-  try {
-    return await Promise.race([
-      promise,
-      new Promise((_, reject) => {
-        timer = setTimeout(() => reject(new Error(`${label} is not ready`)), timeoutMs);
-      }),
-    ]);
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
-}
-
-async function refreshBrokerCoreState() {
-  const st = lastDeviceState || await client.call('device.getState', {}, { timeoutMs: 20_000 });
-  const ident = lastIdentity || await client.call('identity.get', {}, { timeoutMs: 20_000 });
-  const myLabel = {
-    label: String(deviceLabel?.value || deviceDidSummary?.textContent || 'This device').trim() || 'This device',
-  };
-  applyCoreRefreshState({ st, ident, myLabel });
-  return { st, ident, myLabel };
-}
-
-function relayStatusPayloadForBroker() {
-  const relayUrls = Array.isArray(relayPoolSnapshot?.urls) ? relayPoolSnapshot.urls : [];
-  const relayDetails = (relayPoolSnapshot?.relays && typeof relayPoolSnapshot.relays === 'object')
-    ? relayPoolSnapshot.relays
-    : {};
-  const openCount = relaysOpenCount();
-  const state = openCount > 0 ? 'open' : (relayPoolSnapshot?.state || relayState || 'offline');
-  return {
-    state,
-    url: '',
-    urls: relayUrls,
-    relays: relayDetails,
-    code: null,
-    reason: relayPoolSnapshot?.reason || '',
-  };
-}
-
-async function syncRelayStatusForBroker() {
-  if (!clientReady || !client) return false;
-  if (relayState !== 'open' && relaysOpenCount() < 1) return false;
-  const flushed = await relayBridge?.flushBootState?.();
-  if (!flushed) {
-    await client.call('relay.status', relayStatusPayloadForBroker(), { timeoutMs: 20_000 });
-  }
-  await delay(BROKER_RELAY_SETTLE_MS);
-  return true;
-}
-
-async function ensureRuntimeBrokerReadyForServiceAccess() {
-  if (!client) throw new Error('account runtime is not initialized');
-
-  await client.ready();
-  clientReady = client.isServiceWorkerAvailable();
-  if (!clientReady) throw new Error('account service worker is not ready');
-
-  if (!relayBridge) {
-    relayBridge = startSharedRelayPipe(client, desiredRelayUrls(lastIdentity?.devices || [], lastSwarmDevices || []));
-  }
-
-  if (!bootRefreshSettled || !lastDeviceState || !lastIdentity) {
-    await withBrokerTimeout(refreshBrokerCoreState(), BROKER_READY_TIMEOUT_MS, 'account identity');
-    bootRefreshSettled = true;
-  }
-
-  if (!String(lastIdentity?.id || '').trim() || !String(lastIdentity?.label || '').trim()) {
-    throw new Error('link an identity before opening managed services');
-  }
-  if (!String(lastDeviceState?.pk || '').trim()) {
-    throw new Error('device key is not ready yet');
-  }
-
-  relayBridge?.updateTargets?.(desiredRelayUrls(lastIdentity?.devices || [], lastSwarmDevices || []), 'broker-service-access');
-  await waitForBrokerCondition(
-    () => relayState === 'open' || relaysOpenCount() > 0,
-    BROKER_RELAY_READY_TIMEOUT_MS,
-    'account relay'
-  );
-  await syncRelayStatusForBroker();
-  return true;
-}
-
 function managedAppSurfaceRepoForService(service) {
   const key = normalizeRole(service || '');
   return MANAGED_APP_SURFACES[key] || '';
@@ -1764,6 +1865,61 @@ function isManagedFirstPartyApp(app) {
   return Object.values(MANAGED_APP_SURFACES).some((value) => value.toLowerCase() === repo);
 }
 
+function readRuntimeKvRecord(key) {
+  return new Promise((resolve) => {
+    if (typeof indexedDB === 'undefined') {
+      resolve(null);
+      return;
+    }
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      resolve(value || null);
+    };
+    const timer = window.setTimeout(() => finish(null), 1_500);
+    try {
+      const req = indexedDB.open('constitute_db', 1);
+      req.onerror = () => {
+        window.clearTimeout(timer);
+        finish(null);
+      };
+      req.onsuccess = () => {
+        try {
+          const db = req.result;
+          const tx = db.transaction('kv', 'readonly');
+          const get = tx.objectStore('kv').get(key);
+          get.onsuccess = () => {
+            window.clearTimeout(timer);
+            finish(get.result || null);
+          };
+          get.onerror = () => {
+            window.clearTimeout(timer);
+            finish(null);
+          };
+        } catch {
+          window.clearTimeout(timer);
+          finish(null);
+        }
+      };
+    } catch {
+      window.clearTimeout(timer);
+      finish(null);
+    }
+  });
+}
+
+async function pushRuntimeAuthorityDevice() {
+  if (!runtimeBridge?.putRuntimeAuthorityDevice) return;
+  const device = await readRuntimeKvRecord('device');
+  const pk = String(device?.nostr?.pk || '').trim();
+  const skHex = String(device?.nostr?.skHex || '').trim();
+  if (!pk || !skHex) return;
+  if (runtimeAuthorityDevicePk === pk) return;
+  runtimeAuthorityDevicePk = pk;
+  await runtimeBridge.putRuntimeAuthorityDevice(device);
+}
+
 function startPlatformRuntimeBridge() {
   if (typeof SharedWorker === 'undefined') {
     console.warn('[runtime] SharedWorker unavailable; managed app surfaces require the shared runtime');
@@ -1771,21 +1927,10 @@ function startPlatformRuntimeBridge() {
   }
 
   const clientId = randomOpaqueId('runtime-shell');
-  let worker;
-  try {
-    worker = createRuntimeSharedWorker();
-  } catch (err) {
-    console.warn('[runtime] SharedWorker attach failed', err);
-    return null;
-  }
-  const port = worker.port;
-  port.start();
-
   const bridge = {
     clientId,
-    port,
-    requestId: 1,
-    pending: new Map(),
+    port: null,
+    client: null,
     snapshot: null,
     ready: false,
     readyPromise: null,
@@ -1794,28 +1939,13 @@ function startPlatformRuntimeBridge() {
     attachTimedOut: false,
     attachError: null,
     close() {
-      try {
-      port.postMessage({ type: 'runtime.detach', clientId });
-    } catch {}
-    try {
-      port.close();
-      } catch {}
+      try { this.client?.close?.(); } catch {}
     },
   };
   bridge.readyPromise = new Promise((resolve, reject) => {
     bridge.resolveReady = resolve;
     bridge.rejectReady = reject;
   });
-  try {
-    worker.onerror = (event) => {
-      bridge.attachTimedOut = true;
-      bridge.attachError = new Error(String(event?.message || 'shared worker failure'));
-      bridge.rejectReady?.(new Error(String(event?.message || 'shared worker failure')));
-      bridge.rejectReady = null;
-      bridge.resolveReady = null;
-      console.error('[runtime] SharedWorker error', event?.message || event);
-    };
-  } catch {}
   bridge.whenReady = async (timeoutMs = RUNTIME_ATTACH_TIMEOUT_MS) => {
     if (bridge.ready) return bridge.snapshot;
     try {
@@ -1855,21 +1985,27 @@ function startPlatformRuntimeBridge() {
   }
 
   function runtimeCall(type, payload = {}, timeoutMs = 20_000) {
-    const requestId = `${clientId}-${type}-${bridge.requestId++}`;
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        bridge.pending.delete(requestId);
-        reject(new Error(`${type} timed out`));
-      }, timeoutMs);
-      bridge.pending.set(requestId, { resolve, reject, timer, type });
-      port.postMessage({ type, requestId, clientId, ...payload });
-    });
+    return bridge.client?.call(type, payload, timeoutMs)
+      || Promise.reject(new Error('shared runtime is unavailable'));
   }
 
   bridge.call = runtimeCall;
-  bridge.putServiceAccessContext = async (context) => {
+  bridge.queueAppIntent = async (type, payload = {}, timeoutMs = RUNTIME_WRITE_TIMEOUT_MS) => {
     await bridge.whenReady();
-    return await runtimeCall(BROKER.SERVICE_ACCESS_CONTEXT_PUT, { context }, RUNTIME_WRITE_TIMEOUT_MS);
+    return await runtimeCall(type, { payload }, timeoutMs);
+  };
+  bridge.openStream = async (payload = {}) => {
+    return await bridge.queueAppIntent(RUNTIME_STREAM_OPEN, payload);
+  };
+  bridge.controlStream = async (payload = {}) => {
+    return await bridge.queueAppIntent(RUNTIME_STREAM_CONTROL, payload);
+  };
+  bridge.closeStream = async (payload = {}) => {
+    return await bridge.queueAppIntent(RUNTIME_STREAM_CLOSE, payload);
+  };
+  bridge.attachSwarmEdge = async (payload = {}) => {
+    await bridge.whenReady();
+    return await runtimeCall(SWARM_EDGE_ATTACH, payload, RUNTIME_WRITE_TIMEOUT_MS);
   };
   bridge.pushStatus = async (status) => {
     if (!(await bridge.whenReadyQuietly())) return;
@@ -1883,56 +2019,45 @@ function startPlatformRuntimeBridge() {
       warnRuntimeWriteFailure('managedAppliances.sourceSnapshot.put', err);
     });
   };
+  bridge.putRuntimeAuthorityDevice = async (device) => {
+    if (!(await bridge.whenReadyQuietly())) return;
+    await runtimeCall(RUNTIME_AUTHORITY_DEVICE_PUT, { device }, RUNTIME_WRITE_TIMEOUT_MS).catch((err) => {
+      runtimeAuthorityDevicePk = '';
+      warnRuntimeWriteFailure(RUNTIME_AUTHORITY_DEVICE_PUT, err);
+    });
+  };
 
-  port.onmessage = (event) => {
-    const msg = event?.data || {};
-    if (msg.type === 'runtime.attached') {
-      runtimeAttached = true;
-      bridge.ready = true;
-      bridge.attachTimedOut = false;
-      bridge.attachError = null;
-      bridge.snapshot = msg.snapshot || null;
-      absorbRuntimeSnapshot(msg.snapshot || null);
-      lastManagedServiceIssue = runtimeStatusSnapshot?.managedServiceIssue || null;
-      bridge.resolveReady?.(bridge.snapshot);
-      bridge.resolveReady = null;
-      bridge.rejectReady = null;
-      renderConnectionModel();
-      if (lastIdentity) pushRuntimeManagedApplianceSourceSnapshot(lastIdentity?.devices || [], lastSwarmDevices || []);
-      clearShellBootFallbackTimer();
-      tryDismissShellBootSplash('shell.first-paint.snapshot');
-      return;
-    }
-    if (msg.type === 'runtime.snapshot') {
-      if (!bridge.ready) {
-        bridge.ready = true;
-        bridge.attachTimedOut = false;
-        bridge.attachError = null;
-        bridge.resolveReady?.(msg.snapshot || null);
-        bridge.resolveReady = null;
-        bridge.rejectReady = null;
-      }
-      bridge.snapshot = msg.snapshot || null;
-      absorbRuntimeSnapshot(msg.snapshot || null);
-      lastManagedServiceIssue = runtimeStatusSnapshot?.managedServiceIssue || null;
-      renderConnectionModel();
-      if (lastIdentity) pushRuntimeManagedApplianceSourceSnapshot(lastIdentity?.devices || [], lastSwarmDevices || []);
-      clearShellBootFallbackTimer();
-      tryDismissShellBootSplash('shell.first-paint.snapshot');
-      return;
-    }
+  function absorbBridgeRuntimeSnapshot(snapshot) {
+    runtimeAttached = true;
+    bridge.ready = true;
+    bridge.attachTimedOut = false;
+    bridge.attachError = null;
+    bridge.snapshot = snapshot || null;
+    absorbRuntimeSnapshot(snapshot || null);
+    lastManagedServiceIssue = runtimeStatusSnapshot?.managedServiceIssue || null;
+    bridge.resolveReady?.(bridge.snapshot);
+    bridge.resolveReady = null;
+    bridge.rejectReady = null;
+    renderConnectionModel();
+    pushRuntimeAuthorityDevice().catch(() => {});
+    pushRuntimeManagedApplianceSourceSnapshot(lastIdentity?.devices || [], lastSwarmDevices || []);
+    clearShellBootFallbackTimer();
+    tryDismissShellBootSplash('shell.first-paint.snapshot');
+  }
+
+  function handleBridgeRuntimeMessage(msg) {
+    if (runtimeDiagnosticsAgent?.handleMessage(msg)) return true;
+    if (msg.type === 'runtime.attached' || msg.type === 'runtime.snapshot') return false;
     if (msg.type === 'runtime.broker.request') {
       handleRuntimeBrokerRequest(msg).catch((err) => {
         const kind = String(msg?.kind || '').trim();
         const responseTypes = {
-          [BROKER.SERVICE_ACCESS_REQUEST]: BROKER.SERVICE_ACCESS_RESPONSE,
-          [BROKER.SERVICE_PROJECTION_REQUEST]: BROKER.SERVICE_PROJECTION_RESPONSE,
           'gateway.grant.request': 'gateway.grant.response',
           'gateway.service.install.request': 'gateway.service.install.response',
           'gateway.zones.sync.request': 'gateway.zones.sync.response',
         };
-        const responseType = responseTypes[kind] || BROKER.SERVICE_SIGNAL_RESPONSE;
-        port.postMessage({
+        const responseType = responseTypes[kind] || 'runtime.broker.response';
+        bridge.port?.postMessage({
           type: responseType,
           clientId,
           requestId: String(msg?.requestId || '').trim(),
@@ -1940,31 +2065,68 @@ function startPlatformRuntimeBridge() {
           error: String(err?.message || err),
         });
       });
-      return;
-    }
-    if (msg.type === 'runtime.response') {
-      const requestId = String(msg.requestId || '').trim();
-      const pending = bridge.pending.get(requestId);
-      if (!pending) return;
-      clearTimeout(pending.timer);
-      bridge.pending.delete(requestId);
-      if (msg.ok === false) pending.reject(new Error(String(msg.error || `${pending.type} failed`)));
-      else pending.resolve(msg.result);
-      return;
+      return true;
     }
     if (msg.type === 'runtime.ack') {
       if (msg.ok === false) {
         console.warn('[runtime]', String(msg.kind || '').trim() || 'ack', String(msg.error || 'failed'));
       }
+      return true;
     }
-  };
+    return false;
+  }
 
-  port.postMessage({
-    type: 'runtime.attach',
+  const runtimeClient = createRuntimeSurfaceClient({
     clientId,
     surface: 'shell',
     broker: true,
+    workerUrl: runtimeWorkerScriptUrl(),
+    workerName: runtimeSharedWorkerName(),
+    attachTimeoutMs: RUNTIME_ATTACH_TIMEOUT_MS,
+    callTimeoutMs: RUNTIME_WRITE_TIMEOUT_MS,
+    onPort: (port) => {
+      bridge.port = port;
+      runtimeDiagnosticsAgent = attachRuntimeDiagnostics({
+        port,
+        surface: 'constitute-account',
+        clientId,
+        enabled: shellBootDebugEnabled,
+        planes: RUNTIME_DIAGNOSTIC_OPERATOR_PLANES,
+        minLevelByPlane: { diagnostic: 'warn' },
+        denyKinds: ['projection.applied', 'projection.ignored'],
+      });
+    },
+    onMessage: handleBridgeRuntimeMessage,
+    onSnapshot: absorbBridgeRuntimeSnapshot,
+    onAttachTimeout: () => {
+      bridge.attachTimedOut = true;
+      bridge.attachError = new Error('runtime.attach timed out');
+      bridge.rejectReady?.(bridge.attachError);
+      bridge.rejectReady = null;
+      bridge.resolveReady = null;
+    },
+    onAttachError: (err) => {
+      bridge.attachTimedOut = true;
+      bridge.attachError = err;
+      bridge.rejectReady?.(err);
+      bridge.rejectReady = null;
+      bridge.resolveReady = null;
+      console.error('[runtime] SharedWorker attach failed', err);
+    },
+    onWorkerError: (event) => {
+      const error = new Error(String(event?.message || 'shared worker failure'));
+      bridge.attachTimedOut = true;
+      bridge.attachError = error;
+      bridge.rejectReady?.(error);
+      bridge.rejectReady = null;
+      bridge.resolveReady = null;
+      console.error('[runtime] SharedWorker error', event?.message || event);
+    },
   });
+  bridge.client = runtimeClient;
+  const port = runtimeClient.attach();
+  if (!port) return null;
+  bridge.port = port;
   return bridge;
 }
 
@@ -1973,40 +2135,6 @@ async function handleRuntimeBrokerRequest(message) {
   const requestId = String(message?.requestId || '').trim();
   if (!runtimeBridge || !requestId || !kind) return;
   const payload = message?.payload && typeof message.payload === 'object' ? message.payload : {};
-  if (kind === BROKER.SERVICE_SIGNAL_REQUEST) {
-    await ensureRuntimeBrokerReadyForServiceAccess();
-    const result = await requestGatewaySignal(payload);
-    runtimeBridge.port.postMessage({
-      type: BROKER.SERVICE_SIGNAL_RESPONSE,
-      clientId: runtimeBridge.clientId,
-      requestId,
-      ok: true,
-      result,
-    });
-    return;
-  }
-  if (kind === BROKER.SERVICE_ACCESS_REQUEST) {
-    const result = await requestGatewayServiceAccess(payload.record || payload, payload.options || {});
-    runtimeBridge.port.postMessage({
-      type: BROKER.SERVICE_ACCESS_RESPONSE,
-      clientId: runtimeBridge.clientId,
-      requestId,
-      ok: true,
-      result,
-    });
-    return;
-  }
-  if (kind === BROKER.SERVICE_PROJECTION_REQUEST) {
-    const result = await requestServiceProjection(payload);
-    runtimeBridge.port.postMessage({
-      type: BROKER.SERVICE_PROJECTION_RESPONSE,
-      clientId: runtimeBridge.clientId,
-      requestId,
-      ok: true,
-      result,
-    });
-    return;
-  }
   if (kind === 'gateway.grant.request') {
     const record = {
       devicePk: String(payload?.servicePk || '').trim(),
@@ -2112,45 +2240,6 @@ function handleGatewayZoneSyncStatusEvent(evt) {
   }
 }
 
-function handleGatewayServiceAccessStatusEvent(evt) {
-  const requestId = String(evt?.requestId || '').trim();
-  const status = String(evt?.status || '').trim().toLowerCase();
-  if (!requestId) return;
-
-  if (status === 'complete') {
-    lastManagedServiceIssue = null;
-    publishRuntimeManagedApplianceState();
-    settlePending(pendingServiceAccesses, requestId, null, {
-      requestId,
-      gatewayPk: String(evt?.gatewayPk || '').trim(),
-      servicePk: String(evt?.servicePk || '').trim(),
-      service: String(evt?.service || '').trim(),
-      capability: String(evt?.capability || '').trim(),
-      serviceCapability: String(evt?.serviceCapability || '').trim(),
-      expiresAt: Number(evt?.expiresAt || 0),
-      display: evt?.display ?? {},
-      ts: Number(evt?.ts || Date.now()),
-    });
-    return;
-  }
-
-  if (status === 'failed' || status === 'rejected') {
-    const detail = String(evt?.detail || evt?.reason || 'service access failed').trim();
-    lastManagedServiceIssue = {
-      service: String(evt?.service || 'nvr').trim().toLowerCase() || 'nvr',
-      state: 'error',
-      stage: 'service_access_authorization',
-      reason: detail || 'service access failed',
-      updatedAt: Date.now(),
-    };
-    publishRuntimeManagedApplianceState();
-    renderConnectionModel(detail);
-    requestGatewayInventoryRefresh(String(evt?.gatewayPk || '').trim(), { force: true }).catch(() => false);
-    refreshManagedApplianceProjection({ refreshGrantViews: false }).catch(() => {});
-    settlePending(pendingServiceAccesses, requestId, new Error(detail || 'service access failed'));
-  }
-}
-
 function handleGatewayGrantStatusEvent(evt) {
   const requestId = String(evt?.requestId || '').trim();
   const status = String(evt?.status || '').trim().toLowerCase();
@@ -2179,6 +2268,13 @@ function handleGatewayGrantStatusEvent(evt) {
       ts: Number(evt?.ts || Date.now()),
     };
     settlePending(pendingGatewayGrantRequests, requestId, null, result);
+    if (result.action && result.action !== 'list_shared' && result.action !== 'list_grants') {
+      invalidateGatewayGrantViewCache({
+        hostGatewayPk: result.gatewayPk,
+        servicePk: result.servicePk,
+        service: result.service,
+      });
+    }
 
     if (result.action === 'upsert') {
       const grantee = String(result?.grant?.granteeIdentityId || '').trim();
@@ -2188,47 +2284,6 @@ function handleGatewayGrantStatusEvent(evt) {
       setGatewayInstallStatus(`Revoked Security Cameras access${grantee ? ` for ${grantee}` : ''}.`, false);
     }
   }
-}
-
-function handleGatewaySignalStatusRelayEvent(evt) {
-  const requestId = String(evt?.requestId || '').trim();
-  const status = String(evt?.status || '').trim().toLowerCase();
-  if (!requestId) return;
-  if (status === 'failed' || status === 'rejected') {
-    const detail = String(evt?.detail || evt?.reason || 'gateway signal failed').trim();
-    lastManagedServiceIssue = {
-      service: String(evt?.service || 'nvr').trim().toLowerCase() || 'nvr',
-      state: 'degraded',
-      stage: SERVICE_ACCESS_EVENTS.SIGNAL,
-      reason: detail || 'gateway signal failed',
-      updatedAt: Date.now(),
-    };
-    publishRuntimeManagedApplianceState();
-    renderConnectionModel(detail);
-    settlePending(pendingGatewaySignals, requestId, new Error(detail || 'gateway signal failed'));
-    return;
-  }
-  if (status === 'complete' && String(evt?.signalType || '').trim().toLowerCase() === 'session_close') {
-    settlePending(pendingGatewaySignals, requestId, null, {
-      requestId,
-      signalType: 'session_close',
-      ts: Number(evt?.ts || Date.now()),
-    });
-  }
-}
-
-function handleGatewaySignalRelayEvent(evt) {
-  const requestId = String(evt?.requestId || '').trim();
-  if (!requestId) return;
-  settlePending(pendingGatewaySignals, requestId, null, {
-    requestId,
-    gatewayPk: String(evt?.gatewayPk || '').trim(),
-    servicePk: String(evt?.servicePk || '').trim(),
-    service: String(evt?.service || '').trim(),
-    signalType: String(evt?.signalType || '').trim(),
-    payload: evt?.payload ?? {},
-    ts: Number(evt?.ts || Date.now()),
-  });
 }
 
 function parseGatewayPayloadCandidate(value) {
@@ -2293,20 +2348,8 @@ function handleGatewayRelayPayload(payload) {
   if (!payload || typeof payload !== 'object') return false;
   const type = String(payload.type || '').trim();
   if (!type) return false;
-  if (type === SERVICE_ACCESS_EVENTS.STATUS) {
-    handleGatewayServiceAccessStatusEvent(payload);
-    return true;
-  }
   if (type === 'gateway_grant_status') {
     handleGatewayGrantStatusEvent(payload);
-    return true;
-  }
-  if (type === SERVICE_ACCESS_EVENTS.SIGNAL_STATUS) {
-    handleGatewaySignalStatusRelayEvent(payload);
-    return true;
-  }
-  if (type === SERVICE_ACCESS_EVENTS.SIGNAL) {
-    handleGatewaySignalRelayEvent(payload);
     return true;
   }
   return false;
@@ -2323,11 +2366,15 @@ function parseUdpPeer(endpoint) {
   return candidate;
 }
 
-function gatewaySwarmPeerForRecord(record) {
+function gatewayDirectoryEntryForRecord(record) {
   const pk = String(record?.devicePk || record?.pk || '').trim();
-  if (!pk) return '';
+  if (!pk) return null;
   const directory = Array.isArray(lastDirectory) ? lastDirectory : [];
-  const hit = directory.find((entry) => String(entry?.devicePk || '').trim() === pk);
+  return directory.find((entry) => String(entry?.devicePk || '').trim() === pk) || null;
+}
+
+function gatewaySwarmPeerForRecord(record) {
+  const hit = gatewayDirectoryEntryForRecord(record);
   if (!hit) return '';
   return parseUdpPeer(hit?.swarm || '');
 }
@@ -2437,14 +2484,145 @@ async function prepareNvrInstallContext(record) {
   const enrollment = await prepareInstallEnrollment('nvr');
 
   const gatewayHost = gatewayPeer.split(':')[0];
-  const publicWsUrl = gatewayHost ? `ws://${gatewayHost}:8456/session` : 'ws://127.0.0.1:8456/session';
+  const swarmEdgeEndpoint = gatewayHost ? `ws://${gatewayHost}:7448` : 'ws://127.0.0.1:7448';
 
   return {
     enrollment,
     gatewayPeer,
-    publicWsUrl,
+    swarmEdgeEndpoint,
     zones,
   };
+}
+
+function gatewayEdgeEndpointForRecord(record) {
+  const explicit = String(
+    record?.swarmEdgeEndpoint
+    || record?.swarm_edge_endpoint
+    || record?.edgeStreamEndpoint
+    || record?.edge_stream_endpoint
+    || record?.swarmEdge?.endpoint
+    || '',
+  ).trim();
+  if (explicit) return explicit;
+  const directoryEntry = gatewayDirectoryEntryForRecord(record);
+  const directoryExplicit = String(
+    directoryEntry?.swarmEdgeEndpoint
+    || directoryEntry?.swarm_edge_endpoint
+    || directoryEntry?.edgeStreamEndpoint
+    || directoryEntry?.edge_stream_endpoint
+    || directoryEntry?.swarmEdge?.endpoint
+    || '',
+  ).trim();
+  if (directoryExplicit) return directoryExplicit;
+  const peer = gatewaySwarmPeerForRecord(record);
+  if (!peer) return '';
+  const host = peer.startsWith('[')
+    ? peer.slice(0, peer.indexOf(']') + 1)
+    : peer.split(':')[0];
+  return host ? `ws://${host}:7448` : '';
+}
+
+function normalizeSwarmEdgeZoneScope(value) {
+  if (!value) return null;
+  const source = (typeof value === 'object') ? value : { zoneId: value };
+  const zoneId = String(
+    source.zoneId
+    || source.zone_id
+    || source.zone
+    || source.zoneKey
+    || source.zone_key
+    || source.key
+    || '',
+  ).trim();
+  if (!zoneId || zoneId.startsWith('identity:')) return null;
+  const ttl = Number(source.ttl || source.ttlSeconds || source.ttl_seconds || 30);
+  const maxHops = Number(source.maxHops || source.max_hops || 2);
+  return {
+    zoneId,
+    privacy: String(source.privacy || 'rawIds').trim() || 'rawIds',
+    ttl: Number.isFinite(ttl) && ttl > 0 ? ttl : 30,
+    maxHops: Number.isFinite(maxHops) && maxHops >= 0 ? maxHops : 2,
+  };
+}
+
+function zoneScopeFromGatewayHostedServices(record) {
+  const hostedServices = Array.isArray(record?.hostedServices || record?.hosted_services)
+    ? (record.hostedServices || record.hosted_services)
+    : [];
+  for (const hosted of hostedServices) {
+    const facts = hosted?.facts && typeof hosted.facts === 'object' ? hosted.facts : {};
+    const health = hosted?.health && typeof hosted.health === 'object' ? hosted.health : {};
+    const scope = normalizeSwarmEdgeZoneScope(hosted?.zoneScope || hosted?.zone_scope)
+      || normalizeSwarmEdgeZoneScope(facts.zoneScope || facts.zone_scope)
+      || normalizeSwarmEdgeZoneScope(health.zoneScope || health.zone_scope)
+      || normalizeSwarmEdgeZoneScope(hosted?.zone || hosted?.zoneKey || hosted?.zone_key);
+    if (scope) return scope;
+  }
+  return null;
+}
+
+function swarmEdgeAttachZoneScopeForGateway(record) {
+  const directoryEntry = gatewayDirectoryEntryForRecord(record);
+  return normalizeSwarmEdgeZoneScope(record?.zoneScope || record?.zone_scope)
+    || normalizeSwarmEdgeZoneScope(directoryEntry?.zoneScope || directoryEntry?.zone_scope)
+    || normalizeSwarmEdgeZoneScope(directoryEntry?.zone || directoryEntry?.zoneKey || directoryEntry?.zone_key)
+    || zoneScopeFromGatewayHostedServices(record)
+    || normalizeSwarmEdgeZoneScope(activeZoneKey)
+    || { zoneId: 'default', privacy: 'rawIds', ttl: 30, maxHops: 2 };
+}
+
+function runtimeEdgeMemberRef() {
+  const candidates = [
+    runtimeAuthorityDevicePk,
+    lastDeviceState?.pk,
+    lastDeviceState?.devicePk,
+  ];
+  for (const candidate of candidates) {
+    const ref = String(candidate || '').trim().toLowerCase();
+    if (/^[0-9a-f]{64}$/.test(ref)) return ref;
+  }
+  return '';
+}
+
+async function attachRuntimeSwarmEdgeIfAvailable() {
+  if (accountBridgeMode) return;
+  if (!runtimeBridge?.attachSwarmEdge) return;
+  const gateway = bestSwarmEdgeGatewayRecord() || freshestOwnedGatewayRecord();
+  const edgeEndpoint = gatewayEdgeEndpointForRecord(gateway);
+  if (!edgeEndpoint) return;
+  const memberRef = runtimeEdgeMemberRef();
+  if (!memberRef) return;
+  const zoneScope = swarmEdgeAttachZoneScopeForGateway(gateway);
+  const target = `${edgeEndpoint}|${memberRef}|${zoneScope.zoneId || ''}`;
+  const edge = runtimeStatusSnapshot?.edge || {};
+  const now = Date.now();
+  const recentlyAttemptedSameTarget = runtimeEdgeAttachTarget === target && (now - runtimeEdgeAttachAttemptedAt) < RUNTIME_SWARM_EDGE_ATTACH_RETRY_MS;
+  if (runtimeEdgeAttachTarget === target && String(edge.endpoint || '') === edgeEndpoint) {
+    return;
+  }
+  if (runtimeEdgeAttachTarget === target && runtimeEdgeAttachBackoffUntil > now) return;
+  if (recentlyAttemptedSameTarget) return;
+  if (runtimeEdgeAttachInFlight === target) return;
+  runtimeEdgeAttachInFlight = target;
+  runtimeEdgeAttachTarget = target;
+  runtimeEdgeAttachAttemptedAt = now;
+  try {
+    await runtimeBridge.attachSwarmEdge({ swarmEdgeEndpoint: edgeEndpoint, memberRef, zoneScope });
+    runtimeEdgeAttachFailureCount = 0;
+    runtimeEdgeAttachBackoffUntil = 0;
+  } catch (err) {
+    runtimeEdgeAttachFailureCount += 1;
+    runtimeEdgeAttachBackoffUntil = Date.now() + Math.min(
+      RUNTIME_SWARM_EDGE_ATTACH_MAX_RETRY_MS,
+      RUNTIME_SWARM_EDGE_ATTACH_RETRY_MS * runtimeEdgeAttachFailureCount,
+    );
+    if (Date.now() - runtimeEdgeAttachLastWarnAt > 30_000) {
+      runtimeEdgeAttachLastWarnAt = Date.now();
+      console.warn('[runtime] shared edge attach failed', err);
+    }
+  } finally {
+    if (runtimeEdgeAttachInFlight === target) runtimeEdgeAttachInFlight = null;
+  }
 }
 
 
@@ -2504,8 +2682,8 @@ async function requestRemoteNvrInstall(record) {
     zoneKeys: prepared.zones,
     authorizedDevicePks: collectAuthorizedIdentityDevicePks(),
     swarmPeers: [prepared.gatewayPeer, '127.0.0.1:4040'].filter((v, i, arr) => v && arr.indexOf(v) === i),
-    publicWsUrl: prepared.publicWsUrl,
-    allowUnsignedDebugHello: true,
+    swarmEdgeEndpoint: prepared.swarmEdgeEndpoint,
+    allowUnsignedDebugHello: false,
     reolinkAutoprovision: true,
     timeoutSecs: 900,
   };
@@ -2525,84 +2703,7 @@ async function requestRemoteNvrInstall(record) {
   };
 }
 
-async function requestGatewayServiceAccess(record, opts = {}) {
-  await ensureRuntimeBrokerReadyForServiceAccess();
-  const gatewayPk = managedGatewayPkForRecord(record);
-  const servicePk = managedServicePkForRecord(record);
-  const service = String(opts?.service || record?.service || 'nvr').trim() || 'nvr';
-  const capability = String(opts?.capability || `${service}.view`).trim() || `${service}.view`;
-  const timeoutMs = Number(opts?.timeoutMs || 0) || MANAGED_SERVICE_ACCESS_REQUEST_TIMEOUT_MS;
-  if (!gatewayPk) throw new Error('host gateway is not known for this service yet');
-  if (!servicePk) throw new Error('service public key is missing');
-  if (!String(lastIdentity?.id || '').trim()) throw new Error('link an identity before opening managed services');
-  if (!String(lastDeviceState?.pk || '').trim()) throw new Error('device key is not ready yet');
-  const requestServiceAccessOnce = async () => {
-    const requestId = randomOpaqueId('gw-service-access');
-    const pending = createPendingRequest(pendingServiceAccesses, requestId, 'service access', timeoutMs);
-    const observedPending = observePendingRequest(pending);
-    try {
-      await client.call('gateway.serviceAccess.request', {
-        requestId,
-        gatewayPk,
-        servicePk,
-        service,
-        capability,
-        appRepo: managedAppSurfaceRepoForService(service),
-        display: {
-          shell: 'constitute',
-          surface: managedAppSurfaceRepoForService(service),
-        },
-      }, { timeoutMs });
-    } catch (err) {
-      settlePending(pendingServiceAccesses, requestId, err);
-      throw err;
-    }
-    return await awaitObservedPendingRequest(observedPending);
-  };
-  for (let attempt = 1; attempt <= 3; attempt += 1) {
-    try {
-      return await requestServiceAccessOnce();
-    } catch (err) {
-      const message = String(err?.message || err || '').trim().toLowerCase();
-      const canRetry = message.includes('service access timed out') && attempt < 3;
-      if (!canRetry) throw err;
-      console.warn('[managed] service access timed out; retrying', {
-        gatewayPk,
-        servicePk,
-        service,
-        attempt,
-      });
-    }
-  }
-}
-
-async function requestGatewaySignal(req) {
-  const requestId = String(req?.requestId || '').trim() || randomOpaqueId('gw-signal');
-  const signalType = String(req?.signalType || '').trim().toLowerCase();
-  if (!signalType) throw new Error('missing signal type');
-  const requestedTimeoutMs = Number(req?.timeoutMs || 0);
-  const pendingTimeoutMs = requestedTimeoutMs || (signalType === 'offer' ? 30_000 : GATEWAY_SIGNAL_REQUEST_TIMEOUT_MS);
-  const callTimeoutMs = requestedTimeoutMs || (signalType === 'offer' ? 30_000 : GATEWAY_SIGNAL_REQUEST_TIMEOUT_MS);
-  const pending = createPendingRequest(pendingGatewaySignals, requestId, `gateway ${signalType}`, pendingTimeoutMs);
-  const observedPending = observePendingRequest(pending);
-  try {
-    await client.call(BROKER.SERVICE_SIGNAL_REQUEST, {
-      requestId,
-      gatewayPk: String(req?.gatewayPk || '').trim(),
-      servicePk: String(req?.servicePk || '').trim(),
-      service: String(req?.service || 'nvr').trim() || 'nvr',
-      signalType,
-      payload: req?.payload ?? {},
-      serviceCapability: String(req?.serviceCapability || '').trim(),
-    }, { timeoutMs: callTimeoutMs });
-  } catch (err) {
-    settlePending(pendingGatewaySignals, requestId, err);
-    throw err;
-  }
-  return await awaitObservedPendingRequest(observedPending);
-}
-
-function findManagedServiceRecordForProjection(service = 'logging') {
+function findManagedServiceRecordForService(service = 'logging') {
   const targetService = String(service || 'logging').trim().toLowerCase() || 'logging';
   const records = currentManagedApplianceRecords(lastIdentity?.devices || [], lastSwarmDevices || []);
   const owned = new Set([
@@ -2647,9 +2748,9 @@ function findManagedServiceRecordForProjection(service = 'logging') {
   };
 }
 
-async function discoverManagedServiceRecordForProjection(service = 'logging') {
+async function discoverManagedServiceRecordForService(service = 'logging') {
   const targetService = String(service || 'logging').trim().toLowerCase() || 'logging';
-  let record = findManagedServiceRecordForProjection(targetService);
+  let record = findManagedServiceRecordForService(targetService);
   if (record) return record;
 
   const records = currentManagedApplianceRecords(lastIdentity?.devices || [], lastSwarmDevices || []);
@@ -2666,11 +2767,11 @@ async function discoverManagedServiceRecordForProjection(service = 'logging') {
   const startedAt = Date.now();
   while ((Date.now() - startedAt) < MANAGED_SERVICE_RESOLVE_TIMEOUT_MS) {
     await refreshManagedApplianceProjection({ refreshGrantViews: false }).catch(() => []);
-    record = findManagedServiceRecordForProjection(targetService);
+    record = findManagedServiceRecordForService(targetService);
     if (record) return record;
     await new Promise((resolve) => window.setTimeout(resolve, MANAGED_SERVICE_RESOLVE_POLL_MS));
   }
-  return findManagedServiceRecordForProjection(targetService);
+  return findManagedServiceRecordForService(targetService);
 }
 
 function retainedProjectionServiceRecord(service = 'logging') {
@@ -2691,71 +2792,6 @@ function retainedProjectionServiceRecord(service = 'logging') {
     };
   }
   return null;
-}
-
-async function requestServiceProjection(req) {
-  const channelId = String(req?.channelId || '').trim();
-  const service = String(req?.service || 'logging').trim().toLowerCase() || 'logging';
-  if (!channelId) {
-    throw new Error('missing projection channel');
-  }
-  const record = await discoverManagedServiceRecordForProjection(service);
-  if (!record) throw new Error(`${service} service is not available from this account runtime yet`);
-  const serviceLabel = String(record?.deviceLabel || record?.label || service).trim() || service;
-  const resolvedRecord = withManagedServiceAccessKeys(
-    await resolveManagedServiceForAccess(record, { serviceLabel, requireGatewayAuthority: false }),
-    record,
-  );
-  const gatewayPk = managedGatewayPkForRecord(resolvedRecord);
-  const servicePk = managedServicePkForRecord(resolvedRecord);
-  const capability = String(req?.capability || `${service}.view`).trim().toLowerCase();
-  const access = await requestGatewayServiceAccess(resolvedRecord, {
-    service,
-    capability,
-    timeoutMs: PROJECTION_SERVICE_ACCESS_TIMEOUT_MS,
-  });
-  const requestPayload = {
-    requestId: String(req?.requestId || '').trim(),
-    channelId,
-    service,
-    cursor: req?.cursor && typeof req.cursor === 'object'
-      ? req.cursor
-      : String(req?.cursor || '').trim(),
-    limit: Number(req?.limit || 0) || 100,
-    filters: req?.filters && typeof req.filters === 'object' ? req.filters : {},
-    policy: req?.policy && typeof req.policy === 'object' ? req.policy : {},
-  };
-  const frame = makeServiceExchangeFrame({
-    kind: SERVICE_EXCHANGE.KIND.PROJECTION_REQUEST,
-    issuerPk: String(lastDeviceState?.pk || lastIdentity?.devicePk || '').trim() || 'account-runtime',
-    recipientServicePk: String(access?.servicePk || servicePk || '').trim(),
-    hostGatewayPk: String(access?.gatewayPk || gatewayPk || '').trim(),
-    requestId: requestPayload.requestId,
-    traceId: String(req?.traceId || '').trim(),
-    sealedPayload: requestPayload,
-  });
-  const signal = await requestGatewaySignal({
-    gatewayPk: String(access?.gatewayPk || gatewayPk || '').trim(),
-    servicePk: String(access?.servicePk || servicePk || '').trim(),
-    service,
-    signalType: 'service_projection',
-    payload: {
-      frame,
-    },
-    serviceCapability: String(access?.serviceCapability || '').trim(),
-    timeoutMs: PROJECTION_SIGNAL_REQUEST_TIMEOUT_MS,
-  });
-  const payload = signal?.payload && typeof signal.payload === 'object' ? signal.payload : {};
-  const projection = payload.projection && typeof payload.projection === 'object' ? payload.projection : payload;
-  return {
-    projection: {
-      ...projection,
-      requestId: String(req?.requestId || projection?.requestId || signal?.requestId || '').trim(),
-      channelId: String(projection?.channelId || channelId).trim(),
-      service: String(projection?.service || service).trim(),
-      servicePk: String(projection?.servicePk || access?.servicePk || servicePk || '').trim(),
-    },
-  };
 }
 
 function managedServiceProjectionKey(record) {
@@ -2859,6 +2895,29 @@ function buildGrantedManagedServiceRecord(shared, fallbackGatewayPk = '') {
   };
 }
 
+function shouldOwnGatewayGrantViewRefresh() {
+  return !relayBridge || relayBridge.isOwner?.() === true;
+}
+
+function gatewayGrantViewRequestKey(record, opts = {}) {
+  const gatewayPk = managedGatewayPkForRecord(record);
+  const servicePk = String(opts?.servicePk ?? managedServicePkForRecord(record) ?? '').trim();
+  const service = String(opts?.service || record?.service || 'nvr').trim() || 'nvr';
+  const action = String(opts?.action || '').trim().toLowerCase();
+  if (!gatewayPk || !action) return '';
+  return [gatewayPk, servicePk, service, action].join('|');
+}
+
+function invalidateGatewayGrantViewCache(record = null) {
+  const gatewayPk = managedGatewayPkForRecord(record);
+  const servicePk = String(record?.servicePk || managedServicePkForRecord(record) || '').trim();
+  for (const key of Array.from(gatewayGrantViewCache.keys())) {
+    if (gatewayPk && !key.startsWith(`${gatewayPk}|`)) continue;
+    if (servicePk && !key.includes(`|${servicePk}|`)) continue;
+    gatewayGrantViewCache.delete(key);
+  }
+}
+
 async function requestGatewayGrantAction(record, opts = {}) {
   const gatewayPk = managedGatewayPkForRecord(record);
   const servicePk = String(opts?.servicePk ?? managedServicePkForRecord(record) ?? '').trim();
@@ -2888,7 +2947,34 @@ async function requestGatewayGrantAction(record, opts = {}) {
   return await awaitObservedPendingRequest(observedPending);
 }
 
-async function refreshGatewayGrantViews(identityDevices, swarmDevices) {
+async function requestGatewayGrantViewAction(record, opts = {}) {
+  const action = String(opts?.action || '').trim().toLowerCase();
+  if (action !== 'list_shared' && action !== 'list_grants') {
+    return await requestGatewayGrantAction(record, opts);
+  }
+  const key = gatewayGrantViewRequestKey(record, opts);
+  if (!key) return await requestGatewayGrantAction(record, opts);
+  const now = Date.now();
+  const cached = gatewayGrantViewCache.get(key);
+  if (cached && (now - Number(cached.updatedAt || 0)) < GATEWAY_GRANT_VIEW_REFRESH_TTL_MS) {
+    return cached.result;
+  }
+  const existing = gatewayGrantViewInFlight.get(key);
+  if (existing) return await existing;
+  const pending = requestGatewayGrantAction(record, opts)
+    .then((result) => {
+      gatewayGrantViewCache.set(key, { updatedAt: Date.now(), result });
+      return result;
+    })
+    .finally(() => {
+      gatewayGrantViewInFlight.delete(key);
+    });
+  gatewayGrantViewInFlight.set(key, pending);
+  return await pending;
+}
+
+async function refreshGatewayGrantViews(identityDevices, swarmDevices, opts = {}) {
+  if (opts?.force !== true && !shouldOwnGatewayGrantViewRefresh()) return;
   const owned = ownedPkSet(identityDevices);
   const applianceRecords = currentManagedApplianceRecords(identityDevices, swarmDevices);
   const nextShared = new Map();
@@ -2903,7 +2989,7 @@ async function refreshGatewayGrantViews(identityDevices, swarmDevices) {
 
     try {
       if (isFreshEnough) {
-        const sharedResult = await requestGatewayGrantAction(rec, {
+        const sharedResult = await requestGatewayGrantViewAction(rec, {
           action: 'list_shared',
           service: 'nvr',
         });
@@ -2921,7 +3007,7 @@ async function refreshGatewayGrantViews(identityDevices, swarmDevices) {
     const hostedNvr = findGatewayHostedServiceRecord(gatewayPk, applianceRecords, 'nvr');
     if (!hostedNvr) continue;
     try {
-      const grantsResult = await requestGatewayGrantAction(hostedNvr, {
+      const grantsResult = await requestGatewayGrantViewAction(hostedNvr, {
         action: 'list_grants',
         service: 'nvr',
       });
@@ -3047,34 +3133,26 @@ async function openNvrControlPanel(record, opts = {}) {
       popup.document.close();
     }
 
-    const access = await requestGatewayServiceAccess(resolvedRecord, {
-      service: 'nvr',
-      capability: 'nvr.view',
-    });
-
-    const contextId = randomOpaqueId('service-access');
-    if (!runtimeBridge?.putServiceAccessContext) {
+    if (!runtimeBridge?.openStream) {
       throw new Error('shared browser runtime is unavailable; reload Constitute Account and try again');
     }
-    const context = {
-      contextId,
-      app: 'nvr',
-      repo: managedAppSurfaceRepoForService('nvr'),
-      identityId: String(lastIdentity?.id || '').trim(),
-      devicePk: String(lastDeviceState?.pk || '').trim(),
-      gatewayPk: String(access?.gatewayPk || managedGatewayPkForRecord(resolvedRecord) || '').trim(),
-      servicePk: String(access?.servicePk || managedServicePkForRecord(resolvedRecord) || '').trim(),
-      service: 'nvr',
-      serviceCapability: String(access?.serviceCapability || '').trim(),
-      display: access?.display ?? {},
-      createdAt: Date.now(),
-      expiresAt: Number(access?.expiresAt || (Date.now() + MANAGED_SERVICE_ACCESS_TTL_MS)),
-    };
-    await runtimeBridge.putServiceAccessContext(context);
+    const gatewayPk = managedGatewayPkForRecord(resolvedRecord);
+    const servicePk = managedServicePkForRecord(resolvedRecord);
+    if (!gatewayPk) throw new Error('host gateway is not known for this service yet');
+    if (!servicePk) throw new Error('service public key is missing');
+    await runtimeBridge.openStream({
+      intentId: randomOpaqueId('nvr-stream'),
+      nodeRef: String(opts?.camera || 'live-preview').trim() || 'live-preview',
+      capabilityRef: 'media.stream.preview',
+      params: {
+        activity: String(opts?.activity || '').trim(),
+        settingsTab: String(opts?.settingsTab || '').trim(),
+        camera: String(opts?.camera || '').trim(),
+      },
+    });
 
     const url = await buildManagedAppSurfaceUrl(
       managedAppSurfaceRepoForService('nvr'),
-      contextId,
       opts,
     );
     if (popup && !popup.closed) {
@@ -3088,7 +3166,7 @@ async function openNvrControlPanel(record, opts = {}) {
     lastManagedServiceIssue = {
       service: 'nvr',
       state: 'error',
-      stage: String(err?.message || '').split(':')[0] || 'service_access_authorization',
+      stage: String(err?.message || '').split(':')[0] || 'stream_intent',
       reason: String(err?.message || err),
       updatedAt: Date.now(),
     };
@@ -3100,8 +3178,8 @@ async function openNvrControlPanel(record, opts = {}) {
       message: String(err?.message || err),
     }, 7_500);
     if (popup && !popup.closed) {
-      popup.document.title = 'Security Cameras Service Access Failed';
-      popup.document.body.innerHTML = `<pre style="font:14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; padding:16px; color:#fca5a5; background:#0b1220;">Service access failed: ${escapeHtml(String(err?.message || err))}</pre>`;
+      popup.document.title = 'Security Cameras Stream Failed';
+      popup.document.body.innerHTML = `<pre style="font:14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; padding:16px; color:#fca5a5; background:#0b1220;">Stream intent failed: ${escapeHtml(String(err?.message || err))}</pre>`;
     }
   }
 }
@@ -3242,12 +3320,24 @@ async function resolveManagedServiceForAccess(record, opts = {}) {
 
 function pushRuntimeManagedApplianceSourceSnapshot(identityDevices, swarmDevices) {
   if (!runtimeBridge?.putManagedApplianceSourceSnapshot) return;
-  runtimeBridge.putManagedApplianceSourceSnapshot({
-    identityDevices: Array.isArray(identityDevices) ? identityDevices : [],
-    swarmDevices: Array.isArray(swarmDevices) ? swarmDevices : [],
-    grantedRecords: grantedManagedServiceRecords(),
-    managedServiceIssue: lastManagedServiceIssue || null,
-  });
+  const publish = () => {
+    const effectiveSwarmDevices = Array.isArray(swarmDevices) && swarmDevices.length > 0
+      ? swarmDevices
+      : currentSwarmDeviceRecords();
+    runtimeBridge.putManagedApplianceSourceSnapshot({
+      identityDevices: Array.isArray(identityDevices) ? identityDevices : [],
+      swarmDevices: effectiveSwarmDevices,
+      grantedRecords: grantedManagedServiceRecords(),
+      managedServiceIssue: lastManagedServiceIssue || null,
+    });
+    pushRuntimeAuthorityDevice().catch(() => {});
+    attachRuntimeSwarmEdgeIfAvailable().catch(() => {});
+  };
+  publish();
+  if (!runtimeBridge.ready) {
+    window.setTimeout(publish, 350);
+    window.setTimeout(publish, 1_500);
+  }
 }
 
 function publishRuntimeManagedApplianceState() {
@@ -3386,23 +3476,8 @@ function renderNotifications() {
   }
 }
 
-function filterPendingPairRequests(reqs, identityDevices) {
-  const knownPks = new Set((identityDevices || []).map(d => d.pk).filter(Boolean));
-  const knownDids = new Set((identityDevices || []).map(d => d.did).filter(Boolean));
-
-  return (reqs || []).filter(r => {
-    if (r.status && r.status !== 'pending') return false;
-    if (r.state && r.state !== 'pending') return false;
-    if (r.resolved === true) return false;
-    if (r.approved === true || r.rejected === true) return false;
-    if (r.devicePk && knownPks.has(r.devicePk)) return false;
-    if (r.deviceDid && knownDids.has(r.deviceDid)) return false;
-    return true;
-  });
-}
-
 function renderPairRequests(reqs, identityDevices) {
-  const pending = filterPendingPairRequests(reqs, identityDevices);
+  const pending = Array.isArray(reqs) ? reqs : [];
 
   clear(pairingList);
   if (pairingEmpty) pairingEmpty.textContent = 'No pending pairing requests.';
@@ -3470,6 +3545,25 @@ function renderPairRequests(reqs, identityDevices) {
     top.append(left, actions);
     item.append(top);
     pairingList.appendChild(item);
+  }
+}
+
+function renderPairClaimStatus(claimStatus, reqs = []) {
+  const state = String(claimStatus?.state || '').trim();
+  if ((Array.isArray(reqs) && reqs.length > 0) || state === 'matched') {
+    setPairCodeStatus('Pairing request received. Review and approve it below.');
+    return;
+  }
+  if (state === 'expired') {
+    setPairCodeStatus('Pairing code expired. Enter a fresh code from the device.', true);
+    return;
+  }
+  if (state === 'failed') {
+    setPairCodeStatus(String(claimStatus?.message || 'Pairing claim failed. Try again.'), true);
+    return;
+  }
+  if (state === 'active') {
+    setPairCodeStatus('Claim sent. Wait for the pairing request, then approve it below.');
   }
 }
 
@@ -3797,6 +3891,7 @@ async function refreshAll() {
 function applyCoreRefreshState({ st, ident, myLabel }) {
   lastDeviceState = st;
   lastIdentity = ident;
+  relayBridge?.updateAdmissionContext?.();
   setDaemonState('online', 'rpc ok');
   deviceDid.textContent = st.did || '';
   deviceDidSummary.textContent = String(myLabel?.label || 'This device').trim() || 'This device';
@@ -3824,15 +3919,21 @@ async function refreshExtendedState(core = null) {
   const st = core?.st || lastDeviceState || await client.call('device.getState', {}, { timeoutMs: 20000 });
   const ident = core?.ident || lastIdentity || await client.call('identity.get', {}, { timeoutMs: 20000 });
   const reqs = await client.call('pairing.list', {}, { timeoutMs: 20000 });
+  const pairClaimStatus = await client.call('pairing.claimStatus', {}, { timeoutMs: 20000 }).catch(() => null);
   const blocked = await client.call('blocked.list', {}, { timeoutMs: 20000 });
   const directory = await client.call('directory.list', {}, { timeoutMs: 20000 });
   const zones = await client.call('zones.list', {}, { timeoutMs: 20000 });
-  const swarmDevices = await client.call('swarm.device.list', {}, { timeoutMs: 20000 }).catch(() => []);
+  const rpcSwarmDevices = await client.call('swarm.device.list', {}, { timeoutMs: 20000 }).catch(() => []);
+  const swarmDevices = Array.isArray(rpcSwarmDevices) && rpcSwarmDevices.length > 0
+    ? rpcSwarmDevices
+    : currentSwarmDeviceRecords();
   const swarmIdentities = await client.call('swarm.identity.list', {}, { timeoutMs: 20000 }).catch(() => []);
   const notifs = await client.call('notifications.list', {}, { timeoutMs: 20000 });
 
   lastDirectory = directory || [];
   lastZones = zones || [];
+  relayBridge?.updateAdmissionContext?.();
+  lastPairClaimStatus = pairClaimStatus || null;
   lastSwarmDevices = swarmDevices || [];
   lastNotifications = Array.isArray(notifs) ? notifs : [];
   notificationsResolved = true;
@@ -3853,6 +3954,7 @@ async function refreshExtendedState(core = null) {
   updateZoneCommandUi();
   pushRuntimeManagedApplianceSourceSnapshot(ident?.devices || [], lastSwarmDevices);
   renderPairRequests(reqs || [], ident?.devices || []);
+  renderPairClaimStatus(lastPairClaimStatus, reqs || []);
   renderNotifications();
 
   const applianceRecords = currentManagedApplianceRecords(ident?.devices || [], lastSwarmDevices);
@@ -4241,18 +4343,46 @@ function wireUi() {
   // settings tabs
   for (const b of tabButtons) b.addEventListener('click', () => setSettingsTab(b.dataset.tab));
 
+  if (pairCodeInput) {
+    pairCodeInput.addEventListener('paste', (event) => {
+      const text = event.clipboardData?.getData('text') || '';
+      const normalized = normalizePairCodeInput(text);
+      if (!normalized) return;
+      event.preventDefault();
+      pairCodeInput.value = normalized;
+      setPairCodeStatus('');
+    });
+    pairCodeInput.addEventListener('input', () => {
+      const normalized = normalizePairCodeInput(pairCodeInput.value);
+      if (normalized !== pairCodeInput.value) pairCodeInput.value = normalized;
+      if (pairCodeStatus?.textContent) setPairCodeStatus('');
+    });
+    pairCodeInput.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        btnClaimPairCode?.click();
+      }
+    });
+  }
+
   if (btnClaimPairCode) {
     btnClaimPairCode.onclick = async () => {
-      const code = String(pairCodeInput?.value || '').trim();
+      const code = normalizePairCodeInput(pairCodeInput?.value || '');
+      if (pairCodeInput) pairCodeInput.value = code;
       if (!code) {
         setPairCodeStatus('Enter a code from the new device.', true);
         return;
       }
+      setPairClaimButtonBusy(true);
+      setPairCodeStatus('');
       try {
-        await client.call('pairing.claimCode', { code }, { timeoutMs: 20000 });
-        setPairCodeStatus('Claim sent. Wait for the pairing request, then approve it below.');
+        const claim = await client.call('pairing.claimCode', { code }, { timeoutMs: 20000 });
+        lastPairClaimStatus = { state: 'active', ...claim };
+        renderPairClaimStatus(lastPairClaimStatus);
       } catch (e) {
         setPairCodeStatus(`Claim failed: ${String(e?.message || e)}`, true);
+      } finally {
+        setPairClaimButtonBusy(false);
       }
     };
   }
@@ -4403,6 +4533,24 @@ function startSharedRelayPipe(client, initialRelayUrls) {
   let relayRuntime = null;
   let workerQuietTimer = null;
   let lastRelayRuntimeMessageAt = 0;
+  let relayRxForwardInFlight = 0;
+  let relayRxForwardDropped = 0;
+  let relayRxForwardFiltered = 0;
+  let relayRxForwardDeferred = 0;
+  let relayRxForwardLastWarnAt = 0;
+  let relayRxForwardSequence = 0;
+  const relayRxForwardQueue = [];
+  const relayRxAppIngressCounters = {
+    accepted: 0,
+    filtered: 0,
+    deferred: 0,
+    dropped: 0,
+    forwarded: 0,
+    acceptedByLane: {},
+    acceptedByReason: {},
+    filteredByReason: {},
+    droppedByReason: {},
+  };
 
   function clearWorkerQuietTimer() {
     if (!workerQuietTimer) return;
@@ -4473,8 +4621,177 @@ function startSharedRelayPipe(client, initialRelayUrls) {
     });
   }
 
+  function warnRelayRxForward(message, error = null) {
+    const now = Date.now();
+    if (now - relayRxForwardLastWarnAt < 30_000) return;
+    relayRxForwardLastWarnAt = now;
+    const suffixParts = [];
+    if (relayRxForwardDropped > 0) suffixParts.push(`${relayRxForwardDropped} dropped while busy`);
+    if (relayRxForwardDeferred > 0) suffixParts.push(`${relayRxForwardDeferred} deferred by lane`);
+    if (relayRxForwardQueue.length > 0) suffixParts.push(`${relayRxForwardQueue.length} queued`);
+    if (relayRxForwardFiltered > 0) suffixParts.push(`${relayRxForwardFiltered} filtered before SW`);
+    const workerFiltered = Number(relayPoolSnapshot?.ingress?.counters?.filtered || 0);
+    if (workerFiltered > 0) suffixParts.push(`${workerFiltered} filtered before app`);
+    const suffix = suffixParts.length > 0 ? ` (${suffixParts.join(', ')})` : '';
+    console.warn(`[relay.rx] ${message}${suffix}`, error || '');
+  }
+
+  function incrementRelayRxAppCounter(bucket, classification = null) {
+    const target = relayRxAppIngressCounters[bucket];
+    if (typeof target === 'number') relayRxAppIngressCounters[bucket] = target + 1;
+    const lane = String(classification?.lane || 'unknown');
+    const reason = String(classification?.reason || 'unknown');
+    if (bucket === 'accepted') {
+      relayRxAppIngressCounters.acceptedByLane[lane] = (relayRxAppIngressCounters.acceptedByLane[lane] || 0) + 1;
+      relayRxAppIngressCounters.acceptedByReason[reason] = (relayRxAppIngressCounters.acceptedByReason[reason] || 0) + 1;
+    } else if (bucket === 'filtered') {
+      relayRxAppIngressCounters.filteredByReason[reason] = (relayRxAppIngressCounters.filteredByReason[reason] || 0) + 1;
+    } else if (bucket === 'dropped') {
+      relayRxAppIngressCounters.droppedByReason[reason] = (relayRxAppIngressCounters.droppedByReason[reason] || 0) + 1;
+    }
+    publishRelayRxAppIngress();
+  }
+
+  function publishRelayRxAppIngress() {
+    window.__constituteRelayAppIngress = {
+      kind: 'app.ingress.posture',
+      observedAt: Date.now(),
+      inFlight: relayRxForwardInFlight,
+      queued: relayRxForwardQueue.length,
+      counters: {
+        accepted: relayRxAppIngressCounters.accepted,
+        filtered: relayRxAppIngressCounters.filtered,
+        deferred: relayRxAppIngressCounters.deferred,
+        dropped: relayRxAppIngressCounters.dropped,
+        forwarded: relayRxAppIngressCounters.forwarded,
+      },
+      acceptedByLane: { ...relayRxAppIngressCounters.acceptedByLane },
+      acceptedByReason: { ...relayRxAppIngressCounters.acceptedByReason },
+      filteredByReason: { ...relayRxAppIngressCounters.filteredByReason },
+      droppedByReason: { ...relayRxAppIngressCounters.droppedByReason },
+    };
+  }
+
+  function classifyRelayRxIngress(data) {
+    return relayRxIngressClassification(data, {
+      context: relayAdmissionContext(),
+      isAppHandled: (raw) => Boolean(parseGatewayRelayPayload(raw)),
+    });
+  }
+
+  function relayAdmissionContext() {
+    const memberRef = String(lastDeviceState?.pk || lastDeviceState?.devicePk || '').trim();
+    return {
+      memberRef,
+      subscriberRef: memberRef || String(ownerId || '').trim(),
+      identity: String(lastIdentity?.label || '').trim(),
+      ownerId,
+      zoneKeys: installZoneKeys(),
+      surface: 'constitute-account',
+    };
+  }
+
+  function publishRelayAdmissionContext() {
+    relayRuntime?.postMessage?.({
+      type: 'relay.context',
+      context: relayAdmissionContext(),
+    });
+  }
+
+  function findRelayRxEvictionIndex(nextPriority) {
+    let worstIndex = -1;
+    let worstPriority = nextPriority;
+    let worstSequence = -1;
+    relayRxForwardQueue.forEach((entry, index) => {
+      if (entry.priority < worstPriority) return;
+      if (entry.priority === worstPriority && entry.sequence <= worstSequence) return;
+      worstPriority = entry.priority;
+      worstSequence = entry.sequence;
+      worstIndex = index;
+    });
+    return worstIndex;
+  }
+
+  function beginRelayRxForward(entry) {
+    relayRxForwardInFlight += 1;
+    incrementRelayRxAppCounter('forwarded', entry.classification);
+    const msg = entry.msg;
+    client.call('relay.rx', {
+      data: msg.data,
+      url: msg.url || '',
+      admission: entry.classification.admission,
+    }, { timeoutMs: RELAY_RX_FORWARD_TIMEOUT_MS })
+      .catch((e) => warnRelayRxForward('rpc failed', e))
+      .finally(() => {
+        relayRxForwardInFlight = Math.max(0, relayRxForwardInFlight - 1);
+        publishRelayRxAppIngress();
+        drainRelayRxForwardQueue();
+      });
+  }
+
+  function drainRelayRxForwardQueue() {
+    while (relayRxForwardInFlight < RELAY_RX_FORWARD_MAX_IN_FLIGHT && relayRxForwardQueue.length > 0) {
+      let nextIndex = 0;
+      for (let i = 1; i < relayRxForwardQueue.length; i += 1) {
+        const candidate = relayRxForwardQueue[i];
+        const current = relayRxForwardQueue[nextIndex];
+        if (candidate.priority < current.priority || (candidate.priority === current.priority && candidate.sequence < current.sequence)) {
+          nextIndex = i;
+        }
+      }
+      const [entry] = relayRxForwardQueue.splice(nextIndex, 1);
+      beginRelayRxForward(entry);
+    }
+  }
+
+  function forwardRelayRxToServiceWorker(msg) {
+    // Keep app ingress aligned with the SW relay replay window before
+    // expensive client.call forwarding consumes the bounded SW RPC slots.
+    const classification = classifyRelayRxIngress(msg.data);
+    if (!classification.accepted) {
+      relayRxForwardFiltered += 1;
+      incrementRelayRxAppCounter('filtered', classification);
+      return;
+    }
+    incrementRelayRxAppCounter('accepted', classification);
+    const entry = {
+      msg,
+      classification,
+      priority: classification.priority,
+      sequence: relayRxForwardSequence += 1,
+      enqueuedAt: Date.now(),
+    };
+    if (relayRxForwardInFlight >= RELAY_RX_FORWARD_MAX_IN_FLIGHT) {
+      relayRxForwardDeferred += 1;
+      incrementRelayRxAppCounter('deferred', classification);
+    }
+    if (relayRxForwardQueue.length >= RELAY_RX_FORWARD_QUEUE_LIMIT) {
+      const evictionIndex = findRelayRxEvictionIndex(entry.priority);
+      if (evictionIndex < 0) {
+        relayRxForwardDropped += 1;
+        incrementRelayRxAppCounter('dropped', classification);
+        warnRelayRxForward('service worker ingress saturated');
+        return;
+      }
+      const [evicted] = relayRxForwardQueue.splice(evictionIndex, 1);
+      relayRxForwardDropped += 1;
+      incrementRelayRxAppCounter('dropped', evicted?.classification || classification);
+      warnRelayRxForward('service worker ingress saturated');
+    }
+    relayRxForwardQueue.push(entry);
+    publishRelayRxAppIngress();
+    drainRelayRxForwardQueue();
+  }
+
   function handleRelayRuntimeMessage(msg) {
     lastRelayRuntimeMessageAt = Date.now();
+    if (msg.type === 'relay.ingress.status') {
+      if (msg.ingress && typeof msg.ingress === 'object') {
+        relayPoolSnapshot = { ...relayPoolSnapshot, ingress: msg.ingress };
+        window.__constituteRelayIngress = msg.ingress;
+      }
+      return;
+    }
     if (msg.type === 'relay.status') {
       const reason = [msg.reason || '', msg.code != null ? `code=${msg.code}` : ''].filter(Boolean).join(' ');
       if (msg.state === 'error' || msg.state === 'closed') {
@@ -4496,6 +4813,7 @@ function startSharedRelayPipe(client, initialRelayUrls) {
         version: String(msg.version || '').trim(),
         urls: relayUrls,
         relays: relayDetails,
+        ingress: msg.ingress || relayPoolSnapshot.ingress || null,
       });
       if (bootRefreshSettled && clientReady && relayBridgeOwner) {
         client.call('relay.status', {
@@ -4503,6 +4821,7 @@ function startSharedRelayPipe(client, initialRelayUrls) {
           url: msg.url || '',
           urls: relayUrls,
           relays: relayDetails,
+          ingress: msg.ingress || relayPoolSnapshot.ingress || null,
           code: msg.code ?? null,
           reason: msg.reason ?? ''
         }, { timeoutMs: 20000 }).catch((e) => console.error('relay.status rpc failed', e));
@@ -4517,8 +4836,7 @@ function startSharedRelayPipe(client, initialRelayUrls) {
       // During boot, let the shell recover local identity/device state first.
       // Once boot settles, relay ingress can flow back into the SW queue.
       if (bootRefreshSettled && clientReady && relayBridgeOwner) {
-        client.call('relay.rx', { data: msg.data, url: msg.url || '' }, { timeoutMs: 20000 })
-          .catch((e) => console.error('relay.rx rpc failed', e));
+        forwardRelayRxToServiceWorker(msg);
       }
     }
   }
@@ -4531,7 +4849,7 @@ function startSharedRelayPipe(client, initialRelayUrls) {
       console.warn('[relay.bridge] shared worker quiet; falling back to dedicated runtime');
       startRelayRuntime('shared-timeout');
       if (targetKey) {
-        relayRuntime?.postMessage?.({ type: 'relay.connect', urls: targetKey.split('\n').filter(Boolean) });
+        relayRuntime?.postMessage?.({ type: 'relay.connect', urls: targetKey.split('\n').filter(Boolean), context: relayAdmissionContext() });
       }
     }, RELAY_WORKER_QUIET_TIMEOUT_MS);
   }
@@ -4559,7 +4877,10 @@ function startSharedRelayPipe(client, initialRelayUrls) {
 
   function createDedicatedRelayRuntime() {
     const scriptUrl = relayWorkerScriptUrl();
-    const worker = new Worker(scriptUrl);
+    const worker = new Worker(scriptUrl, {
+      type: 'module',
+      name: `constitute-account-relay-dedicated-${SHELL_BUILD_ID}`,
+    });
     worker.onmessage = (ev) => handleRelayRuntimeMessage(ev.data || {});
     worker.onerror = (ev) => console.error('[relay.bridge] dedicated worker error', ev?.message || ev);
     worker.onmessageerror = (ev) => console.error('[relay.bridge] dedicated worker messageerror', ev);
@@ -4582,6 +4903,7 @@ function startSharedRelayPipe(client, initialRelayUrls) {
       relayRuntime = createDedicatedRelayRuntime();
     }
     if (relayRuntime.mode === 'shared') scheduleQuietFallback();
+    publishRelayAdmissionContext();
     relayRuntime.postMessage({ type: 'relay.status' });
     return relayRuntime;
   }
@@ -4591,7 +4913,7 @@ function startSharedRelayPipe(client, initialRelayUrls) {
     const nextKey = targets.join('\n');
     if (nextKey === targetKey) return false;
     targetKey = nextKey;
-    relayRuntime?.postMessage?.({ type: 'relay.connect', urls: targets });
+    relayRuntime?.postMessage?.({ type: 'relay.connect', urls: targets, context: relayAdmissionContext() });
     return true;
   }
 
@@ -4604,6 +4926,7 @@ function startSharedRelayPipe(client, initialRelayUrls) {
 
   startRelayBridgeHeartbeat();
   startRelayRuntime('init');
+  publishRelayAdmissionContext();
   updateTargets(initialRelayUrls, 'init');
 
   async function flushBootState() {
@@ -4618,6 +4941,7 @@ function startSharedRelayPipe(client, initialRelayUrls) {
         url: '',
         urls: relayUrls,
         relays: relayDetails,
+        ingress: relayPoolSnapshot?.ingress || null,
         code: null,
         reason: relayPoolSnapshot?.reason || '',
       }, { timeoutMs: 20000 });
@@ -4630,7 +4954,9 @@ function startSharedRelayPipe(client, initialRelayUrls) {
 
   return {
     updateTargets,
+    updateAdmissionContext: publishRelayAdmissionContext,
     flushBootState,
+    isOwner: () => relayBridgeOwner,
     close: () => teardownRelayRuntime('api-close'),
   };
 }
@@ -4656,17 +4982,8 @@ function startSharedRelayPipe(client, initialRelayUrls) {
       if (evt?.type === 'gateway_zone_sync_status') {
         handleGatewayZoneSyncStatusEvent(evt);
       }
-      if (evt?.type === SERVICE_ACCESS_EVENTS.STATUS) {
-        handleGatewayServiceAccessStatusEvent(evt);
-      }
       if (evt?.type === 'gateway_grant_status') {
         handleGatewayGrantStatusEvent(evt);
-      }
-      if (evt?.type === SERVICE_ACCESS_EVENTS.SIGNAL_STATUS) {
-        handleGatewaySignalStatusRelayEvent(evt);
-      }
-      if (evt?.type === SERVICE_ACCESS_EVENTS.SIGNAL) {
-        handleGatewaySignalRelayEvent(evt);
       }
       if (evt?.type === 'notify') scheduleRefreshAll();
     }
@@ -4678,6 +4995,8 @@ function startSharedRelayPipe(client, initialRelayUrls) {
   swarm.loadSuccess();
   swarm.loadIdentityCache();
   swarm.loadDeviceCache();
+  lastSwarmDevices = currentSwarmDeviceRecords();
+  pushRuntimeManagedApplianceSourceSnapshot(lastIdentity?.devices || [], lastSwarmDevices);
   swarm.loadLastKnown();
   const fallbackPeers = swarm.getFallbackPeers();
   if (fallbackPeers && fallbackPeers.length > 0) {

@@ -193,3 +193,27 @@ test('hosted service without service public key does not use synthetic list iden
   assert.equal(logging.devicePk, 'logging:gateway-pk');
   assert.equal(model.managedServicePkForRecord(logging), '');
 });
+
+test('gateway-hosted nvr record preserves projected camera facts', () => {
+  const now = Date.now();
+  const model = makeModel();
+  const hosted = hostedNvrRecord(now);
+  hosted.facts = {
+    configuredSources: 2,
+    sources: ['front', 'back'],
+    cameraDevices: [
+      { sourceId: 'front', enabled: true },
+      { sourceId: 'back', enabled: true },
+    ],
+  };
+  const recs = model.buildApplianceRecords(
+    [{ pk: 'gateway-pk' }],
+    [gatewayRecord({ updatedAt: now, hostedServices: [hosted] })],
+  );
+
+  const nvr = recs.find((record) => record.devicePk === 'nvr-pk');
+  assert.ok(nvr, 'expected hosted nvr record');
+  assert.deepEqual(nvr.sources, ['front', 'back']);
+  assert.deepEqual(nvr.cameraDevices, hosted.facts.cameraDevices);
+  assert.equal(nvr.facts.configuredSources, 2);
+});

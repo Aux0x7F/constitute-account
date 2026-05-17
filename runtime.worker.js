@@ -1,25 +1,224 @@
-import { BROKER, PROJECTION, assertProjectionPolicy, assertProjectionRecord } from "constitute-protocol";
+import {
+  SWARM,
+  STREAM_SESSION_LIFECYCLE_PHASE,
+  applyProjectionDelta,
+  assertProjectionDelta,
+  assertEventAdmissionEnvelope,
+  assertConsumerFloor,
+  assertMaterializationBudget,
+  assertProjectionPolicy,
+  assertProjectionRecord,
+  assertProjectionSnapshot,
+  assertResolvedMemberRef,
+  assertProjectionRepairPosture,
+  assertResourcePosture,
+  assertResourceProfile,
+  assertRetentionReleasePosture,
+  assertRoutePromise,
+  assertRuntimeActivationRequest,
+  assertSelfCapabilityAssessment,
+  assertMediaFulfillmentEvidence,
+  assertMediaTransportObservation,
+  assertContributionLifecycle,
+  assertStreamSessionCandidate,
+  assertSubscriptionContract,
+  assertSwarmActivation,
+  assertSwarmFrame,
+  assertSwarmInteraction,
+  makeLogEventEnvelope,
+  openEnvelope,
+  makeProjectionRepairRequest,
+  makeSwarmFrame,
+  pubkeyFromSecretKey,
+  sealEnvelope,
+  eventPlaneForRecordKind,
+  streamSessionLifecycleRecordFromCarrier,
+  streamSessionLifecyclePhase,
+} from "constitute-protocol";
+import { deriveRuntimeShellState } from "./runtime-shell-state.js";
 
-const RUNTIME_VERSION = Object.freeze({ major: 2, minor: 12 });
+const RUNTIME_VERSION = Object.freeze({ major: 2, minor: 57 });
 const RUNTIME_WORKER_BUILD_ID = `runtime-${RUNTIME_VERSION.major}.${RUNTIME_VERSION.minor}`;
-const CONTEXT_TTL_FALLBACK_MS = 2 * 60 * 1000;
 const APPLIANCE_DISCOVERY_MAX_AGE_MS = 60 * 60 * 1000;
 const RUNTIME_STATE_KEY = `runtime.shared.state.v${RUNTIME_VERSION.major}`;
 const RUNTIME_META_KEY = `runtime.shared.meta.v${RUNTIME_VERSION.major}`;
+const SERVICE_CATALOG_GET = 'service.catalog.get';
+const SERVICE_NODE_GET = 'service.node.get';
+const PROJECTION_GET = 'projection.get';
+const PROJECTION_PUT = 'projection.put';
 const PROJECTION_POLICY_PUT = 'projection.policy.put';
+const RUNTIME_AUTHORITY_DEVICE_PUT = 'runtime.authority.device.put';
+const RUNTIME_AUTHORITY_POSTURE_GET = 'runtime.authority.posture.get';
+const RUNTIME_MEDIA_TRANSPORT_PROFILE_GET = 'runtime.media.transport.profile.get';
+const RUNTIME_MEDIA_TRANSPORT_OBSERVATION_PUT = 'runtime.media.transport.observation.put';
+const RUNTIME_MEDIA_FULFILLMENT_EVIDENCE_PUT = 'runtime.media.fulfillment.evidence.put';
+const RUNTIME_RESOURCE_SAMPLE_GET = 'runtime.resource.sample.get';
+const RUNTIME_RESOURCE_PROFILE_GET = 'runtime.resource.profile.get';
+const RUNTIME_RESOURCE_PROFILE_PUT = 'runtime.resource.profile.put';
+const RUNTIME_RETENTION_RELEASE_EVALUATE = 'runtime.retention.release.evaluate';
+const SWARM_FRAME_QUEUE = 'swarm.frame.queue';
+const SWARM_QUEUE_GET = 'swarm.queue.get';
+const SWARM_EDGE_ATTACH = 'swarm.edge.attach';
+const SWARM_EDGE_DISCONNECT = 'swarm.edge.disconnect';
+const SWARM_EDGE_TEST_CONNECT = 'swarm.edge.test.connect';
+const SWARM_EDGE_TEST_DISCONNECT = 'swarm.edge.test.disconnect';
+const SWARM_EDGE_TEST_RECEIVE = 'swarm.edge.test.receive';
+const SWARM_EDGE_SENT_GET = 'swarm.edge.sent.get';
+const SWARM_EDGE_ACK = 'swarm.edge.ack';
+const SWARM_EDGE_REJECT = 'swarm.edge.reject';
+const CONTRIBUTION_LIFECYCLE_LIMIT = 100;
+const RUNTIME_DIAGNOSTICS_SUBSCRIBE = 'runtime.diagnostics.subscribe';
+const RUNTIME_DIAGNOSTICS_UNSUBSCRIBE = 'runtime.diagnostics.unsubscribe';
+const RUNTIME_DIAGNOSTICS_COMMAND = 'runtime.diagnostics.command';
+const RUNTIME_DIAGNOSTIC_EVENT = 'runtime.diagnostic.event';
+const RUNTIME_DIAGNOSTIC_COMMAND_RESULT = 'runtime.diagnostic.command.result';
+const RUNTIME_DIAGNOSTICS_CHANNEL = 'runtime.diagnostics';
+const RUNTIME_DIAGNOSTIC_RING_LIMIT = 300;
+const RUNTIME_DIAGNOSTIC_SNAPSHOT_LIMIT = 30;
+const RUNTIME_DIAGNOSTIC_REPLAY_LIMIT = 80;
+const RUNTIME_DIAGNOSTIC_LOG_RATE_LIMIT = 8;
+const RUNTIME_DIAGNOSTIC_LOG_BACKLOG_LIMIT = 600;
+const RUNTIME_DIAGNOSTIC_DEFAULT_REPLAY_LIMIT = 80;
+const RUNTIME_DIRECTORY_OBSERVE_CHANNEL = 'swarm.directory';
+const RUNTIME_DIRECTORY_OBSERVE_MIN_INTERVAL_MS = 10_000;
+const BYTES_GIB = 1024 * 1024 * 1024;
+const RESOURCE_PROFILE_DEFINITIONS = Object.freeze({
+  thinClient: Object.freeze({
+    id: 'thinClient',
+    label: 'Thin client',
+    memoryBudgetBytes: 1 * BYTES_GIB,
+    storageBudgetBytes: 1 * BYTES_GIB,
+    hotTtlMs: 30_000,
+    warmTtlMs: 5 * 60_000,
+    caps: Object.freeze({ diagnostics: 120, projections: 128, mediaTracks: 2, liveStreams: 1, devBridgeSessions: 0 }),
+  }),
+  balanced: Object.freeze({
+    id: 'balanced',
+    label: 'Balanced',
+    memoryBudgetBytes: 1.5 * BYTES_GIB,
+    storageBudgetBytes: 2 * BYTES_GIB,
+    hotTtlMs: 90_000,
+    warmTtlMs: 15 * 60_000,
+    caps: Object.freeze({ diagnostics: RUNTIME_DIAGNOSTIC_RING_LIMIT, projections: 256, mediaTracks: 4, liveStreams: 2, devBridgeSessions: 2 }),
+  }),
+  offlineFirst: Object.freeze({
+    id: 'offlineFirst',
+    label: 'Offline first',
+    memoryBudgetBytes: 2 * BYTES_GIB,
+    storageBudgetBytes: 0,
+    storageReserveBytes: 1 * BYTES_GIB,
+    storageBudgetPolicy: 'deviceAvailableMinusReserve',
+    hotTtlMs: 5 * 60_000,
+    warmTtlMs: 60 * 60_000,
+    caps: Object.freeze({ diagnostics: RUNTIME_DIAGNOSTIC_RING_LIMIT, projections: 1024, mediaTracks: 4, liveStreams: 2, devBridgeSessions: 1 }),
+  }),
+  archiveNode: Object.freeze({
+    id: 'archiveNode',
+    label: 'Archive node',
+    memoryBudgetBytes: 1 * BYTES_GIB,
+    storageBudgetBytes: 900 * BYTES_GIB,
+    hotTtlMs: 5 * 60_000,
+    warmTtlMs: 24 * 60 * 60_000,
+    caps: Object.freeze({ diagnostics: RUNTIME_DIAGNOSTIC_RING_LIMIT, projections: 4096, mediaTracks: 2, liveStreams: 1, devBridgeSessions: 0 }),
+  }),
+  operatorDev: Object.freeze({
+    id: 'operatorDev',
+    label: 'Operator dev',
+    memoryBudgetBytes: 2 * BYTES_GIB,
+    storageBudgetBytes: 4 * BYTES_GIB,
+    hotTtlMs: 5 * 60_000,
+    warmTtlMs: 30 * 60_000,
+    caps: Object.freeze({ diagnostics: RUNTIME_DIAGNOSTIC_RING_LIMIT, projections: 512, mediaTracks: 6, liveStreams: 3, devBridgeSessions: 8 }),
+  }),
+});
+const RESOURCE_POSTURE_STATES = Object.freeze({
+  WITHIN_BUDGET: 'withinBudget',
+  PRESSURE: 'pressure',
+  OVER_BUDGET: 'overBudget',
+  SWEEPING: 'sweeping',
+  BLOCKED: 'blocked',
+});
+const RUNTIME_APP_INTENT = Object.freeze({
+  CAPABILITY_RESOLVE: 'runtime.capability.resolve',
+  CHANNEL_RESOLVE: 'runtime.channel.resolve',
+  PROJECTION_OBSERVE: 'runtime.projection.observe',
+  STREAM_OPEN: 'runtime.stream.open',
+  STREAM_CONTROL: 'runtime.stream.control',
+  STREAM_CLOSE: 'runtime.stream.close',
+  STREAM_RECOVERY_REQUEST: 'runtime.stream.recovery.request',
+  STORAGE_PIN: 'runtime.storage.pin',
+  DIAGNOSTIC_LOG: 'runtime.diagnostics.log',
+});
+const NVR_SERVICE_ID = 'nvr';
+const NVR_STREAM_CHANNEL = 'nvr.streams';
+const RUNTIME_SWARM_RECEIVE_CAPABILITY_REFS = [
+  SWARM.CORE_CAPABILITY.SWARM_EDGE_ATTACH,
+  SWARM.CORE_CAPABILITY.MEDIA_STREAM_PREVIEW,
+  SWARM.CORE_CAPABILITY.STREAM_SESSION_OFFER,
+  SWARM.CORE_CAPABILITY.STREAM_SESSION_CONTROL,
+  SWARM.CORE_CAPABILITY.PROJECTION_OBSERVE,
+  SWARM.CORE_CAPABILITY.PROJECTION_DELTA_APPLY,
+  SWARM.CORE_CAPABILITY.ROUTE_OBSERVATION_PUBLISH,
+  SWARM.CORE_CAPABILITY.STORAGE_PIN,
+  'service.intent.invoke',
+];
+const RUNTIME_SWARM_RECEIVE_CHANNEL_REFS = [
+  RUNTIME_DIRECTORY_OBSERVE_CHANNEL,
+  'swarm.route',
+  'nvr.streams',
+  'nvr.surface',
+  'nvr.health',
+  'nvr.cameras',
+  'nvr.cameraNetwork',
+  'logging.surface',
+  'logging.events',
+  'logging.health',
+  'logging.dashboard',
+  'storage.pin.intent',
+  'storage.pin.attestation',
+];
+const PROJECTION_SNAPSHOT_APPLY = 'projection.snapshot.apply';
+const PROJECTION_DELTA_APPLY = 'projection.delta.apply';
 const PROJECTION_SYNC_REQUEST_TIMEOUT_MS = 45_000;
 const PROJECTION_SYNC_RETRY_MS = 5_000;
+const PROJECTION_REPAIR_REQUEST_LIMIT = 32;
+const SERVICE_ADMISSION_TIMEOUT_MS = 12_000;
 const DEFAULT_LOGGING_SYNC_TARGET_COUNT = 2_500;
 const DEFAULT_LOGGING_POLICY_ID = 'logging.default.72h.low';
-const LOGGING_SYNC_CHANNELS = Object.freeze([
-  PROJECTION.CHANNEL.LOGGING_EVENTS,
-  PROJECTION.CHANNEL.LOGGING_HEALTH,
+const RUNTIME_LOGGING_PROJECTION_SERVICE_PK = 'runtime:logging:local-safe-diagnostics';
+const RUNTIME_LOGGING_PROJECTION_CHANNELS = new Set(['logging.events', 'logging.health', 'logging.dashboard']);
+const RUNTIME_MEDIA_TRANSPORT_PROFILE_ID = 'runtime.media.browser-webrtc.default';
+const RUNTIME_MEDIA_TRANSPORT_ICE_SERVERS = Object.freeze([
+  Object.freeze({ urls: 'stun:stun.l.google.com:19302' }),
 ]);
 
 const DB_NAME = 'constitute_db';
 const DB_VER = 1;
+const BACKUP_CACHE = 'constitute_kv_backup_v1';
+const BACKUP_PREFIX = '/__constitute_kv__/';
 const IDB_OPERATION_TIMEOUT_MS = 1500;
+const AUTHORITY_POSTURE_STORAGE_LOOKUP_TIMEOUT_MS = 250;
+const AUTHORITY_STORAGE_HYDRATION_TIMEOUT_MS = 2500;
+const PENDING_AUTHORITY_INTENT_LIMIT = 64;
 let runtimeHydrationWarningLogged = false;
+let runtimeAuthorityStorageHydrationWarningLogged = false;
+const inboundEnvelopeReplayIds = new Set();
+let runtimeAuthorityDevice = null;
+let runtimeAuthorityPostureState = {
+  state: 'waitingAuthority',
+  ready: false,
+  authorityDomain: SWARM.AUTHORITY_DOMAIN.RUNTIME,
+  reason: 'runtime authority has not been handed off by account',
+  source: 'startup',
+  updatedAt: 0,
+};
+let runtimeAuthorityStorageHydrationPromise = null;
+const pendingAuthorityIntents = new Map();
+const pendingRouteIntents = new Map();
+let flushingPendingAuthorityIntents = false;
+let flushingPendingRouteIntents = false;
+let runtimeResourceProfileId = 'balanced';
+let runtimeResourceProfileOverrides = {};
 
 function withTimeout(label, work, timeoutMs = IDB_OPERATION_TIMEOUT_MS) {
   return new Promise((resolve, reject) => {
@@ -69,31 +268,109 @@ async function withDbRetry(label, work, attempts = 2) {
 }
 
 async function kvGet(key) {
-  return await withDbRetry(`kvGet(${String(key || '')})`, async (db) => await new Promise((resolve, reject) => {
-    const tx = db.transaction('kv', 'readonly');
-    const st = tx.objectStore('kv');
-    const req = st.get(key);
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
-  }));
+  const label = `kvGet(${String(key || '')})`;
+  try {
+    const value = await withDbRetry(label, async (db) => await withTimeout(`${label}.tx`, () => new Promise((resolve, reject) => {
+      const tx = db.transaction('kv', 'readonly');
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error || new Error(`${label}: transaction aborted`));
+      const st = tx.objectStore('kv');
+      const req = st.get(key);
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    })));
+    if (typeof value !== 'undefined') return value;
+  } catch {
+    // Fall through to the same backup cache used by the identity service worker.
+  }
+  return await backupGet(key);
 }
 
 async function kvSet(key, value) {
-  await withDbRetry(`kvSet(${String(key || '')})`, async (db) => await new Promise((resolve, reject) => {
-    const tx = db.transaction('kv', 'readwrite');
-    tx.objectStore('kv').put(value, key);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  }));
+  const label = `kvSet(${String(key || '')})`;
+  let idbError = null;
+  try {
+    await withDbRetry(label, async (db) => await withTimeout(`${label}.tx`, () => new Promise((resolve, reject) => {
+      const tx = db.transaction('kv', 'readwrite');
+      tx.objectStore('kv').put(value, key);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error || new Error(`${label}: transaction aborted`));
+    })));
+  } catch (error) {
+    idbError = error;
+  }
+  const backupOk = await backupSet(key, value);
+  if (idbError && !backupOk) {
+    throw new Error(`${label}: ${String(idbError?.message || idbError || 'database failure')}`);
+  }
+  return {
+    ok: true,
+    backend: idbError ? 'cacheBackup' : backupOk ? 'indexedDbAndCacheBackup' : 'indexedDb',
+    degraded: Boolean(idbError),
+    error: idbError ? String(idbError?.message || idbError || 'database failure') : '',
+  };
 }
 
 async function kvDelete(key) {
-  await withDbRetry(`kvDelete(${String(key || '')})`, async (db) => await new Promise((resolve, reject) => {
+  const label = `kvDelete(${String(key || '')})`;
+  await withDbRetry(label, async (db) => await withTimeout(`${label}.tx`, () => new Promise((resolve, reject) => {
     const tx = db.transaction('kv', 'readwrite');
     tx.objectStore('kv').delete(key);
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
-  }));
+    tx.onabort = () => reject(tx.error || new Error(`${label}: transaction aborted`));
+  })));
+  await backupDelete(key);
+}
+
+function backupRequestForKey(key) {
+  return new Request(`${BACKUP_PREFIX}${encodeURIComponent(String(key || ''))}`);
+}
+
+function runtimeCaches() {
+  if (typeof caches !== 'undefined') return caches;
+  if (typeof self !== 'undefined' && self.caches) return self.caches;
+  return null;
+}
+
+async function backupGet(key) {
+  const api = runtimeCaches();
+  if (!api?.open) return undefined;
+  try {
+    const cache = await api.open(BACKUP_CACHE);
+    const hit = await cache.match(backupRequestForKey(key));
+    if (!hit) return undefined;
+    const raw = await hit.json().catch(() => null);
+    if (!raw || !Object.prototype.hasOwnProperty.call(raw, 'v')) return undefined;
+    return raw.v;
+  } catch {
+    return undefined;
+  }
+}
+
+async function backupSet(key, value) {
+  const api = runtimeCaches();
+  if (!api?.open) return false;
+  try {
+    const cache = await api.open(BACKUP_CACHE);
+    await cache.put(
+      backupRequestForKey(key),
+      new Response(JSON.stringify({ v: value }), { headers: { 'content-type': 'application/json' } }),
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function backupDelete(key) {
+  const api = runtimeCaches();
+  if (!api?.open) return;
+  try {
+    const cache = await api.open(BACKUP_CACHE);
+    await cache.delete(backupRequestForKey(key));
+  } catch {}
 }
 
 function normalizeRole(value) {
@@ -134,8 +411,20 @@ const endpoints = new Map();
 const pendingBrokerRequests = new Map();
 const projectionPolicies = new Map();
 const pendingProjectionSyncRequests = new Map();
-const serviceAccessContexts = new Map();
 const retainedProjections = new Map();
+const outboundSwarmFrames = new Map();
+const serviceAdmissionTimeoutTimers = new Map();
+const mediaFulfillmentPostures = new Map();
+const streamRecoveryPostures = new Map();
+const runtimeEvents = [];
+const diagnosticLoggingSubscriberIds = new Set();
+const diagnosticAdmissionCounters = {
+  forwarded: 0,
+  filtered: 0,
+  replayed: 0,
+  replayFiltered: 0,
+};
+const runtimeSessionId = randomOpaqueId('runtime-session');
 const runtimeStatus = {
   shell: null,
   services: {},
@@ -162,15 +451,94 @@ let runtimeUpdatedAt = 0;
 let hydratePromise = null;
 let persistTimer = 0;
 let projectionSyncTimer = 0;
+let diagnosticLoggingEnabled = false;
+let diagnosticLoggingWindowStartedAt = 0;
+let diagnosticLoggingWindowCount = 0;
+let diagnosticLoggingFlushTimer = 0;
+const diagnosticLoggingBacklog = [];
+const diagnosticLoggingBacklogIds = new Set();
+const diagnosticLoggingBacklogById = new Map();
+const diagnosticLoggingQueuedEventIds = new Set();
+let runtimeDirectoryObserveLastQueuedAt = 0;
+let runtimeDirectoryObserveInFlight = false;
+const swarmEdge = {
+  mode: 'detached',
+  connected: false,
+  endpoint: '',
+  sessionId: '',
+  memberRef: '',
+  zoneScope: null,
+  socket: null,
+  sentFrames: [],
+  rejections: [],
+  repairRequests: [],
+  routeObservations: [],
+  contributionLifecycles: [],
+};
+let liveSwarmEdgeAttachInFlight = null;
+let liveSwarmEdgeAttachInFlightTarget = '';
+
+const RUNTIME_SAFE_CLONE_MATERIALIZATION_BUDGET = Object.freeze(assertMaterializationBudget({
+  kind: SWARM.RECORD_KIND.MATERIALIZATION_BUDGET,
+  budgetId: 'runtime.worker.safe-clone.local',
+  sourceAuthority: 'runtime.worker',
+  consumerRef: 'runtime.worker.local-boundary',
+  payloadClass: SWARM.MATERIALIZATION_PAYLOAD_CLASS.EVIDENCE,
+  copyRole: SWARM.MATERIALIZATION_COPY_ROLE.BUFFER,
+  transferMode: SWARM.MATERIALIZATION_TRANSFER_MODE.CLONE,
+  privacyTier: SWARM.MATERIALIZATION_PRIVACY_TIER.SAFE_FACTS,
+  state: SWARM.RESOURCE_POSTURE_STATE.WITHIN_BUDGET,
+  limits: { scope: 'local-runtime-boundary' },
+  snapshotPolicy: { mode: 'point-copy' },
+  deltaPolicy: { mode: 'not-applicable' },
+  coalescing: { key: 'call-site' },
+  cardinality: { posture: 'call-site-owned' },
+  schema: {
+    state: SWARM.MATERIALIZATION_SCHEMA_STATE.CURRENT,
+    version: 'runtime.safeClone.v1',
+  },
+  issuedAt: 1,
+}));
 
 function nowMs() {
   return Date.now();
 }
 
-function safeClone(value) {
+function copyMaterializedValue(value, seen = new WeakMap()) {
+  if (value == null || typeof value !== 'object') return value;
+  if (seen.has(value)) return seen.get(value);
+  if (value instanceof Date) return new Date(value.getTime());
+  if (value instanceof ArrayBuffer) return value.slice(0);
+  if (ArrayBuffer.isView(value)) return value.slice ? value.slice(0) : value;
+  if (value instanceof Map) {
+    const out = new Map();
+    seen.set(value, out);
+    for (const [key, next] of value.entries()) out.set(copyMaterializedValue(key, seen), copyMaterializedValue(next, seen));
+    return out;
+  }
+  if (value instanceof Set) {
+    const out = new Set();
+    seen.set(value, out);
+    for (const next of value.values()) out.add(copyMaterializedValue(next, seen));
+    return out;
+  }
+  if (Array.isArray(value)) {
+    const out = [];
+    seen.set(value, out);
+    for (const next of value) out.push(copyMaterializedValue(next, seen));
+    return out;
+  }
+  const out = {};
+  seen.set(value, out);
+  for (const [key, next] of Object.entries(value)) out[key] = copyMaterializedValue(next, seen);
+  return out;
+}
+
+function safeClone(value, materializationBudget = RUNTIME_SAFE_CLONE_MATERIALIZATION_BUDGET) {
   if (value == null) return value;
+  if (materializationBudget?.transferMode === SWARM.MATERIALIZATION_TRANSFER_MODE.REFERENCE_ONLY) return value;
   try {
-    return JSON.parse(JSON.stringify(value));
+    return copyMaterializedValue(value);
   } catch {
     return value;
   }
@@ -207,12 +575,1520 @@ function normalizeObject(value) {
   return (value && typeof value === 'object') ? value : {};
 }
 
-function touchRuntime() {
-  runtimeUpdatedAt = nowMs();
+function uniqueTrimmedStrings(values) {
+  const out = [];
+  for (const value of normalizeArray(values)) {
+    const trimmed = String(value || '').trim();
+    if (trimmed && !out.includes(trimmed)) out.push(trimmed);
+  }
+  return out;
 }
 
-function managedServiceAccessContextObject() {
-  return Object.fromEntries(Array.from(serviceAccessContexts.entries()).map(([contextId, context]) => [contextId, safeClone(context)]));
+const DIAGNOSTIC_REDACTED = '[redacted]';
+const DIAGNOSTIC_SENSITIVE_KEY_RE = /(?:payload|body|envelope|secret|credential|password|token|private|decrypted|grant|sdp|candidate|url|uri|authorization|capabilityid|servicecapability)/i;
+const DIAGNOSTIC_SENSITIVE_VALUE_RE = /\b(?:rtsp|rtsps|http|https|ws|wss):\/\//i;
+const diagnosticCommandNonces = new Set();
+const runtimeDiagnosticCommands = new Set([
+  'dumpRecentEvents',
+  'routeExplain',
+  'projectionExplain',
+  'activationExplain',
+  'resourceSample',
+  'requestProjectionRepair',
+  'flushDiagnosticsToLogging',
+  'openTestActivation',
+  'closeTestActivation',
+]);
+
+function sanitizeDiagnosticValue(value, depth = 0) {
+  if (value == null) return value;
+  if (typeof value === 'number' || typeof value === 'boolean') return value;
+  if (typeof value === 'string') {
+    if (DIAGNOSTIC_SENSITIVE_VALUE_RE.test(value)) return DIAGNOSTIC_REDACTED;
+    return value.length > 240 ? `${value.slice(0, 237)}...` : value;
+  }
+  if (depth >= 4) return '[truncated]';
+  if (Array.isArray(value)) {
+    return value.slice(0, 16).map((entry) => sanitizeDiagnosticValue(entry, depth + 1));
+  }
+  if (typeof value === 'object') {
+    const out = {};
+    for (const [key, entry] of Object.entries(value)) {
+      if (DIAGNOSTIC_SENSITIVE_KEY_RE.test(String(key || ''))) {
+        out[key] = DIAGNOSTIC_REDACTED;
+        continue;
+      }
+      out[key] = sanitizeDiagnosticValue(entry, depth + 1);
+    }
+    return out;
+  }
+  return String(value);
+}
+
+function diagnosticLevelFor(kind, detail = {}) {
+  const explicit = String(detail.level || '').trim().toLowerCase();
+  if (['debug', 'info', 'warn', 'error'].includes(explicit)) return explicit;
+  const text = `${kind} ${detail?.error?.code || ''} ${detail?.error?.message || ''} ${detail?.message || ''}`.toLowerCase();
+  if (/reject|failed|failure|error|replay|denied|invalid/.test(text)) return 'error';
+  if (/unreachable|degraded|repair|timeout|stale|warn/.test(text)) return 'warn';
+  if (/attach|queued|sent|projection|route|adapter/.test(text)) return 'info';
+  if (/\back\b/.test(text)) return 'info';
+  if (/\baccepted\b/.test(text)) return 'info';
+  return 'debug';
+}
+
+function pickDiagnosticField(detail, ...names) {
+  for (const name of names) {
+    const value = String(detail?.[name] || '').trim();
+    if (value) return value;
+  }
+  return '';
+}
+
+function canonicalDiagnosticEvent(kind, detail = {}) {
+  const source = normalizeObject(detail);
+  const eventKind = String(kind || source.kind || '').trim() || 'runtime.event';
+  const safeDetail = sanitizeDiagnosticValue(source);
+  return {
+    eventId: String(source.eventId || source.diagnosticId || '').trim() || randomOpaqueId('runtime-event'),
+    recordKind: 'runtime.diagnostic.event',
+    channelId: RUNTIME_DIAGNOSTICS_CHANNEL,
+    kind: eventKind,
+    level: diagnosticLevelFor(eventKind, source),
+    observedAt: Number(source.observedAt || source.occurredAt || 0) || nowMs(),
+    buildId: RUNTIME_WORKER_BUILD_ID,
+    runtimeSessionId,
+    surface: String(source.surface || '').trim(),
+    clientId: String(source.clientId || '').trim(),
+    frameId: pickDiagnosticField(source, 'frameId', 'ackedFrameId'),
+    correlationId: pickDiagnosticField(source, 'correlationId', 'requestId'),
+    requestId: pickDiagnosticField(source, 'requestId'),
+    activationId: pickDiagnosticField(source, 'activationId'),
+    routePromiseId: pickDiagnosticField(source, 'routePromiseId'),
+    projectionKey: pickDiagnosticField(source, 'projectionKey'),
+    projectionId: pickDiagnosticField(source, 'projectionId'),
+    service: pickDiagnosticField(source, 'service'),
+    channelRef: pickDiagnosticField(source, 'channelId', 'channelRef'),
+    capabilityRef: pickDiagnosticField(source, 'capabilityRef', 'capability'),
+    safeFacts: safeDetail,
+    detail: safeDetail,
+  };
+}
+
+function diagnosticSnapshot() {
+  return {
+    buildId: RUNTIME_WORKER_BUILD_ID,
+    runtimeSessionId,
+    channelId: RUNTIME_DIAGNOSTICS_CHANNEL,
+    capabilities: ['runtime.diagnostics.observe', 'runtime.diagnostics.command', 'runtime.resource.sample'],
+    eventCount: runtimeEvents.length,
+    eventAdmission: {
+      ...diagnosticAdmissionCounters,
+    },
+    loggingSink: {
+      enabled: diagnosticLoggingEnabled,
+      rateLimitPerMinute: RUNTIME_DIAGNOSTIC_LOG_RATE_LIMIT,
+      backlogCount: diagnosticLoggingBacklog.length,
+      materializationBudget: diagnosticLoggingBacklogMaterializationBudget(),
+    },
+    materialization: diagnosticMaterializationSnapshot(),
+    commandChannel: {
+      enabled: true,
+      commands: Array.from(runtimeDiagnosticCommands),
+    },
+  };
+}
+
+function diagnosticMaterializationSnapshot() {
+  const summaries = [];
+  const loggingBudget = diagnosticLoggingBacklogMaterializationBudget();
+  summaries.push({
+    clientId: 'runtime',
+    surface: 'diagnostic-logging-sink',
+    budgetId: loggingBudget.budgetId,
+    payloadClass: loggingBudget.payloadClass,
+    copyRole: loggingBudget.copyRole,
+    transferMode: loggingBudget.transferMode,
+    state: loggingBudget.state,
+    consumerFloor: safeClone(loggingBudget.consumerFloor || null),
+  });
+  for (const endpoint of endpoints.values()) {
+    const clientId = String(endpoint.clientId || '').trim();
+    const surface = String(endpoint.diagnosticSurface || endpoint.surface || '').trim();
+    for (const budget of [
+      endpoint?.runtimeSnapshotMaterializationBudget,
+      endpoint?.diagnosticMaterializationBudget,
+    ]) {
+      if (!budget) continue;
+      summaries.push({
+        clientId,
+        surface,
+        budgetId: budget.budgetId,
+        payloadClass: budget.payloadClass,
+        copyRole: budget.copyRole,
+        transferMode: budget.transferMode,
+        state: budget.state,
+        consumerFloor: safeClone(budget.consumerFloor || null),
+      });
+    }
+    const commandBudget = endpoint?.diagnosticCommandMaterializationBudget;
+    if (commandBudget) {
+      summaries.push({
+        clientId,
+        surface,
+        budgetId: commandBudget.budgetId,
+        payloadClass: commandBudget.payloadClass,
+        copyRole: commandBudget.copyRole,
+        transferMode: commandBudget.transferMode,
+        state: commandBudget.state,
+        consumerFloor: safeClone(commandBudget.consumerFloor || null),
+      });
+    }
+  }
+  return summaries;
+}
+
+function runtimeSnapshotConsumerFloor(endpoint, sampledAt = nowMs()) {
+  const clientId = String(endpoint?.clientId || 'runtime-surface').trim() || 'runtime-surface';
+  const materializationId = `materialization:${clientId}:runtime-snapshot`;
+  const runtimeFloor = Math.max(0, Number(runtimeUpdatedAt || sampledAt));
+  return assertConsumerFloor({
+    kind: SWARM.RECORD_KIND.CONSUMER_FLOOR,
+    floorId: `floor:${materializationId}`,
+    consumerRef: clientId,
+    materializationId,
+    subjectRef: 'runtime.snapshot',
+    lagState: SWARM.MATERIALIZATION_LAG_STATE.CAUGHT_UP,
+    cursor: String(runtimeFloor),
+    ackFloor: String(runtimeFloor),
+    witnessFloor: String(runtimeFloor),
+    compactionFloor: String(runtimeFloor),
+    eventTimeFloor: runtimeFloor,
+    observedTimeFloor: Math.max(sampledAt, runtimeFloor),
+    replay: { mode: 'snapshot', replayLimit: 1 },
+    redelivery: { mode: 'replace', duplicatePolicy: 'coalesceByConsumer' },
+    sampledAt,
+  });
+}
+
+function runtimeSnapshotMaterializationBudget(endpoint, sampledAt = nowMs()) {
+  const clientId = String(endpoint?.clientId || 'runtime-surface').trim() || 'runtime-surface';
+  const subscription = endpoint?.snapshotSubscription && typeof endpoint.snapshotSubscription === 'object'
+    ? endpoint.snapshotSubscription
+    : {};
+  const materializationId = `materialization:${clientId}:runtime-snapshot`;
+  return assertMaterializationBudget({
+    kind: SWARM.RECORD_KIND.MATERIALIZATION_BUDGET,
+    budgetId: materializationId,
+    sourceAuthority: 'runtime:shared',
+    consumerRef: clientId,
+    payloadClass: SWARM.MATERIALIZATION_PAYLOAD_CLASS.PROJECTION,
+    copyRole: SWARM.MATERIALIZATION_COPY_ROLE.PROJECTION,
+    transferMode: SWARM.MATERIALIZATION_TRANSFER_MODE.CLONE,
+    privacyTier: SWARM.MATERIALIZATION_PRIVACY_TIER.SAFE_PROJECTION,
+    state: SWARM.RESOURCE_POSTURE_STATE.WITHIN_BUDGET,
+    limits: {
+      maxFanout: endpoints.size || 1,
+      snapshotMaxBytes: Number(subscription.snapshotMaxBytes || 512 * 1024),
+      replayLimit: Number(subscription.replayLimit || 1),
+      deliveryMode: String(subscription.mode || 'push'),
+    },
+    snapshotPolicy: {
+      mode: 'baselineAndRepair',
+      initialDelivery: 'runtime.attached',
+      repairDelivery: 'runtime.snapshot',
+    },
+    deltaPolicy: {
+      mode: 'coalescedSnapshotUntilDeltaClient',
+      coalescingKey: clientId,
+    },
+    coalescing: {
+      key: clientId,
+      duplicatePolicy: 'replaceLatest',
+    },
+    cardinality: {
+      maxProjectionCount: 64,
+      maxRuntimeEventCount: RUNTIME_DIAGNOSTIC_SNAPSHOT_LIMIT,
+    },
+    schema: {
+      state: SWARM.MATERIALIZATION_SCHEMA_STATE.CURRENT,
+      version: RUNTIME_WORKER_BUILD_ID,
+    },
+    consumerFloor: runtimeSnapshotConsumerFloor(endpoint, sampledAt),
+    retentionClass: 'ephemeral.runtime-snapshot',
+    issuedAt: sampledAt,
+    expiresAt: sampledAt + 60_000,
+  });
+}
+
+function refreshRuntimeSnapshotMaterialization(endpoint) {
+  if (!endpoint) return null;
+  const sampledAt = nowMs();
+  endpoint.runtimeSnapshotMaterializationBudget = runtimeSnapshotMaterializationBudget(endpoint, sampledAt);
+  return endpoint.runtimeSnapshotMaterializationBudget;
+}
+
+function diagnosticLevelRank(level) {
+  const value = String(level || '').trim().toLowerCase();
+  if (value === 'error' || value === 'critical') return 40;
+  if (value === 'warn' || value === 'warning') return 30;
+  if (value === 'info') return 20;
+  if (value === 'debug') return 10;
+  return 10;
+}
+
+function diagnosticClaimedSeverity(level) {
+  const value = String(level || '').trim().toLowerCase();
+  if (value === 'warn') return 'warning';
+  if (['debug', 'info', 'notice', 'warning', 'error', 'critical'].includes(value)) return value;
+  return 'debug';
+}
+
+function diagnosticPlaneForEvent(event) {
+  const kind = String(event?.kind || '').trim();
+  return eventPlaneForRecordKind(kind, event);
+}
+
+function diagnosticEventPriority(event, plane) {
+  const planePriority = {
+    [SWARM.EVENT_PLANE.AUTHORITY]: 10,
+    [SWARM.EVENT_PLANE.ROUTE]: 20,
+    [SWARM.EVENT_PLANE.ACTIVATION]: 30,
+    [SWARM.EVENT_PLANE.PROJECTION_REPAIR]: 35,
+    [SWARM.EVENT_PLANE.CONTRIBUTION]: 38,
+    [SWARM.EVENT_PLANE.RETENTION]: 40,
+    [SWARM.EVENT_PLANE.PROJECTION]: 55,
+    [SWARM.EVENT_PLANE.DIAGNOSTIC]: 70,
+    [SWARM.EVENT_PLANE.LOGGING_REPLAY]: 80,
+    [SWARM.EVENT_PLANE.BULK_RETAINED_DATA]: 90,
+    [SWARM.EVENT_PLANE.DEV_BRIDGE]: 95,
+  }[plane] ?? 80;
+  const level = diagnosticLevelRank(event?.level || 'debug');
+  return Math.max(1, planePriority - Math.floor(level / 10));
+}
+
+function normalizeDiagnosticSubscription(message = {}, endpoint = null) {
+  const issuedAt = nowMs();
+  const source = normalizeObject(message.subscription);
+  const planes = Array.isArray(source.planes)
+    ? source.planes
+    : Array.isArray(message.planes)
+      ? message.planes
+      : Object.values(SWARM.EVENT_PLANE);
+  const cost = {
+    ...normalizeObject(source.cost),
+    ...normalizeObject(message.cost),
+  };
+  if (message.minLevel !== undefined && cost.minLevel === undefined) cost.minLevel = message.minLevel;
+  if (message.minLevelByPlane !== undefined && cost.minLevelByPlane === undefined) {
+    cost.minLevelByPlane = safeClone(message.minLevelByPlane);
+  }
+  if (message.denyKinds !== undefined && cost.denyKinds === undefined) {
+    cost.denyKinds = safeClone(message.denyKinds);
+  }
+  const replayLimit = Math.min(
+    RUNTIME_DIAGNOSTIC_RING_LIMIT,
+    Math.max(0, Number(message.limit || source.window?.replayLimit || RUNTIME_DIAGNOSTIC_DEFAULT_REPLAY_LIMIT)),
+  );
+  const subscription = {
+    kind: SWARM.RECORD_KIND.SUBSCRIPTION_CONTRACT,
+    subscriptionId: String(source.subscriptionId || message.subscriptionId || `runtime-diagnostics:${message.clientId || endpoint?.clientId || randomOpaqueId('subscriber')}`).trim(),
+    subscriberRef: String(source.subscriberRef || message.clientId || endpoint?.clientId || 'runtime-diagnostics').trim(),
+    publisherRef: String(source.publisherRef || `runtime:${runtimeSessionId}`).trim(),
+    planes,
+    subjectSelector: {
+      ...normalizeObject(source.subjectSelector),
+      recordKind: RUNTIME_DIAGNOSTIC_EVENT,
+    },
+    audience: {
+      ...normalizeObject(source.audience),
+      surface: String(message.surface || endpoint?.surface || '').trim(),
+      clientId: String(message.clientId || endpoint?.clientId || '').trim(),
+    },
+    window: {
+      ...normalizeObject(source.window),
+      replayLimit,
+    },
+    cost,
+    proof: {
+      requirement: SWARM.EVENT_PROOF_REQUIREMENT.NONE,
+      ...normalizeObject(source.proof),
+    },
+    delivery: {
+      mode: SWARM.EVENT_DELIVERY_MODE.PUSH,
+      ...normalizeObject(source.delivery),
+    },
+    backpressure: {
+      behavior: SWARM.EVENT_BACKPRESSURE_BEHAVIOR.DROP,
+      ...normalizeObject(source.backpressure),
+    },
+    capabilityRefs: source.capabilityRefs,
+    authorityRefs: source.authorityRefs,
+    issuedAt: Number(source.issuedAt || issuedAt),
+    expiresAt: Number(source.expiresAt || 0) || undefined,
+  };
+  return assertSubscriptionContract(subscription);
+}
+
+function diagnosticKindDenied(kind, subscription) {
+  const denyKinds = normalizeArray(subscription?.cost?.denyKinds);
+  const eventKind = String(kind || '').trim();
+  return denyKinds.some((entry) => {
+    const rule = String(entry || '').trim();
+    if (!rule) return false;
+    if (rule.endsWith('*')) return eventKind.startsWith(rule.slice(0, -1));
+    return eventKind === rule;
+  });
+}
+
+function diagnosticEventMatchesSubscription(event, subscription) {
+  const plane = diagnosticPlaneForEvent(event);
+  if (subscription && !normalizeArray(subscription.planes).includes(plane)) {
+    return { accepted: false, plane, reason: 'planeNotSubscribed' };
+  }
+  if (diagnosticKindDenied(event?.kind, subscription)) {
+    return { accepted: false, plane, reason: 'kindDenied' };
+  }
+  const cost = normalizeObject(subscription?.cost);
+  const minLevelByPlane = normalizeObject(cost.minLevelByPlane);
+  const minLevel = String(minLevelByPlane[plane] || cost.minLevel || 'debug').trim();
+  if (diagnosticLevelRank(event?.level) < diagnosticLevelRank(minLevel)) {
+    return { accepted: false, plane, reason: 'belowMinLevel' };
+  }
+  return { accepted: true, plane, reason: 'subscribed' };
+}
+
+function diagnosticAdmissionForEvent(event, endpoint, match) {
+  const decision = match.accepted
+    ? SWARM.EVENT_ADMISSION_DECISION.FORWARD
+    : SWARM.EVENT_ADMISSION_DECISION.DROP;
+  const observedAt = nowMs();
+  const subscription = endpoint?.diagnosticSubscription || null;
+  return assertEventAdmissionEnvelope({
+    kind: SWARM.RECORD_KIND.EVENT_ADMISSION,
+    admissionId: `${String(event?.eventId || randomOpaqueId('event')).trim()}:diagnostic-admission:${String(endpoint?.clientId || '').trim() || 'anonymous'}`,
+    plane: match.plane,
+    laneId: `runtime.diagnostics.${match.plane}`,
+    subscriptionId: subscription?.subscriptionId,
+    publisherRef: `runtime:${runtimeSessionId}`,
+    subscriberRef: String(endpoint?.clientId || subscription?.subscriberRef || '').trim() || 'runtime-diagnostics',
+    subject: {
+      eventId: String(event?.eventId || '').trim(),
+      kind: String(event?.kind || '').trim(),
+      channelRef: String(event?.channelRef || '').trim(),
+      frameId: String(event?.frameId || '').trim(),
+      projectionKey: String(event?.projectionKey || '').trim(),
+    },
+    audience: {
+      surface: String(endpoint?.diagnosticSurface || endpoint?.surface || '').trim(),
+      clientId: String(endpoint?.clientId || '').trim(),
+    },
+    claimedSeverity: diagnosticClaimedSeverity(event?.level),
+    effectivePriority: diagnosticEventPriority(event, match.plane),
+    decision,
+    proofRequirement: SWARM.EVENT_PROOF_REQUIREMENT.NONE,
+    proofState: SWARM.EVENT_PROOF_STATE.NOT_REQUIRED,
+    reason: match.reason,
+    observedAt,
+    expiresAt: observedAt + 30_000,
+  });
+}
+
+function diagnosticEventsForSubscription(subscription, limit) {
+  const selected = [];
+  let filtered = 0;
+  for (let index = runtimeEvents.length - 1; index >= 0 && selected.length < limit; index -= 1) {
+    const event = runtimeEvents[index];
+    const match = diagnosticEventMatchesSubscription(event, subscription);
+    if (match.accepted) selected.push(safeClone(event));
+    else filtered += 1;
+  }
+  diagnosticAdmissionCounters.replayed += selected.length;
+  diagnosticAdmissionCounters.replayFiltered += filtered;
+  return selected.reverse();
+}
+
+function diagnosticCommandQuery(args = {}) {
+  const sinceMs = Number(args.sinceMs || 0);
+  const since = sinceMs > 0 ? nowMs() - sinceMs : Number(args.since || 0);
+  return {
+    since,
+    surface: String(args.surface || '').trim(),
+    kind: String(args.kind || '').trim(),
+    level: String(args.level || '').trim().toLowerCase(),
+    limit: Math.min(RUNTIME_DIAGNOSTIC_RING_LIMIT, Math.max(1, Number(args.limit || 80))),
+  };
+}
+
+function diagnosticCommandSubscription(query, endpoint, command = 'dumpRecentEvents') {
+  const clientId = String(endpoint?.clientId || 'runtime-diagnostic-command').trim() || 'runtime-diagnostic-command';
+  const issuedAt = nowMs();
+  const inherited = endpoint?.diagnosticSubscription && typeof endpoint.diagnosticSubscription === 'object'
+    ? endpoint.diagnosticSubscription
+    : {};
+  return assertSubscriptionContract({
+    kind: SWARM.RECORD_KIND.SUBSCRIPTION_CONTRACT,
+    subscriptionId: `runtime-diagnostics-command:${clientId}:${String(command || 'query').trim() || 'query'}`,
+    subscriberRef: clientId,
+    publisherRef: `runtime:${runtimeSessionId}`,
+    planes: normalizeArray(inherited.planes).length ? inherited.planes : Object.values(SWARM.EVENT_PLANE),
+    subjectSelector: {
+      recordKind: RUNTIME_DIAGNOSTIC_EVENT,
+      ...(query.surface ? { surface: query.surface } : {}),
+      ...(query.kind ? { kind: query.kind } : {}),
+      ...(query.level ? { level: query.level } : {}),
+    },
+    audience: {
+      surface: String(endpoint?.diagnosticSurface || endpoint?.surface || '').trim(),
+      clientId,
+    },
+    window: {
+      replayLimit: query.limit,
+      ...(query.since ? { since: query.since } : {}),
+    },
+    cost: {
+      ...normalizeObject(inherited.cost),
+      queryMode: 'command',
+    },
+    proof: {
+      requirement: SWARM.EVENT_PROOF_REQUIREMENT.NONE,
+    },
+    delivery: {
+      mode: SWARM.EVENT_DELIVERY_MODE.REPLAY,
+    },
+    backpressure: {
+      behavior: SWARM.EVENT_BACKPRESSURE_BEHAVIOR.DROP,
+    },
+    issuedAt,
+    expiresAt: issuedAt + 60_000,
+  });
+}
+
+function diagnosticEventMatchesCommandQuery(event, subscription, query) {
+  const match = diagnosticEventMatchesSubscription(event, subscription);
+  if (!match.accepted) return match;
+  if (query.since && Number(event.observedAt || 0) < query.since) {
+    return { accepted: false, plane: match.plane, reason: 'beforeQueryWindow' };
+  }
+  if (query.surface && String(event.surface || '').trim() !== query.surface) {
+    return { accepted: false, plane: match.plane, reason: 'surfaceMismatch' };
+  }
+  if (query.kind && String(event.kind || '').trim() !== query.kind) {
+    return { accepted: false, plane: match.plane, reason: 'kindMismatch' };
+  }
+  if (query.level && String(event.level || '').trim().toLowerCase() !== query.level) {
+    return { accepted: false, plane: match.plane, reason: 'levelMismatch' };
+  }
+  return match;
+}
+
+function materializeRecentDiagnosticEvents(args = {}, endpoint = null, command = 'dumpRecentEvents') {
+  const query = diagnosticCommandQuery(args);
+  const subscription = diagnosticCommandSubscription(query, endpoint, command);
+  const selected = [];
+  let filtered = 0;
+  for (let index = runtimeEvents.length - 1; index >= 0 && selected.length < query.limit; index -= 1) {
+    const event = runtimeEvents[index];
+    const match = diagnosticEventMatchesCommandQuery(event, subscription, query);
+    if (match.accepted) selected.push(safeClone(event));
+    else filtered += 1;
+  }
+  diagnosticAdmissionCounters.replayed += selected.length;
+  diagnosticAdmissionCounters.replayFiltered += filtered;
+  const events = selected.reverse();
+  const materializationBudget = diagnosticReplayMaterializationBudget(subscription, events, filtered);
+  if (endpoint) endpoint.diagnosticCommandMaterializationBudget = materializationBudget;
+  return {
+    events,
+    filteredCount: filtered,
+    materializationBudget,
+    consumerFloor: materializationBudget.consumerFloor,
+  };
+}
+
+function diagnosticReplayConsumerFloor(subscription, events = [], filtered = 0, sampledAt = nowMs()) {
+  const consumerRef = String(subscription?.subscriberRef || 'runtime-diagnostics').trim() || 'runtime-diagnostics';
+  const subscriptionId = String(subscription?.subscriptionId || '').trim();
+  const materializationId = subscriptionId
+    ? `materialization:${subscriptionId}:runtime-diagnostics`
+    : `materialization:runtime-diagnostics:${consumerRef}`;
+  const first = events[0] || null;
+  const last = events[events.length - 1] || null;
+  const eventTimeFloor = Number(first?.observedAt || 0) || undefined;
+  const observedTimeFloor = Number(last?.observedAt || 0) || undefined;
+  const lagState = filtered > 0
+    ? SWARM.MATERIALIZATION_LAG_STATE.LAGGING
+    : SWARM.MATERIALIZATION_LAG_STATE.CAUGHT_UP;
+  return assertConsumerFloor({
+    kind: SWARM.RECORD_KIND.CONSUMER_FLOOR,
+    floorId: `floor:${materializationId}`,
+    consumerRef,
+    subscriptionId: subscriptionId || undefined,
+    materializationId,
+    subjectRef: RUNTIME_DIAGNOSTICS_CHANNEL,
+    cursor: String(last?.eventId || '').trim() || undefined,
+    eventTimeFloor,
+    observedTimeFloor,
+    lagState,
+    reason: filtered > 0 ? 'diagnostic replay filtered before materialization' : undefined,
+    redelivery: {
+      mode: SWARM.EVENT_DELIVERY_MODE.REPLAY,
+      filtered,
+    },
+    replay: {
+      replayedCount: events.length,
+      replayLimit: Number(subscription?.window?.replayLimit || 0) || events.length,
+    },
+    sampledAt,
+    expiresAt: sampledAt + 60_000,
+  });
+}
+
+function diagnosticReplayMaterializationBudget(subscription, events = [], filtered = 0, sampledAt = nowMs()) {
+  const subscriptionId = String(subscription?.subscriptionId || '').trim();
+  const consumerRef = String(subscription?.subscriberRef || 'runtime-diagnostics').trim() || 'runtime-diagnostics';
+  const materializationId = subscriptionId
+    ? `materialization:${subscriptionId}:runtime-diagnostics`
+    : `materialization:runtime-diagnostics:${consumerRef}`;
+  const pressure = filtered > 0 || events.length >= Number(subscription?.window?.replayLimit || RUNTIME_DIAGNOSTIC_REPLAY_LIMIT);
+  return assertMaterializationBudget({
+    kind: SWARM.RECORD_KIND.MATERIALIZATION_BUDGET,
+    budgetId: materializationId,
+    sourceAuthority: `runtime:${runtimeSessionId}`,
+    consumerRef,
+    subscriberRef: consumerRef,
+    payloadClass: SWARM.MATERIALIZATION_PAYLOAD_CLASS.EVIDENCE,
+    copyRole: SWARM.MATERIALIZATION_COPY_ROLE.EVIDENCE,
+    transferMode: SWARM.MATERIALIZATION_TRANSFER_MODE.CLONE,
+    privacyTier: SWARM.MATERIALIZATION_PRIVACY_TIER.SAFE_FACTS,
+    state: pressure ? SWARM.RESOURCE_POSTURE_STATE.PRESSURE : SWARM.RESOURCE_POSTURE_STATE.WITHIN_BUDGET,
+    limits: {
+      maxEvents: Number(subscription?.window?.replayLimit || RUNTIME_DIAGNOSTIC_REPLAY_LIMIT),
+      maxRingEvents: RUNTIME_DIAGNOSTIC_RING_LIMIT,
+      maxSnapshotEvents: RUNTIME_DIAGNOSTIC_SNAPSHOT_LIMIT,
+    },
+    snapshotPolicy: {
+      mode: 'baseline-repair',
+      maxEvents: RUNTIME_DIAGNOSTIC_SNAPSHOT_LIMIT,
+    },
+    deltaPolicy: {
+      mode: 'push',
+      coalesce: true,
+    },
+    coalescing: {
+      key: 'plane|kind|channelRef|projectionKey|activationId',
+      windowMs: 250,
+    },
+    cardinality: {
+      labelLimit: 12,
+      overflow: 'encryptedDetailRef',
+    },
+    schema: {
+      state: SWARM.MATERIALIZATION_SCHEMA_STATE.CURRENT,
+      version: 'runtime.diagnostics.v1',
+    },
+    consumerFloor: diagnosticReplayConsumerFloor(subscription, events, filtered, sampledAt),
+    blockedReasons: pressure ? ['diagnosticReplayPressure'] : [],
+    retentionClass: 'ephemeral',
+    issuedAt: sampledAt,
+    releaseAfter: sampledAt + 60_000,
+    expiresAt: sampledAt + 5 * 60_000,
+  });
+}
+
+function normalizeResourceProfileId(value) {
+  const id = String(value || '').trim();
+  if (id === 'custom') return 'custom';
+  return RESOURCE_PROFILE_DEFINITIONS[id] ? id : 'balanced';
+}
+
+function runtimeResourceProfile(input = {}) {
+  const requestedId = normalizeResourceProfileId(input.id || input.profileId || runtimeResourceProfileId);
+  const base = RESOURCE_PROFILE_DEFINITIONS[requestedId === 'custom' ? 'balanced' : requestedId]
+    || RESOURCE_PROFILE_DEFINITIONS.balanced;
+  const overrides = requestedId === 'custom'
+    ? { ...runtimeResourceProfileOverrides, ...normalizeObject(input.overrides) }
+    : {};
+  const caps = {
+    ...safeClone(base.caps || {}),
+    ...normalizeObject(overrides.caps),
+  };
+  return {
+    ...safeClone(base),
+    ...safeClone(overrides),
+    id: requestedId,
+    label: String(overrides.label || (requestedId === 'custom' ? 'Custom' : base.label) || requestedId).trim(),
+    caps,
+  };
+}
+
+function setRuntimeResourceProfile(input = {}) {
+  const source = normalizeObject(input.profile || input.payload || input);
+  const id = normalizeResourceProfileId(source.id || source.profileId);
+  runtimeResourceProfileId = id;
+  runtimeResourceProfileOverrides = id === 'custom' ? safeClone(normalizeObject(source.overrides || source)) : {};
+  if (id !== 'custom') runtimeResourceProfileOverrides = {};
+  return runtimeResourceProfile();
+}
+
+function numericOrUnavailable(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? number : null;
+}
+
+function runtimeMemoryEstimate(profile) {
+  const memory = typeof performance !== 'undefined' && performance?.memory
+    ? performance.memory
+    : self?.performance?.memory;
+  const usedHeapBytes = numericOrUnavailable(memory?.usedJSHeapSize);
+  const totalHeapBytes = numericOrUnavailable(memory?.totalJSHeapSize);
+  return {
+    state: usedHeapBytes == null ? 'unavailable' : 'available',
+    usedHeapBytes,
+    totalHeapBytes,
+    budgetBytes: Number(profile.memoryBudgetBytes || 0) || 0,
+  };
+}
+
+function runtimeStorageEstimate(profile) {
+  return {
+    state: 'unavailable',
+    usageBytes: null,
+    quotaBytes: null,
+    budgetBytes: Number(profile.storageBudgetBytes || 0) || 0,
+    budgetPolicy: String(profile.storageBudgetPolicy || 'fixed').trim(),
+    reserveBytes: Number(profile.storageReserveBytes || 0) || 0,
+  };
+}
+
+function runtimeEndpointCounts() {
+  const entries = Array.from(endpoints.values());
+  return {
+    activeRuntimeClients: entries.length,
+    sharedWorkerPorts: entries.length,
+    diagnosticSubscribers: entries.filter((entry) => entry?.diagnostics).length,
+    brokerClients: entries.filter((entry) => entry?.broker).length,
+    surfaces: uniqueTrimmedStrings(entries.map((entry) => entry?.surface || entry?.diagnosticSurface)),
+  };
+}
+
+function currentSwarmWebSocketCount() {
+  const socket = swarmEdge.socket;
+  if (!socket) return 0;
+  const readyState = Number(socket.readyState);
+  return readyState === 0 || readyState === 1 ? 1 : 0;
+}
+
+function runtimeResourceCounts() {
+  const endpointCounts = runtimeEndpointCounts();
+  return {
+    ...endpointCounts,
+    devBridgeSessions: 0,
+    eventSourceClients: 0,
+    webSockets: currentSwarmWebSocketCount(),
+    peerConnections: 0,
+    mediaTracks: 0,
+    retryLoops: Number(Boolean(diagnosticLoggingFlushTimer)) + Number(runtimeDirectoryObserveInFlight),
+    pendingCommands: pendingBrokerRequests.size + pendingProjectionSyncRequests.size,
+    pendingResults: 0,
+    pendingAuthorityIntents: pendingAuthorityIntents.size,
+    pendingRouteIntents: pendingRouteIntents.size,
+    swarmQueue: outboundSwarmFrames.size,
+    edgeSentRing: swarmEdge.sentFrames.length,
+    diagnosticRing: runtimeEvents.length,
+    diagnosticRingLimit: RUNTIME_DIAGNOSTIC_RING_LIMIT,
+    diagnosticLoggingBacklog: diagnosticLoggingBacklog.length,
+    diagnosticAdmissionForwarded: diagnosticAdmissionCounters.forwarded,
+    diagnosticAdmissionFiltered: diagnosticAdmissionCounters.filtered,
+    diagnosticReplayForwarded: diagnosticAdmissionCounters.replayed,
+    diagnosticReplayFiltered: diagnosticAdmissionCounters.replayFiltered,
+    projectionCount: retainedProjections.size,
+    projectionPolicyCount: projectionPolicies.size,
+  };
+}
+
+function compareResourceBudget(counts, memory, storage, profile) {
+  const caps = normalizeObject(profile.caps);
+  const reasons = [];
+  let over = false;
+  let pressure = false;
+  const checkCap = (name, value, cap) => {
+    const count = Number(value || 0);
+    const limit = Number(cap || 0);
+    if (!limit) return;
+    if (count > limit) {
+      over = true;
+      reasons.push(`${name}.overBudget`);
+    } else if (count >= limit * 0.8) {
+      pressure = true;
+      reasons.push(`${name}.pressure`);
+    }
+  };
+  checkCap('diagnostics', counts.diagnosticRing, caps.diagnostics);
+  checkCap('projections', counts.projectionCount, caps.projections);
+  checkCap('mediaTracks', counts.mediaTracks, caps.mediaTracks);
+  checkCap('liveStreams', counts.webSockets, caps.liveStreams);
+  checkCap('devBridgeSessions', counts.devBridgeSessions, caps.devBridgeSessions);
+  if (memory.usedHeapBytes != null && memory.budgetBytes > 0) {
+    if (memory.usedHeapBytes > memory.budgetBytes) {
+      over = true;
+      reasons.push('memory.overBudget');
+    } else if (memory.usedHeapBytes >= memory.budgetBytes * 0.8) {
+      pressure = true;
+      reasons.push('memory.pressure');
+    }
+  }
+  if (storage.usageBytes != null && storage.budgetBytes > 0) {
+    if (storage.usageBytes > storage.budgetBytes) {
+      over = true;
+      reasons.push('storage.overBudget');
+    } else if (storage.usageBytes >= storage.budgetBytes * 0.8) {
+      pressure = true;
+      reasons.push('storage.pressure');
+    }
+  }
+  return {
+    state: over ? RESOURCE_POSTURE_STATES.OVER_BUDGET : pressure ? RESOURCE_POSTURE_STATES.PRESSURE : RESOURCE_POSTURE_STATES.WITHIN_BUDGET,
+    reasons,
+  };
+}
+
+function protocolResourceBudgets(profile) {
+  return {
+    memoryBudgetBytes: Number(profile.memoryBudgetBytes || 0) || 0,
+    storageBudgetBytes: Number(profile.storageBudgetBytes || 0) || 0,
+    storageBudgetPolicy: String(profile.storageBudgetPolicy || 'fixed').trim(),
+    storageReserveBytes: Number(profile.storageReserveBytes || 0) || 0,
+    hotTtlMs: Number(profile.hotTtlMs || 0) || 0,
+    warmTtlMs: Number(profile.warmTtlMs || 0) || 0,
+  };
+}
+
+function protocolResourceProfileRecord(profile, issuedAt) {
+  const profileId = String(profile.id || 'balanced').trim() || 'balanced';
+  const profileClass = Object.values(SWARM.RESOURCE_PROFILE_CLASS || {}).includes(profileId)
+    ? profileId
+    : SWARM.RESOURCE_PROFILE_CLASS.CUSTOM;
+  return assertResourceProfile({
+    kind: SWARM.RECORD_KIND.RESOURCE_PROFILE,
+    profileId,
+    profileClass,
+    budgets: protocolResourceBudgets(profile),
+    caps: safeClone(profile.caps || {}),
+    ownerRef: 'account.center',
+    issuedAt,
+  });
+}
+
+function protocolResourcePostureRecord({ counts, budgets, posture, profile, sampledAt }) {
+  const state = Object.values(SWARM.RESOURCE_POSTURE_STATE || {}).includes(String(posture?.state || '').trim())
+    ? String(posture.state).trim()
+    : SWARM.RESOURCE_POSTURE_STATE.UNAVAILABLE;
+  return assertResourcePosture({
+    kind: SWARM.RECORD_KIND.RESOURCE_POSTURE,
+    postureId: `resource-posture:${runtimeSessionId}:${sampledAt}`,
+    profileId: String(profile.id || 'balanced').trim() || 'balanced',
+    state,
+    counts: safeClone(counts || {}),
+    budgets: safeClone(budgets || {}),
+    blockedReasons: normalizeArray(posture?.reasons).map((entry) => String(entry || '').trim()).filter(Boolean),
+    sampledAt,
+  });
+}
+
+function runtimeResourceSample() {
+  const profile = runtimeResourceProfile();
+  const counts = runtimeResourceCounts();
+  const memory = runtimeMemoryEstimate(profile);
+  const storage = runtimeStorageEstimate(profile);
+  const posture = compareResourceBudget(counts, memory, storage, profile);
+  const observedAt = nowMs();
+  const budgets = {
+    ...protocolResourceBudgets(profile),
+    caps: safeClone(profile.caps || {}),
+  };
+  return {
+    sampleKind: 'runtime.resource.sample',
+    debugOnly: true,
+    observedAt,
+    buildId: RUNTIME_WORKER_BUILD_ID,
+    runtimeSessionId,
+    activeProfile: {
+      id: profile.id,
+      label: profile.label,
+    },
+    budgets,
+    counts,
+    memory,
+    storage,
+    posture: {
+      ...posture,
+      cleanupAllowed: false,
+      cleanupReason: 'retention posture must allow release before sweeping',
+    },
+    protocol: {
+      profile: protocolResourceProfileRecord(profile, observedAt),
+      posture: protocolResourcePostureRecord({ counts, budgets, posture, profile, sampledAt: observedAt }),
+    },
+  };
+}
+
+function retentionRank(retentionClass) {
+  const normalized = String(retentionClass || '').trim();
+  const ranks = {
+    ephemeral: 0,
+    disposable: 1,
+    session: 1,
+    cache: 2,
+    local: 3,
+    durable: 4,
+    archive: 5,
+    immortal: 6,
+  };
+  return Object.prototype.hasOwnProperty.call(ranks, normalized) ? ranks[normalized] : ranks.durable;
+}
+
+function normalizeRetentionClass(value, fallback = 'durable') {
+  const normalized = String(value || '').trim();
+  return normalized || fallback;
+}
+
+function retentionReleaseEvaluation(input = {}) {
+  const source = normalizeObject(input.payload || input);
+  const policy = normalizeObject(source.policy || source.retentionPolicy);
+  const residency = normalizeObject(source.residency || source.localResidency);
+  const pins = normalizeArray(source.pins).filter((pin) => normalizeObject(pin).active !== false);
+  const fulfillments = normalizeArray(source.fulfillments);
+  const overlays = normalizeArray(source.overlays).filter((overlay) => normalizeObject(overlay).active !== false);
+  let effectiveClass = normalizeRetentionClass(policy.class || policy.retentionClass, 'durable');
+  for (const overlay of overlays) {
+    const overlayClass = normalizeRetentionClass(overlay.class || overlay.retentionClass, '');
+    if (overlayClass && retentionRank(overlayClass) > retentionRank(effectiveClass)) effectiveClass = overlayClass;
+  }
+  for (const pin of pins) {
+    const pinClass = normalizeRetentionClass(pin.class || pin.retentionClass, 'immortal');
+    if (retentionRank(pinClass) > retentionRank(effectiveClass)) effectiveClass = pinClass;
+  }
+  const disposable = ['ephemeral', 'disposable', 'session'].includes(effectiveClass);
+  const fulfilled = fulfillments.some((fulfillment) => {
+    const record = normalizeObject(fulfillment);
+    return ['fulfilled', 'satisfied', 'complete'].includes(String(record.state || record.status || '').trim());
+  });
+  const liveRoot = source.liveRoot === true || residency.liveRoot === true;
+  const blockers = [];
+  if (pins.length > 0) blockers.push('activePin');
+  if (!disposable && !fulfilled) blockers.push('fulfillment.missing');
+  if (liveRoot) blockers.push('liveRoot');
+  const freeable = blockers.length === 0;
+  const evaluatedAt = nowMs();
+  const ownerRefs = uniqueTrimmedStrings([
+    source.ownerRef,
+    policy.ownerRef,
+    ...(Array.isArray(source.ownerRefs) ? source.ownerRefs : []),
+    'runtime:browser',
+  ]);
+  const holderRefs = uniqueTrimmedStrings([
+    source.holderRef,
+    residency.holderRef,
+    ...(Array.isArray(source.holderRefs) ? source.holderRefs : []),
+  ]);
+  const fulfillmentRefs = uniqueTrimmedStrings(fulfillments.map((fulfillment) => {
+    const record = normalizeObject(fulfillment);
+    return record.fulfillmentRef || record.fulfillmentId || record.holder || record.storageMemberRef || '';
+  }));
+  const residencyLayers = uniqueTrimmedStrings([
+    residency.layer,
+    residency.residencyLayer,
+    source.residencyLayer,
+    ...(Array.isArray(source.residencyLayers) ? source.residencyLayers : []),
+    'browserHotCache',
+  ]);
+  const releasePosture = assertRetentionReleasePosture({
+    kind: SWARM.RECORD_KIND.RETENTION_RELEASE,
+    evaluationId: String(source.evaluationId || `retention-release:${runtimeSessionId}:${evaluatedAt}`).trim(),
+    subjectRef: String(source.subjectRef || source.subject || 'unknown').trim() || 'unknown',
+    effectiveRetention: effectiveClass,
+    state: freeable ? SWARM.RETENTION_RELEASE_STATE.FREEABLE : SWARM.RETENTION_RELEASE_STATE.RELEASE_BLOCKED,
+    ownerRefs,
+    holderRefs,
+    fulfillmentRefs,
+    residencyLayers,
+    blockers: blockers.map((code) => ({ code })),
+    evaluatedAt,
+  });
+  return {
+    subjectRef: String(source.subjectRef || source.subject || '').trim(),
+    state: freeable ? 'freeable' : 'releaseBlocked',
+    freeable,
+    effectiveRetention: {
+      class: effectiveClass,
+      rank: retentionRank(effectiveClass),
+    },
+    policy: safeClone(policy),
+    overlays: safeClone(overlays),
+    pins: safeClone(pins),
+    fulfillments: safeClone(fulfillments),
+    residency: safeClone(residency),
+    blockers,
+    destructiveAction: false,
+    releasePosture,
+    reason: freeable
+      ? 'local release is allowed by effective retention posture'
+      : 'local release blocked by effective retention posture',
+  };
+}
+
+function broadcastDiagnosticEvent(event) {
+  for (const endpoint of endpoints.values()) {
+    if (!endpoint?.diagnostics) continue;
+    const match = diagnosticEventMatchesSubscription(event, endpoint.diagnosticSubscription);
+    const admission = diagnosticAdmissionForEvent(event, endpoint, match);
+    if (!match.accepted) {
+      diagnosticAdmissionCounters.filtered += 1;
+      continue;
+    }
+    diagnosticAdmissionCounters.forwarded += 1;
+    endpointPost(endpoint, {
+      type: RUNTIME_DIAGNOSTIC_EVENT,
+      event: safeClone(event),
+      admission,
+      diagnostics: diagnosticSnapshot(),
+    });
+  }
+}
+
+function diagnosticLoggingRouteReady() {
+  if (!swarmEdge.connected) return false;
+  const liveRoute = liveEdgeRouteForService({
+    service: 'logging',
+    capability: 'logging.events.ingest',
+    channelId: 'logging.events',
+  });
+  return Boolean(liveRoute?.memberRef && liveRoute?.zoneScope?.zoneId);
+}
+
+function routeBaselineObserveNeeded() {
+  if (pendingRouteIntents.size > 0) return true;
+  for (const entry of outboundSwarmFrames.values()) {
+    if (routeObservationNeedsZoneBaseline(entry?.routeObservation)) return true;
+    const state = String(entry?.routingScope?.state || '').trim();
+    if (
+      state === SWARM.ROUTING_SCOPE_STATE.SYNCING
+      || state === SWARM.ROUTING_SCOPE_STATE.MISSING
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function shouldQueueRuntimeDirectoryObserve() {
+  if (!swarmEdge.connected) return false;
+  const needsLoggingRoute = diagnosticLoggingEnabled || diagnosticLoggingBacklog.length > 0;
+  const needsRouteBaseline = routeBaselineObserveNeeded();
+  if (!needsLoggingRoute && !needsRouteBaseline) return false;
+  if (runtimeDirectoryObserveInFlight) return false;
+  if (!needsRouteBaseline && diagnosticLoggingRouteReady()) return false;
+  const now = nowMs();
+  return !runtimeDirectoryObserveLastQueuedAt
+    || now - runtimeDirectoryObserveLastQueuedAt >= RUNTIME_DIRECTORY_OBSERVE_MIN_INTERVAL_MS;
+}
+
+async function queueRuntimeDirectoryObserve(reason = 'route.discovery') {
+  if (!shouldQueueRuntimeDirectoryObserve()) return false;
+  runtimeDirectoryObserveInFlight = true;
+  runtimeDirectoryObserveLastQueuedAt = nowMs();
+  try {
+    const authority = await runtimeDeviceAuthority();
+    const issuedAt = nowMs();
+    const expiresAt = issuedAt + 60_000;
+    const nonce = randomOpaqueId('directory-observe-nonce');
+    const frame = makeSwarmFrame({
+      kind: SWARM.FRAME_KIND.CHANNEL_OBSERVE,
+      issuer: authority.publicKey,
+      audience: { directory: 'capability' },
+      zoneScope: appIntentZoneScope({ zoneScope: swarmEdge.zoneScope }, { requirePropagation: true }),
+      issuedAt,
+      expiresAt,
+      nonce,
+      correlationId: randomOpaqueId('runtime-directory'),
+      channelId: RUNTIME_DIRECTORY_OBSERVE_CHANNEL,
+      recordRef: { kind: 'projection.snapshot', id: RUNTIME_DIRECTORY_OBSERVE_CHANNEL },
+      capability: SWARM.CORE_CAPABILITY.PROJECTION_OBSERVE,
+      body: {
+        encoding: SWARM.BODY_ENCODING.CAAC,
+        envelope: sealEnvelope({
+          kind: 'runtime.directory.observe',
+          claims: {
+            method: 'runtime.directory.observe',
+            channelId: RUNTIME_DIRECTORY_OBSERVE_CHANNEL,
+            reason: String(reason || 'route.discovery').trim(),
+            requesterRef: authority.publicKey,
+            issuedAt,
+            expiresAt,
+            nonce,
+          },
+          issuerSecretKey: authority.secretKey,
+          recipientPks: [authority.publicKey],
+          issuedAt,
+          expiresAt,
+        }),
+      },
+    });
+    queueSwarmFrame({
+      frame,
+      retryPolicy: { onReject: 'preserve' },
+    });
+    recordRuntimeEvent('runtime.directory.observe.requested', {
+      frameId: frame.frameId,
+      correlationId: frame.correlationId,
+      channelId: frame.channelId,
+      capability: frame.capability,
+      reason: String(reason || 'route.discovery').trim(),
+    });
+    return true;
+  } catch (error) {
+    recordRuntimeEvent('runtime.directory.observe.failed', {
+      level: 'warn',
+      error: { message: String(error?.message || error || 'directory observe failed') },
+      reason: String(reason || 'route.discovery').trim(),
+    });
+    return false;
+  } finally {
+    runtimeDirectoryObserveInFlight = false;
+  }
+}
+
+function requestRuntimeDirectoryObserve(reason) {
+  void queueRuntimeDirectoryObserve(reason);
+}
+
+function diagnosticLoggingBacklogConsumerFloor(sampledAt = nowMs()) {
+  const first = diagnosticLoggingBacklog[0] || null;
+  const last = diagnosticLoggingBacklog[diagnosticLoggingBacklog.length - 1] || null;
+  const pressure = diagnosticLoggingBacklog.length >= RUNTIME_DIAGNOSTIC_LOG_BACKLOG_LIMIT
+    || diagnosticLoggingWindowCount >= RUNTIME_DIAGNOSTIC_LOG_RATE_LIMIT;
+  return assertConsumerFloor({
+    kind: SWARM.RECORD_KIND.CONSUMER_FLOOR,
+    floorId: 'floor:runtime.diagnostic-logging.backlog',
+    consumerRef: 'runtime.diagnostic-logging.sink',
+    materializationId: 'runtime.diagnostic-logging.backlog',
+    subjectRef: RUNTIME_DIAGNOSTICS_CHANNEL,
+    cursor: String(last?.eventId || '').trim() || undefined,
+    ackFloor: String(diagnosticLoggingBacklog.length),
+    witnessFloor: String(diagnosticLoggingQueuedEventIds.size),
+    compactionFloor: String(Math.max(0, diagnosticLoggingBacklog.length - RUNTIME_DIAGNOSTIC_LOG_BACKLOG_LIMIT)),
+    eventTimeFloor: Number(first?.observedAt || 0) || undefined,
+    observedTimeFloor: Number(last?.observedAt || 0) || sampledAt,
+    lagState: pressure ? SWARM.MATERIALIZATION_LAG_STATE.LAGGING : SWARM.MATERIALIZATION_LAG_STATE.CAUGHT_UP,
+    reason: pressure ? 'diagnostic logging backlog is at materialization pressure' : undefined,
+    replay: {
+      mode: SWARM.EVENT_DELIVERY_MODE.REPLAY,
+      backlogLimit: RUNTIME_DIAGNOSTIC_LOG_BACKLOG_LIMIT,
+    },
+    redelivery: {
+      mode: 'logging-sink-retry',
+      duplicatePolicy: 'eventId',
+    },
+    sampledAt,
+    expiresAt: sampledAt + 60_000,
+  });
+}
+
+function diagnosticLoggingBacklogMaterializationBudget(sampledAt = nowMs()) {
+  const pressure = diagnosticLoggingBacklog.length >= RUNTIME_DIAGNOSTIC_LOG_BACKLOG_LIMIT
+    || diagnosticLoggingWindowCount >= RUNTIME_DIAGNOSTIC_LOG_RATE_LIMIT;
+  return assertMaterializationBudget({
+    kind: SWARM.RECORD_KIND.MATERIALIZATION_BUDGET,
+    budgetId: 'runtime.diagnostic-logging.backlog',
+    sourceAuthority: `runtime:${runtimeSessionId}`,
+    consumerRef: 'runtime.diagnostic-logging.sink',
+    subscriberRef: diagnosticLoggingSubscriberIds.size ? Array.from(diagnosticLoggingSubscriberIds).sort().join(',') : undefined,
+    payloadClass: SWARM.MATERIALIZATION_PAYLOAD_CLASS.EVIDENCE,
+    copyRole: SWARM.MATERIALIZATION_COPY_ROLE.BUFFER,
+    transferMode: SWARM.MATERIALIZATION_TRANSFER_MODE.CLONE,
+    privacyTier: SWARM.MATERIALIZATION_PRIVACY_TIER.SAFE_FACTS,
+    state: pressure ? SWARM.RESOURCE_POSTURE_STATE.PRESSURE : SWARM.RESOURCE_POSTURE_STATE.WITHIN_BUDGET,
+    limits: {
+      maxBacklogEvents: RUNTIME_DIAGNOSTIC_LOG_BACKLOG_LIMIT,
+      maxQueuedEvents: RUNTIME_DIAGNOSTIC_LOG_RATE_LIMIT,
+      backlogCount: diagnosticLoggingBacklog.length,
+      queuedCount: diagnosticLoggingQueuedEventIds.size,
+      routeReady: diagnosticLoggingRouteReady(),
+    },
+    snapshotPolicy: { mode: 'bounded-backlog' },
+    deltaPolicy: { mode: 'rate-limited-drain' },
+    coalescing: { key: 'eventId' },
+    cardinality: {
+      eventIdIndex: 'map',
+      maxEventIds: RUNTIME_DIAGNOSTIC_LOG_BACKLOG_LIMIT,
+      highCardinalityOverflow: 'dropOldest',
+    },
+    schema: {
+      state: SWARM.MATERIALIZATION_SCHEMA_STATE.CURRENT,
+      version: 'runtime.diagnostic-logging.backlog.v1',
+    },
+    consumerFloor: diagnosticLoggingBacklogConsumerFloor(sampledAt),
+    blockedReasons: pressure ? ['diagnosticLoggingBacklogPressure'] : [],
+    retentionClass: 'ephemeral.diagnostic-logging',
+    issuedAt: sampledAt,
+    releaseAfter: sampledAt + 60_000,
+    expiresAt: sampledAt + 5 * 60_000,
+  });
+}
+
+function diagnosticLoggingEventSafeForSink(event) {
+  if (!event || typeof event !== 'object') return false;
+  if (!String(event.eventId || '').trim()) return false;
+  if (String(event?.kind || '').startsWith('diagnostic.logging.')) return false;
+  return true;
+}
+
+function diagnosticLoggingEventEligible(event) {
+  if (!diagnosticLoggingEnabled) return false;
+  if (!diagnosticLoggingEventSafeForSink(event)) return false;
+  if (diagnosticLoggingQueuedEventIds.has(event?.eventId)) return false;
+  return true;
+}
+
+function enqueueDiagnosticLoggingBacklog(event) {
+  if (!diagnosticLoggingEventEligible(event)) return false;
+  const eventId = String(event.eventId || '').trim();
+  if (diagnosticLoggingBacklogById.has(eventId)) return false;
+  const materialized = safeClone(event, diagnosticLoggingBacklogMaterializationBudget());
+  diagnosticLoggingBacklog.push(materialized);
+  diagnosticLoggingBacklogIds.add(eventId);
+  diagnosticLoggingBacklogById.set(eventId, materialized);
+  while (diagnosticLoggingBacklog.length > RUNTIME_DIAGNOSTIC_LOG_BACKLOG_LIMIT) {
+    const dropped = diagnosticLoggingBacklog.shift();
+    const droppedId = String(dropped?.eventId || '').trim();
+    diagnosticLoggingBacklogIds.delete(droppedId);
+    diagnosticLoggingBacklogById.delete(droppedId);
+  }
+  return true;
+}
+
+function removeDiagnosticLoggingBacklogEvent(eventId) {
+  const key = String(eventId || '').trim();
+  if (!key || !diagnosticLoggingBacklogById.has(key)) return;
+  const entry = diagnosticLoggingBacklogById.get(key);
+  diagnosticLoggingBacklogIds.delete(key);
+  diagnosticLoggingBacklogById.delete(key);
+  const index = diagnosticLoggingBacklog.indexOf(entry);
+  if (index >= 0) diagnosticLoggingBacklog.splice(index, 1);
+}
+
+function enableDiagnosticLoggingSink(ownerId = '') {
+  const owner = String(ownerId || '').trim();
+  if (owner) diagnosticLoggingSubscriberIds.add(owner);
+  diagnosticLoggingEnabled = true;
+  for (const event of runtimeEvents) enqueueDiagnosticLoggingBacklog(event);
+  requestRuntimeDirectoryObserve('diagnostic.logging.enable');
+  scheduleDiagnosticLoggingFlush(10);
+}
+
+function disableDiagnosticLoggingSink(ownerId = '') {
+  const owner = String(ownerId || '').trim();
+  if (owner) diagnosticLoggingSubscriberIds.delete(owner);
+  if (diagnosticLoggingSubscriberIds.size > 0) return;
+  diagnosticLoggingEnabled = false;
+  diagnosticLoggingBacklog.splice(0, diagnosticLoggingBacklog.length);
+  diagnosticLoggingBacklogIds.clear();
+  diagnosticLoggingBacklogById.clear();
+  diagnosticLoggingQueuedEventIds.clear();
+  diagnosticLoggingWindowStartedAt = 0;
+  diagnosticLoggingWindowCount = 0;
+  if (diagnosticLoggingFlushTimer) {
+    self.clearTimeout(diagnosticLoggingFlushTimer);
+    diagnosticLoggingFlushTimer = 0;
+  }
+}
+
+function shouldQueueDiagnosticLoggingEvent(event) {
+  if (!diagnosticLoggingEventEligible(event)) return false;
+  const now = nowMs();
+  if (!diagnosticLoggingWindowStartedAt || now - diagnosticLoggingWindowStartedAt > 60_000) {
+    diagnosticLoggingWindowStartedAt = now;
+    diagnosticLoggingWindowCount = 0;
+  }
+  if (diagnosticLoggingWindowCount >= RUNTIME_DIAGNOSTIC_LOG_RATE_LIMIT) return false;
+  diagnosticLoggingWindowCount += 1;
+  return true;
+}
+
+let diagnosticLoggingInFlight = false;
+let runtimeControlPlaneBusyUntil = 0;
+
+function markRuntimeControlPlaneBusy(durationMs = 5000) {
+  runtimeControlPlaneBusyUntil = Math.max(runtimeControlPlaneBusyUntil, nowMs() + Math.max(250, Number(durationMs || 0)));
+}
+
+function clearRuntimeControlPlaneBusy() {
+  runtimeControlPlaneBusyUntil = 0;
+}
+
+function runtimeControlPlaneBusy() {
+  return runtimeControlPlaneBusyUntil > nowMs();
+}
+
+function scheduleDiagnosticLoggingFlush(delayMs = 1000) {
+  if (diagnosticLoggingFlushTimer) return;
+  diagnosticLoggingFlushTimer = self.setTimeout(() => {
+    diagnosticLoggingFlushTimer = 0;
+    flushDiagnosticLoggingEvents();
+  }, Math.max(10, Number(delayMs || 0)));
+}
+
+function runtimeDiagnosticLogEvent(event) {
+  const observedAt = Number(event.observedAt || 0) || nowMs();
+  const occurredAt = observedAt > 9_999_999_999
+    ? Math.floor(observedAt / 1000)
+    : Math.floor(observedAt);
+  return makeLogEventEnvelope({
+    occurredAt,
+    producer: {
+      service: 'runtime',
+      component: 'browser-runtime',
+      instanceId: runtimeSessionId,
+    },
+    category: 'worker',
+    severity: event.level === 'error' ? 'error' : event.level === 'warn' ? 'warning' : 'info',
+    outcome: event.level === 'error' ? 'failed' : event.level === 'warn' ? 'degraded' : 'observed',
+    subject: {
+      kind: 'runtime.diagnostic',
+      id: event.eventId,
+    },
+    correlation: {
+      correlationId: event.correlationId || event.requestId || event.frameId || event.eventId,
+    },
+    tags: ['runtime', 'diagnostic', event.kind].filter(Boolean),
+    safeFacts: sanitizeDiagnosticValue({
+      eventId: event.eventId,
+      kind: event.kind,
+      level: event.level,
+      buildId: event.buildId,
+      runtimeSessionId: event.runtimeSessionId,
+      surface: event.surface,
+      clientId: event.clientId,
+      frameId: event.frameId,
+      correlationId: event.correlationId,
+      requestId: event.requestId,
+      activationId: event.activationId,
+      routePromiseId: event.routePromiseId,
+      projectionKey: event.projectionKey,
+      channelRef: event.channelRef,
+      capabilityRef: event.capabilityRef,
+      detail: event.detail,
+    }),
+  });
+}
+
+function runtimeDiagnosticLogEventsForProjection(limit = DEFAULT_LOGGING_SYNC_TARGET_COUNT) {
+  const max = Math.min(RUNTIME_DIAGNOSTIC_RING_LIMIT, Math.max(1, Number(limit || DEFAULT_LOGGING_SYNC_TARGET_COUNT)));
+  const selected = [];
+  for (let index = runtimeEvents.length - 1; index >= 0 && selected.length < max; index -= 1) {
+    const event = runtimeEvents[index];
+    if (diagnosticLoggingEventSafeForSink(event)) selected.push(runtimeDiagnosticLogEvent(event));
+  }
+  return selected.reverse();
+}
+
+function runtimeLoggingSeverityCounts(logEvents) {
+  const counts = { critical: 0, error: 0, warning: 0, warn: 0, info: 0 };
+  for (const event of logEvents) {
+    const severity = String(event?.severity || 'info').trim().toLowerCase();
+    if (severity === 'critical') counts.critical += 1;
+    else if (severity === 'error') counts.error += 1;
+    else if (severity === 'warning' || severity === 'warn') {
+      counts.warning += 1;
+      counts.warn += 1;
+    } else counts.info += 1;
+  }
+  return counts;
+}
+
+function runtimeLoggingProjectionNodePath(policy, channelId) {
+  const explicit = String(policy?.nodePath || '').trim();
+  if (explicit) return explicit;
+  if (channelId === 'logging.health') return 'health';
+  if (channelId === 'logging.dashboard') return 'dashboard';
+  return 'events';
+}
+
+function runtimeLoggingProjectionChannelForNodePath(nodePath) {
+  const target = String(nodePath || 'events').trim().toLowerCase();
+  if (target === 'health') return 'logging.health';
+  if (target === 'dashboard') return 'logging.dashboard';
+  return 'logging.events';
+}
+
+function runtimeLoggingProjectionPayload(policy) {
+  const channelId = String(policy?.channelId || '').trim();
+  const nodePath = runtimeLoggingProjectionNodePath(policy, channelId);
+  const targetCount = nodePath === 'events'
+    ? syncTargetCountForPolicy(policy)
+    : DEFAULT_LOGGING_SYNC_TARGET_COUNT;
+  const logEvents = runtimeDiagnosticLogEventsForProjection(targetCount);
+  const severityCounts = runtimeLoggingSeverityCounts(logEvents);
+  const coverage = {
+    materializedCount: nodePath === 'events' ? logEvents.length : 1,
+    targetCount: nodePath === 'events' ? logEvents.length : 1,
+    completionRatio: 1,
+    syncState: 'completeEnough',
+    oldestObservedAt: logEvents.length ? Number(logEvents[0]?.occurredAt || 0) : 0,
+    newestObservedAt: logEvents.length ? Number(logEvents.at(-1)?.occurredAt || 0) : 0,
+  };
+  if (nodePath === 'health') {
+    return {
+      nodePath,
+      coverage,
+      health: {
+        ok: true,
+        runtimeSessionId,
+        eventCount: runtimeEvents.length,
+        materializedCount: logEvents.length,
+        loggingSink: diagnosticLoggingEnabled
+          ? (diagnosticLoggingRouteReady() ? 'routed' : 'buffering')
+          : 'local-runtime',
+        storageStatus: diagnosticLoggingRouteReady() ? 'routed' : 'local-retained',
+      },
+    };
+  }
+  if (nodePath === 'dashboard') {
+    const criticalShortlist = [];
+    for (const event of logEvents) {
+      if (!['critical', 'error', 'warning', 'warn'].includes(String(event?.severity || '').trim().toLowerCase())) continue;
+      criticalShortlist.push(event);
+      if (criticalShortlist.length >= 8) break;
+    }
+    return {
+      nodePath,
+      coverage,
+      severityCounts,
+      criticalShortlist,
+      storage: {
+        status: diagnosticLoggingRouteReady() ? 'routed' : 'local-retained',
+        archiveContainerId: '',
+      },
+    };
+  }
+  return {
+    nodePath,
+    coverage,
+    events: logEvents,
+    policy: safeClone(policy),
+  };
+}
+
+function synthesizeRuntimeLoggingProjection(policy) {
+  const channelId = String(policy?.channelId || '').trim();
+  const service = String(policy?.service || '').trim();
+  if (service !== 'logging' || !RUNTIME_LOGGING_PROJECTION_CHANNELS.has(channelId)) return null;
+  const nodePath = runtimeLoggingProjectionNodePath(policy, channelId);
+  const observedAt = nowMs();
+  return storeProjectionRecord({
+    channelId,
+    service: 'logging',
+    servicePk: RUNTIME_LOGGING_PROJECTION_SERVICE_PK,
+    policyId: String(policy?.policyId || DEFAULT_LOGGING_POLICY_ID).trim() || DEFAULT_LOGGING_POLICY_ID,
+    projectionId: channelId,
+    nodePath,
+    revision: observedAt,
+    freshness: {
+      state: 'fresh',
+      updatedAt: observedAt,
+      staleAfter: observedAt + 10_000,
+    },
+    sourceRefs: ['runtime.safeDiagnostics'],
+    safeFacts: {
+      source: 'runtime.safeDiagnostics',
+      debugOnly: false,
+      runtimeSessionId,
+    },
+    encryptedDetailRefs: [],
+    diagnostics: [],
+    payload: runtimeLoggingProjectionPayload(policy),
+  });
+}
+
+function maybeQueueDiagnosticLoggingEvent(event) {
+  if (!diagnosticLoggingEnabled) return;
+  enqueueDiagnosticLoggingBacklog(event);
+  if (!diagnosticLoggingRouteReady()) {
+    requestRuntimeDirectoryObserve('diagnostic.logging.backlog');
+    scheduleDiagnosticLoggingFlush();
+    return;
+  }
+  flushDiagnosticLoggingEvents();
+}
+
+function flushDiagnosticLoggingEvents() {
+  if (!diagnosticLoggingEnabled) return;
+  if (!diagnosticLoggingRouteReady()) {
+    requestRuntimeDirectoryObserve('diagnostic.logging.flush');
+    scheduleDiagnosticLoggingFlush(2000);
+    return;
+  }
+  if (runtimeControlPlaneBusy()) {
+    scheduleDiagnosticLoggingFlush(2000);
+    return;
+  }
+  if (diagnosticLoggingInFlight) return;
+  const event = diagnosticLoggingBacklog.find((entry) => shouldQueueDiagnosticLoggingEvent(entry));
+  if (!event) return;
+  diagnosticLoggingInFlight = true;
+  diagnosticLoggingQueuedEventIds.add(event.eventId);
+  void queueDiagnosticLoggingEvent(event).then(() => {
+    removeDiagnosticLoggingBacklogEvent(event.eventId);
+    diagnosticLoggingInFlight = false;
+    scheduleDiagnosticLoggingFlush(250);
+  }).catch((error) => {
+    diagnosticLoggingInFlight = false;
+    diagnosticLoggingQueuedEventIds.delete(event.eventId);
+    const failure = canonicalDiagnosticEvent('diagnostic.logging.sink.failed', {
+      error: { message: String(error?.message || error || 'diagnostic logging sink failed') },
+      level: 'warn',
+    });
+    runtimeEvents.push(failure);
+    if (runtimeEvents.length > RUNTIME_DIAGNOSTIC_RING_LIMIT) {
+      runtimeEvents.splice(0, runtimeEvents.length - RUNTIME_DIAGNOSTIC_RING_LIMIT);
+    }
+    broadcastDiagnosticEvent(failure);
+    scheduleDiagnosticLoggingFlush(2000);
+  });
+}
+
+function queueDiagnosticLoggingEvent(event) {
+  return queueRuntimeAppIntent(RUNTIME_APP_INTENT.DIAGNOSTIC_LOG, {
+    requestId: `diag-${event.eventId}`,
+    payload: {
+      service: 'logging',
+      nodeRef: 'runtime.diagnostics',
+      channelId: 'logging.events',
+      capabilityRef: 'logging.events.ingest',
+      recordKind: 'logging.event',
+      payload: {
+        recordKind: 'logging.event',
+        record: runtimeDiagnosticLogEvent(event),
+      },
+      retryPolicy: { onReject: 'preserve' },
+    },
+  });
+}
+
+function recordRuntimeEvent(kind, detail = {}) {
+  const event = canonicalDiagnosticEvent(kind, detail);
+  runtimeEvents.push(event);
+  if (runtimeEvents.length > RUNTIME_DIAGNOSTIC_RING_LIMIT) {
+    runtimeEvents.splice(0, runtimeEvents.length - RUNTIME_DIAGNOSTIC_RING_LIMIT);
+  }
+  broadcastDiagnosticEvent(event);
+  maybeQueueDiagnosticLoggingEvent(event);
+  return event;
+}
+
+function touchRuntime() {
+  runtimeUpdatedAt = nowMs();
 }
 
 function retainedProjectionObject() {
@@ -242,6 +2118,4365 @@ function retainedProjectionCoverageObject() {
 
 function projectionPolicyObject() {
   return Object.fromEntries(Array.from(projectionPolicies.entries()).map(([key, policy]) => [key, safeClone(policy)]));
+}
+
+function swarmQueueObject() {
+  return Object.fromEntries(Array.from(outboundSwarmFrames.entries()).map(([frameId, entry]) => [frameId, safeClone(entry)]));
+}
+
+function edgeSnapshot() {
+  return {
+    mode: swarmEdge.mode,
+    connected: swarmEdge.connected,
+    endpoint: swarmEdge.endpoint,
+    sessionId: swarmEdge.sessionId,
+    memberRef: swarmEdge.memberRef,
+    zoneScope: safeClone(swarmEdge.zoneScope),
+    queuedCount: outboundSwarmFrames.size,
+    sentCount: swarmEdge.sentFrames.length,
+    rejections: swarmEdge.rejections.map((entry) => safeClone(entry)),
+    repairRequests: swarmEdge.repairRequests.map((entry) => safeClone(entry)),
+    routeObservations: swarmEdge.routeObservations.map((entry) => safeClone(entry)),
+    contributionLifecycles: swarmEdge.contributionLifecycles.map((entry) => safeClone(entry)),
+  };
+}
+
+function activationResolutionObject() {
+  const out = {};
+  for (const entry of pendingAuthorityIntents.values()) {
+    const key = String(entry.activationId || entry.requestId || '').trim();
+    if (!key) continue;
+    out[key] = {
+      activationId: key,
+      interactionId: String(entry.interactionId || '').trim(),
+      routePromiseId: String(entry.routePromiseId || '').trim(),
+      frameId: '',
+      state: String(entry.state || 'waitingAuthority').trim(),
+      nodeRef: String(entry.nodeRef || '').trim(),
+      capabilityRef: String(entry.capabilityRef || '').trim(),
+      channelId: String(entry.channelId || '').trim(),
+      zoneScope: safeClone(entry.zoneScope || null),
+      routingScope: safeClone(entry.routingScope || entry.authoritySummary?.routingScope || null),
+      audience: safeClone(entry.audience || null),
+      authoritySummary: safeClone(entry.authoritySummary || null),
+      attempts: Number(entry.attempts || 0),
+      routeObservation: null,
+      lastError: entry.lastError ? safeClone(entry.lastError) : null,
+      blockedAuthorityDomain: SWARM.AUTHORITY_DOMAIN.RUNTIME,
+      authorityLifecycleState: String(entry.authorityLifecycleState || '').trim(),
+      updatedAt: Number(entry.updatedAt || entry.queuedAt || 0),
+    };
+  }
+  for (const entry of pendingRouteIntents.values()) {
+    const key = String(entry.activationId || entry.requestId || '').trim();
+    if (!key) continue;
+    out[key] = {
+      activationId: key,
+      interactionId: String(entry.interactionId || '').trim(),
+      routePromiseId: String(entry.routePromiseId || '').trim(),
+      frameId: '',
+      state: String(entry.state || 'waitingRouteBaseline').trim(),
+      nodeRef: String(entry.nodeRef || '').trim(),
+      capabilityRef: String(entry.capabilityRef || '').trim(),
+      channelId: String(entry.channelId || '').trim(),
+      zoneScope: safeClone(entry.zoneScope || null),
+      routingScope: safeClone(entry.routingScope || entry.authoritySummary?.routingScope || null),
+      audience: safeClone(entry.audience || null),
+      authoritySummary: safeClone(entry.authoritySummary || null),
+      attempts: Number(entry.attempts || 0),
+      routeObservation: null,
+      lastError: entry.lastError ? safeClone(entry.lastError) : null,
+      blockedAuthorityDomain: '',
+      authorityLifecycleState: 'ready',
+      updatedAt: Number(entry.updatedAt || entry.queuedAt || 0),
+    };
+  }
+  for (const entry of outboundSwarmFrames.values()) {
+    const frame = entry?.frame || {};
+    const recordRef = frame.recordRef || frame.record_ref || {};
+    const key = String(
+      frame.correlationId
+        || recordRef.id
+        || entry.frameId
+        || frame.frameId
+        || '',
+    ).trim();
+    if (!key) continue;
+    const routeObservation = entry.routeObservation && typeof entry.routeObservation === 'object'
+      ? entry.routeObservation
+      : null;
+    const mediaFulfillment = entry.mediaFulfillment && typeof entry.mediaFulfillment === 'object'
+      ? entry.mediaFulfillment
+      : null;
+    const mediaState = String(mediaFulfillment?.state || '').trim();
+    const recordKind = queuedSwarmFrameRecordKind(entry);
+    const rawState = String(routeObservation?.state || entry.status || 'queued').trim() || 'queued';
+    const admissionTimedOut = String(entry.status || '').trim() === 'serviceAdmissionTimedOut';
+    const signalDeliveryState = queuedSwarmFrameSignalDeliveryState(entry, rawState);
+    const state = entry.serviceRejected
+      ? 'serviceRejected'
+      : mediaState === SWARM.MEDIA_FULFILLMENT_STATE.BLOCKED
+        ? 'mediaBlocked'
+        : mediaState === SWARM.MEDIA_FULFILLMENT_STATE.RELEASED
+          ? 'released'
+          : mediaState === SWARM.MEDIA_FULFILLMENT_STATE.USABLE
+            ? 'adapterLive'
+            : entry.serviceAnswer
+              ? 'answerMaterialized'
+            : entry.serviceAccepted
+              ? 'waitingServiceAnswer'
+              : admissionTimedOut
+                ? 'serviceAdmissionTimedOut'
+                : signalDeliveryState
+                  ? signalDeliveryState
+                  : routeObservationReachedMember(rawState)
+                    ? 'waitingServiceAcceptance'
+                    : routeObservationCarrierStatus(rawState);
+    out[key] = {
+      activationId: key,
+      interactionId: String(entry.interactionId || '').trim(),
+      routePromiseId: String(entry.routePromiseId || routeObservation?.routePromiseId || '').trim(),
+      frameId: String(entry.frameId || frame.frameId || '').trim(),
+      state,
+      recordKind,
+      nodeRef: String(recordRef.id || '').trim(),
+      capabilityRef: String(frame.capability || '').trim(),
+      channelId: String(frame.channelId || '').trim(),
+      zoneScope: safeClone(frame.zoneScope || null),
+      routingScope: safeClone(entry.routingScope || entry.authoritySummary?.routingScope || entry.interaction?.routingScope || null),
+      audience: safeClone(frame.audience || null),
+      authoritySummary: safeClone(entry.authoritySummary || null),
+      attempts: Number(entry.attempts || 0),
+      routeObservation: routeObservation ? safeClone(routeObservation) : null,
+      routeDelivery: routeDeliveryPosture(entry),
+      serviceAccepted: entry.serviceAccepted === true,
+      serviceAdmission: entry.serviceAdmission ? safeClone(entry.serviceAdmission) : null,
+      serviceRejected: entry.serviceRejected === true,
+      serviceReject: entry.serviceReject ? safeClone(entry.serviceReject) : null,
+      serviceAnswer: entry.serviceAnswer ? safeClone(entry.serviceAnswer) : null,
+      contributionLifecycle: entry.contributionLifecycle ? safeClone(entry.contributionLifecycle) : null,
+      contributionWitnessedAt: Number(entry.contributionWitnessedAt || 0) || 0,
+      mediaFulfillment: mediaFulfillment ? safeClone(mediaFulfillment) : null,
+      mediaState,
+      responseState: signalDeliveryState ? 'notRequired' : entry.serviceRejected ? 'rejected' : entry.serviceAnswer ? 'materialized' : entry.serviceAccepted ? 'waitingServiceAnswer' : admissionTimedOut ? 'serviceAdmissionTimedOut' : '',
+      lastError: entry.lastError ? safeClone(entry.lastError) : null,
+      updatedAt: Number(entry.mediaFulfillmentAt || entry.contributionWitnessedAt || entry.serviceAnswerAt || entry.serviceAcceptedAt || entry.serviceAdmissionTimedOutAt || entry.routeObservedAt || entry.rejectedAt || entry.ackedAt || entry.sentAt || entry.queuedAt || 0),
+    };
+  }
+  return out;
+}
+
+function defaultSwarmBody() {
+  return {
+    encoding: SWARM.BODY_ENCODING.CAAC,
+    envelope: {
+      envelopeId: randomOpaqueId('caac'),
+    },
+  };
+}
+
+function isHexPublicKey(value) {
+  return /^[0-9a-fA-F]{64}$/.test(String(value || '').trim());
+}
+
+function pushUniqueHexPublicKey(out, value) {
+  const key = String(value || '').trim();
+  if (!isHexPublicKey(key) || out.includes(key)) return;
+  out.push(key);
+}
+
+function rawRuntimeAuthorityDevice(value) {
+  const device = value?.device && typeof value.device === 'object' ? value.device : value;
+  return device && typeof device === 'object' && !Array.isArray(device) ? device : null;
+}
+
+function runtimeAuthorityEvidence(value) {
+  const device = rawRuntimeAuthorityDevice(value);
+  if (!device) {
+    return {
+      device: null,
+      secretKey: '',
+      storedPk: '',
+      publicKey: '',
+      identityId: '',
+      expiresAt: 0,
+      revokedAt: 0,
+    };
+  }
+  const nostr = device.nostr && typeof device.nostr === 'object' ? device.nostr : {};
+  const secretKey = String(nostr.skHex || nostr.sk || device.skHex || '').trim();
+  const storedPk = String(nostr.pk || device.pk || '').trim();
+  let publicKey = '';
+  let error = '';
+  if (secretKey) {
+    try {
+      publicKey = pubkeyFromSecretKey(secretKey);
+    } catch (caught) {
+      error = String(caught?.message || caught || 'invalid runtime device key');
+    }
+  }
+  const expiresAt = Number(device.expiresAt || device.expires_at || device.authorityExpiresAt || 0) || 0;
+  const revokedAt = Number(device.revokedAt || device.revoked_at || 0) || 0;
+  return {
+    device,
+    nostr,
+    secretKey,
+    storedPk,
+    publicKey,
+    identityId: String(device.identityId || device.identity_id || device.ownerIdentityId || '').trim(),
+    expiresAt,
+    revokedAt,
+    error,
+  };
+}
+
+function setRuntimeAuthorityPosture(posture) {
+  runtimeAuthorityPostureState = {
+    state: String(posture?.state || 'waitingAuthority').trim() || 'waitingAuthority',
+    ready: posture?.state === 'ready',
+    authorityDomain: SWARM.AUTHORITY_DOMAIN.RUNTIME,
+    devicePk: String(posture?.devicePk || '').trim(),
+    identityId: String(posture?.identityId || '').trim(),
+    reason: String(posture?.reason || '').trim(),
+    source: String(posture?.source || '').trim(),
+    blockedAuthorityDomain: posture?.state === 'ready' ? '' : SWARM.AUTHORITY_DOMAIN.RUNTIME,
+    expiresAt: Number(posture?.expiresAt || 0) || 0,
+    revokedAt: Number(posture?.revokedAt || 0) || 0,
+    updatedAt: nowMs(),
+  };
+  return runtimeAuthorityPostureState;
+}
+
+function storageUnavailableForRuntimeAuthority() {
+  return typeof indexedDB === 'undefined' && !runtimeCaches()?.open;
+}
+
+async function hydrateRuntimeAuthorityDeviceFromStorage(reason = 'storage.hydrate') {
+  if (runtimeAuthorityStorageHydrationPromise) return runtimeAuthorityStorageHydrationPromise;
+  runtimeAuthorityStorageHydrationPromise = (async () => {
+    try {
+      const stored = rawRuntimeAuthorityDevice(await withTimeout(
+        'runtime.authority.storage.hydrate',
+        () => kvGet('device'),
+        AUTHORITY_STORAGE_HYDRATION_TIMEOUT_MS,
+      ));
+      if (!stored || runtimeAuthorityDevice) return null;
+      const normalized = normalizeRuntimeAuthorityDevice(stored);
+      if (!normalized) return null;
+      runtimeAuthorityDevice = safeClone(normalized);
+      setRuntimeAuthorityPosture({
+        state: 'ready',
+        reason: 'runtime device authority ready',
+        source: reason,
+        devicePk: String(normalized?.nostr?.pk || '').trim(),
+        identityId: String(normalized?.identityId || normalized?.identity_id || normalized?.ownerIdentityId || '').trim(),
+        expiresAt: Number(normalized?.expiresAt || normalized?.expires_at || 0) || 0,
+      });
+      recordRuntimeEvent('runtime.authority.device.ready', {
+        devicePk: String(normalized?.nostr?.pk || '').trim(),
+        source: reason,
+      });
+      broadcastSnapshot();
+      void flushPendingAuthorityIntents('runtime.authority.storage.hydrated');
+      return normalized;
+    } catch (error) {
+      if (!runtimeAuthorityStorageHydrationWarningLogged) {
+        runtimeAuthorityStorageHydrationWarningLogged = true;
+        recordRuntimeEvent('runtime.authority.device.storage_degraded', {
+          level: 'warn',
+          reason: 'storageLookupTimedOut',
+          error: String(error?.message || error || 'runtime authority storage lookup failed'),
+        });
+      }
+      return null;
+    } finally {
+      runtimeAuthorityStorageHydrationPromise = null;
+    }
+  })();
+  return runtimeAuthorityStorageHydrationPromise;
+}
+
+async function runtimeAuthorityPosture() {
+  let source = 'memory';
+  let device = rawRuntimeAuthorityDevice(runtimeAuthorityDevice);
+  if (!device) {
+    source = 'storage.cache';
+    if (storageUnavailableForRuntimeAuthority()) {
+      return setRuntimeAuthorityPosture({
+        state: 'unavailable',
+        reason: 'runtime authority storage unavailable',
+        source,
+      });
+    }
+    void hydrateRuntimeAuthorityDeviceFromStorage('storage.hydrate').catch(() => null);
+    try {
+      device = rawRuntimeAuthorityDevice(await withTimeout(
+        'runtime.authority.storage.lookup',
+        () => kvGet('device'),
+        AUTHORITY_POSTURE_STORAGE_LOOKUP_TIMEOUT_MS,
+      ));
+    } catch (error) {
+      source = 'storage.pending';
+      return setRuntimeAuthorityPosture({
+        state: 'waitingAuthority',
+        reason: 'runtime authority storage lookup pending',
+        source,
+      });
+    }
+  }
+  const evidence = runtimeAuthorityEvidence(device);
+  if (!evidence.device) {
+    return setRuntimeAuthorityPosture({
+      state: 'waitingAuthority',
+      reason: 'runtime authority has not been handed off by account',
+      source,
+    });
+  }
+  if (evidence.revokedAt > 0) {
+    return setRuntimeAuthorityPosture({
+      state: 'revoked',
+      reason: 'runtime device authority was revoked',
+      source,
+      devicePk: evidence.storedPk || evidence.publicKey,
+      identityId: evidence.identityId,
+      revokedAt: evidence.revokedAt,
+    });
+  }
+  if (evidence.expiresAt > 0 && evidence.expiresAt <= nowMs()) {
+    return setRuntimeAuthorityPosture({
+      state: 'expired',
+      reason: 'runtime device authority expired',
+      source,
+      devicePk: evidence.storedPk || evidence.publicKey,
+      identityId: evidence.identityId,
+      expiresAt: evidence.expiresAt,
+    });
+  }
+  if (evidence.error) {
+    return setRuntimeAuthorityPosture({
+      state: 'ambiguous',
+      reason: evidence.error,
+      source,
+      devicePk: evidence.storedPk,
+      identityId: evidence.identityId,
+    });
+  }
+  if (!evidence.secretKey) {
+    return setRuntimeAuthorityPosture({
+      state: 'waitingAuthority',
+      reason: 'cached runtime device evidence does not include signing authority',
+      source,
+      devicePk: evidence.storedPk,
+      identityId: evidence.identityId,
+    });
+  }
+  if (evidence.storedPk && evidence.storedPk !== evidence.publicKey) {
+    return setRuntimeAuthorityPosture({
+      state: 'ambiguous',
+      reason: 'runtime device authority public key does not match signing key',
+      source,
+      devicePk: evidence.storedPk,
+      identityId: evidence.identityId,
+    });
+  }
+  if (!runtimeAuthorityDevice) runtimeAuthorityDevice = normalizeRuntimeAuthorityDevice(evidence.device);
+  return setRuntimeAuthorityPosture({
+    state: 'ready',
+    reason: 'runtime device authority ready',
+    source,
+    devicePk: evidence.publicKey,
+    identityId: evidence.identityId,
+    expiresAt: evidence.expiresAt,
+  });
+}
+
+async function runtimeDeviceAuthority() {
+  const posture = await runtimeAuthorityPosture();
+  if (posture.state !== 'ready') {
+    throw new Error(`runtime authority ${posture.state}: ${posture.reason || 'not ready'}`);
+  }
+  const device = normalizeRuntimeAuthorityDevice(runtimeAuthorityDevice)
+    || normalizeRuntimeAuthorityDevice(await kvGet('device').catch(() => null));
+  if (device && !runtimeAuthorityDevice) runtimeAuthorityDevice = safeClone(device);
+  const secretKey = String(device?.nostr?.skHex || '').trim();
+  const storedPk = String(device?.nostr?.pk || '').trim();
+  if (!secretKey) {
+    throw new Error('runtime authority waitingAuthority: signing key unavailable');
+  }
+  const publicKey = pubkeyFromSecretKey(secretKey);
+  if (storedPk && storedPk !== publicKey) {
+    throw new Error('runtime authority ambiguous: public key mismatch');
+  }
+  return {
+    device,
+    publicKey,
+    secretKey,
+  };
+}
+
+function normalizeRuntimeAuthorityDevice(value) {
+  const evidence = runtimeAuthorityEvidence(value);
+  const device = evidence.device;
+  if (!device) return null;
+  const nostr = evidence.nostr || {};
+  const secretKey = evidence.secretKey;
+  if (!secretKey) return null;
+  if (evidence.error) throw new Error(evidence.error);
+  if (evidence.storedPk && evidence.storedPk !== evidence.publicKey) {
+    throw new Error('runtime authority ambiguous: public key mismatch');
+  }
+  return {
+    ...safeClone(device),
+    nostr: {
+      ...safeClone(nostr),
+      pk: evidence.publicKey,
+      skHex: secretKey,
+    },
+  };
+}
+
+async function handleRuntimeAuthorityDevicePut(message) {
+  let device;
+  try {
+    device = normalizeRuntimeAuthorityDevice(message.device || message.payload || message);
+  } catch (error) {
+    return { ok: false, error: String(error?.message || error || 'invalid runtime device authority') };
+  }
+  if (!device) return { ok: false, error: 'runtime device authority missing device key' };
+  runtimeAuthorityDevice = safeClone(device);
+  setRuntimeAuthorityPosture({
+    state: 'ready',
+    reason: 'runtime device authority ready',
+    source: 'account.bridge',
+    devicePk: String(device?.nostr?.pk || '').trim(),
+    identityId: String(device?.identityId || device?.identity_id || device?.ownerIdentityId || '').trim(),
+    expiresAt: Number(device?.expiresAt || device?.expires_at || 0) || 0,
+  });
+  const persistResult = await kvSet('device', device).catch((error) => {
+    recordRuntimeEvent('runtime.authority.device.persist_failed', {
+      error: String(error?.message || error || 'device authority persist failed'),
+    });
+    return null;
+  });
+  if (persistResult?.degraded) {
+    recordRuntimeEvent('runtime.authority.device.persist_degraded', {
+      level: 'warn',
+      backend: persistResult.backend,
+      error: persistResult.error,
+      reason: 'indexedDbWriteTimedOut',
+    });
+  }
+  recordRuntimeEvent('runtime.authority.device.ready', {
+    devicePk: String(device?.nostr?.pk || '').trim(),
+    source: 'account.bridge',
+  });
+  broadcastSnapshot();
+  void flushPendingAuthorityIntents('runtime.authority.device.ready');
+  return { ok: true, result: { devicePk: String(device?.nostr?.pk || '').trim(), posture: safeClone(runtimeAuthorityPostureState) } };
+}
+
+function appIntentRecipientPks(intent, authority) {
+  const recipients = [];
+  for (const value of normalizeArray(intent?.recipientPks)) {
+    pushUniqueHexPublicKey(recipients, value);
+  }
+  pushUniqueHexPublicKey(recipients, intent?.recipientPk);
+  pushUniqueHexPublicKey(recipients, intent?.memberRef);
+  pushUniqueHexPublicKey(recipients, intent?.routeMemberRef);
+  pushUniqueHexPublicKey(recipients, intent?.serviceMemberRef);
+  pushUniqueHexPublicKey(recipients, intent?.servicePk);
+  pushUniqueHexPublicKey(recipients, intent?.recipientServicePk);
+  pushUniqueHexPublicKey(recipients, intent?.gatewayPk);
+  if (recipients.length === 0) {
+    pushUniqueHexPublicKey(recipients, authority.publicKey);
+  }
+  return recipients;
+}
+
+function normalizeSwarmRetryPolicy(value) {
+  const source = value && typeof value === 'object' ? value : {};
+  const onReject = String(source.onReject || 'preserve').trim().toLowerCase();
+  return {
+    onReject: onReject === 'drop' || onReject === 'remove' ? 'drop' : 'preserve',
+    maxAttempts: Math.max(1, Number(source.maxAttempts || 3)),
+  };
+}
+
+function swarmFrameFromMessage(message) {
+  const source = message.frame && typeof message.frame === 'object'
+    ? message.frame
+    : message.payload && typeof message.payload === 'object'
+      ? message.payload
+      : message;
+  const body = source.body && typeof source.body === 'object' ? safeClone(source.body) : defaultSwarmBody();
+  const frame = source.frameId
+    ? assertSwarmFrame(safeClone(source))
+    : makeSwarmFrame({
+        kind: source.kind || SWARM.FRAME_KIND.SERVICE_INTENT,
+        issuer: source.issuer || source.browserDevicePk || source.devicePk,
+        audience: source.audience,
+        zoneScope: source.zoneScope,
+        issuedAt: source.issuedAt,
+        expiresAt: source.expiresAt,
+        nonce: source.nonce,
+        correlationId: source.correlationId,
+        channelId: source.channelId,
+        recordRef: source.recordRef,
+        capability: source.capability || SWARM.CORE_CAPABILITY.SERVICE_INTENT_INVOKE,
+        body,
+      });
+  if (frame.body?.encoding !== SWARM.BODY_ENCODING.CAAC && frame.body?.encoding !== SWARM.BODY_ENCODING.PUBLIC) {
+    throw new Error('unsupported swarm frame body');
+  }
+  return frame;
+}
+
+function postLiveEdgeRecord(record) {
+  const socket = swarmEdge.socket;
+  if (!socket || socket.readyState !== 1) return false;
+  socket.send(JSON.stringify(record));
+  return true;
+}
+
+function sendEdgeFrame(entry) {
+  const record = { type: 'swarm.frame', frame: safeClone(entry.frame) };
+  if (swarmEdge.mode === 'live') {
+    return postLiveEdgeRecord(record);
+  }
+  if (swarmEdge.mode === 'test') {
+    return true;
+  }
+  return false;
+}
+
+const SWARM_QUEUE_TERMINAL_STATUSES = new Set(['closed', 'dropped', 'expired', 'failed', 'rejected', 'released']);
+const ROUTE_MEMBER_REACH_STATES = new Set([
+  'delivered',
+  'memberWritten',
+  'memberRead',
+]);
+const ROUTE_SIGNAL_CARRIER_STATES = new Set([
+  ...ROUTE_MEMBER_REACH_STATES,
+  'accepted',
+]);
+
+function queuedSwarmFrameExpiresAt(entry) {
+  return Number(entry?.frame?.expiresAt || entry?.frame?.expires_at || 0) || 0;
+}
+
+function queuedSwarmFrameTerminal(entry) {
+  return SWARM_QUEUE_TERMINAL_STATUSES.has(String(entry?.status || '').trim());
+}
+
+function queuedSwarmFrameRecordKind(entry) {
+  return String(entry?.frame?.recordRef?.kind || entry?.frame?.record_ref?.kind || '').trim();
+}
+
+function queuedSwarmFrameRequiresServiceAdmission(entry) {
+  return queuedSwarmFrameRecordKind(entry) === 'stream.session.offer';
+}
+
+function routeObservationReachedMember(rawState = '') {
+  return ROUTE_MEMBER_REACH_STATES.has(String(rawState || '').trim());
+}
+
+function routeObservationCarriedSignal(rawState = '') {
+  return ROUTE_SIGNAL_CARRIER_STATES.has(String(rawState || '').trim());
+}
+
+function routeObservationCarrierStatus(rawState = '') {
+  const state = String(rawState || '').trim();
+  return state === 'accepted' ? 'routeAccepted' : state;
+}
+
+function queuedSwarmFrameSignalDeliveryState(entry, rawState = '') {
+  const recordKind = queuedSwarmFrameRecordKind(entry);
+  if (recordKind === 'stream.session.offer') return '';
+  if (!routeObservationCarriedSignal(rawState)) return '';
+  if (recordKind === 'stream.session.candidate') return 'candidateSignalDelivered';
+  if (recordKind === 'stream.session.close') return 'streamCloseDelivered';
+  if (recordKind === 'stream.session.control') return 'streamControlDelivered';
+  return '';
+}
+
+function serviceAdmissionDueAt(entry) {
+  const observedAt = Number(entry?.routeObservedAt || 0) || 0;
+  return observedAt > 0 ? observedAt + SERVICE_ADMISSION_TIMEOUT_MS : 0;
+}
+
+function routeDeliveryPosture(entry = {}) {
+  const observation = entry?.routeObservation && typeof entry.routeObservation === 'object' ? entry.routeObservation : {};
+  const rawObservation = observation.raw && typeof observation.raw === 'object' ? observation.raw : {};
+  const deliveredTo = uniqueTrimmedStrings([
+    ...normalizeArray(observation.deliveredTo),
+    ...normalizeArray(rawObservation.deliveredTo || rawObservation.delivered_to),
+  ]);
+  const propagation = normalizeArray(entry?.ack?.propagation)
+    .filter((target) => target && typeof target === 'object')
+    .map((target) => ({
+      memberRef: String(target.memberRef || target.member_ref || '').trim(),
+      memberKind: String(target.memberKind || target.member_kind || '').trim(),
+      zoneId: String(target.zoneId || target.zone_id || '').trim(),
+      channelIds: uniqueTrimmedStrings(target.channelIds || target.channel_ids || []),
+      capabilities: uniqueTrimmedStrings(target.capabilities || []),
+    }))
+    .filter((target) => target.memberRef);
+  const memberKinds = uniqueTrimmedStrings(propagation.map((target) => target.memberKind));
+  return {
+    deliveredTo,
+    deliveredCount: deliveredTo.length,
+    propagationCount: propagation.length,
+    memberKinds,
+    serviceDeliveryCount: propagation.filter((target) => target.memberKind === 'service').length,
+    browserDeliveryCount: propagation.filter((target) => target.memberKind === 'browser').length,
+    gatewayDeliveryCount: propagation.filter((target) => target.memberKind === 'gateway').length,
+  };
+}
+
+function clearServiceAdmissionTimeout(entry) {
+  const frameId = String(entry?.frameId || '').trim();
+  if (!frameId) return;
+  const timer = serviceAdmissionTimeoutTimers.get(frameId);
+  if (timer) self.clearTimeout(timer);
+  serviceAdmissionTimeoutTimers.delete(frameId);
+}
+
+function markServiceAdmissionTimedOut(entry, observedAt = nowMs()) {
+  if (!entry || queuedSwarmFrameTerminal(entry)) return false;
+  if (!queuedSwarmFrameRequiresServiceAdmission(entry)) return false;
+  if (entry.serviceAccepted || entry.serviceRejected || entry.serviceAnswer) return false;
+  const status = String(entry.status || '').trim();
+  if (!routeObservationReachedMember(status) && status !== 'serviceAdmissionTimedOut') return false;
+  const dueAt = serviceAdmissionDueAt(entry);
+  if (!dueAt || dueAt > observedAt) return false;
+  clearServiceAdmissionTimeout(entry);
+  entry.status = 'serviceAdmissionTimedOut';
+  entry.serviceAdmissionTimedOutAt = observedAt;
+  entry.lastError = {
+    code: 'service.admission.timeout',
+    message: 'member reach observed but no service witness arrived before timeout',
+    retryable: true,
+    timeoutMs: SERVICE_ADMISSION_TIMEOUT_MS,
+  };
+  recordRuntimeEvent('service.admission.timeout', {
+    level: 'warn',
+    frameId: entry.frameId,
+    correlationId: entry.frame?.correlationId || '',
+    activationId: String(entry.activationId || '').trim(),
+    routePromiseId: String(entry.routePromiseId || '').trim(),
+    timeoutMs: SERVICE_ADMISSION_TIMEOUT_MS,
+    routeDelivery: routeDeliveryPosture(entry),
+  });
+  touchRuntime();
+  schedulePersist();
+  broadcastSnapshot();
+  return true;
+}
+
+function scheduleServiceAdmissionTimeout(entry) {
+  if (!entry || queuedSwarmFrameTerminal(entry)) return;
+  if (!queuedSwarmFrameRequiresServiceAdmission(entry)) return;
+  if (entry.serviceAccepted || entry.serviceRejected || entry.serviceAnswer) {
+    clearServiceAdmissionTimeout(entry);
+    return;
+  }
+  const status = String(entry.status || '').trim();
+  if (!routeObservationReachedMember(status)) return;
+  const dueAt = serviceAdmissionDueAt(entry);
+  if (!dueAt) return;
+  const frameId = String(entry.frameId || '').trim();
+  if (!frameId || serviceAdmissionTimeoutTimers.has(frameId)) return;
+  const delayMs = Math.max(0, dueAt - nowMs());
+  const timer = self.setTimeout(() => {
+    serviceAdmissionTimeoutTimers.delete(frameId);
+    const current = findQueuedFrame(frameId);
+    if (current) markServiceAdmissionTimedOut(current);
+  }, delayMs);
+  serviceAdmissionTimeoutTimers.set(frameId, timer);
+}
+
+function refreshQueuedSwarmFrameForRetry(entry, reason = 'retry') {
+  if (!entry?.frame || typeof entry.frame !== 'object') return null;
+  const previousFrameId = String(entry.frameId || entry.frame.frameId || '').trim();
+  clearServiceAdmissionTimeout(entry);
+  const now = nowMs();
+  const expiresAt = Number(entry.frame.expiresAt || 0) || 0;
+  if (expiresAt && expiresAt <= now) return null;
+  const refreshedFrame = makeSwarmFrame({
+    kind: entry.frame.kind,
+    issuer: entry.frame.issuer,
+    audience: entry.frame.audience,
+    zoneScope: entry.frame.zoneScope,
+    issuedAt: now,
+    expiresAt: entry.frame.expiresAt,
+    nonce: randomOpaqueId('retry-nonce'),
+    correlationId: entry.frame.correlationId,
+    channelId: entry.frame.channelId,
+    recordRef: entry.frame.recordRef,
+    capability: entry.frame.capability,
+    body: entry.frame.body,
+    ack: entry.frame.ack,
+  });
+  if (previousFrameId && outboundSwarmFrames.get(previousFrameId) === entry) {
+    outboundSwarmFrames.delete(previousFrameId);
+  }
+  entry.previousFrameId = previousFrameId;
+  entry.frameId = refreshedFrame.frameId;
+  entry.frame = refreshedFrame;
+  outboundSwarmFrames.set(refreshedFrame.frameId, entry);
+  recordRuntimeEvent('frame.retry.prepared', {
+    frameId: refreshedFrame.frameId,
+    previousFrameId,
+    correlationId: refreshedFrame.correlationId || '',
+    channelId: refreshedFrame.channelId || '',
+    capability: refreshedFrame.capability || '',
+    reason: String(reason || 'retry').trim(),
+  });
+  return refreshedFrame;
+}
+
+function markQueuedSwarmFrameExpired(entry, observedAt = nowMs()) {
+  if (!entry || queuedSwarmFrameTerminal(entry)) return false;
+  const expiresAt = queuedSwarmFrameExpiresAt(entry);
+  if (!expiresAt || expiresAt > observedAt) return false;
+  entry.status = 'expired';
+  clearServiceAdmissionTimeout(entry);
+  entry.retrySuppressed = true;
+  entry.routeObservedAt = observedAt;
+  entry.lastError = {
+    code: 'activation.expired',
+    message: 'activation attempt expired before terminal delivery',
+    retryable: false,
+  };
+  return true;
+}
+
+function shouldSendQueuedSwarmEntry(entry) {
+  markQueuedSwarmFrameExpired(entry);
+  if (queuedSwarmFrameTerminal(entry)) return false;
+  const status = String(entry?.status || '').trim();
+  return status === 'queued' || status === 'retrying';
+}
+
+function routeObservationNeedsZoneBaseline(observation) {
+  const state = String(observation?.state || '').trim();
+  if (state !== 'observingUnreachable' && state !== 'unreachableFor') return false;
+  const failedPredicates = normalizeArray(observation?.failedPredicates || observation?.failed_predicates)
+    .map((entry) => String(entry || '').trim());
+  return failedPredicates.some((predicate) => predicate === 'zeroPropagation' || predicate === 'noMemberInZone');
+}
+
+function queueRouteRepairsFromZoneBaseline(reason = 'zone-baseline') {
+  let repaired = 0;
+  for (const entry of Array.from(outboundSwarmFrames.values())) {
+    markQueuedSwarmFrameExpired(entry);
+    if (queuedSwarmFrameTerminal(entry)) continue;
+    if (!routeObservationNeedsZoneBaseline(entry?.routeObservation)) continue;
+    const policy = normalizeSwarmRetryPolicy(entry.retryPolicy);
+    const attempts = Number(entry.attempts || 0);
+    if (attempts >= policy.maxAttempts) continue;
+    entry.status = 'retrying';
+    entry.retrySuppressed = false;
+    entry.retryReason = reason;
+    entry.queuedAt = nowMs();
+    const routingBaseline = directoryRoutingBaseline({
+      zoneScope: entry.frame?.zoneScope,
+      channelId: entry.frame?.channelId,
+      capability: entry.frame?.capability,
+      servicePk: entry.frame?.audience?.servicePk,
+      service: entry.frame?.audience?.service,
+      serviceRef: entry.frame?.audience?.serviceRef,
+    });
+    if (routingBaseline?.state) {
+      entry.routingScope = {
+        ...(entry.routingScope && typeof entry.routingScope === 'object' ? safeClone(entry.routingScope) : {
+          kind: SWARM.ROUTING_SCOPE_KIND.SWARM_ZONE,
+          required: true,
+          zoneScope: safeClone(entry.frame?.zoneScope || null),
+        }),
+        ...safeClone(routingBaseline),
+      };
+      if (entry.authoritySummary && typeof entry.authoritySummary === 'object') {
+        entry.authoritySummary.routingScope = safeClone(entry.routingScope);
+      }
+    }
+    const refreshed = refreshQueuedSwarmFrameForRetry(entry, reason);
+    if (!refreshed) continue;
+    repaired += 1;
+    recordRuntimeEvent('route.repair.queued', {
+      frameId: entry.frameId,
+      previousFrameId: entry.previousFrameId || '',
+      correlationId: entry.frame?.correlationId || '',
+      activationId: entry.activationId || '',
+      routePromiseId: entry.routePromiseId || '',
+      reason,
+      attempt: attempts + 1,
+      routingScope: entry.routingScope ? safeClone(entry.routingScope) : null,
+    });
+  }
+  if (repaired > 0) {
+    touchRuntime();
+    schedulePersist();
+    sendQueuedSwarmFrames();
+    broadcastSnapshot();
+  }
+  return repaired;
+}
+
+function sendQueuedSwarmFrames() {
+  if (!swarmEdge.connected) return;
+  for (const entry of outboundSwarmFrames.values()) {
+    if (!shouldSendQueuedSwarmEntry(entry)) continue;
+    if (!sendEdgeFrame(entry)) continue;
+    const now = nowMs();
+    entry.status = 'sent';
+    entry.sentAt = now;
+    entry.attempts = Number(entry.attempts || 0) + 1;
+    swarmEdge.sentFrames.push({
+      frameId: entry.frame.frameId,
+      kind: entry.frame.kind,
+      correlationId: entry.frame.correlationId || '',
+      channelId: entry.frame.channelId || '',
+      frame: safeClone(entry.frame),
+      sentAt: now,
+      attempt: entry.attempts,
+    });
+    recordRuntimeEvent('frame.sent', {
+      frameId: entry.frame.frameId,
+      kind: entry.frame.kind,
+      correlationId: entry.frame.correlationId || '',
+      channelId: entry.frame.channelId || '',
+      capability: entry.frame.capability || '',
+      attempt: entry.attempts,
+    });
+  }
+  touchRuntime();
+  schedulePersist();
+  broadcast({ type: 'swarm.edge.sent', frames: swarmEdge.sentFrames.map((entry) => safeClone(entry)) });
+  broadcastSnapshot();
+}
+
+function queueCorrelationIds(entry) {
+  const out = [];
+  for (const value of [
+    entry?.frameId,
+    entry?.activationId,
+    entry?.interactionId,
+    entry?.routePromiseId,
+    entry?.frame?.frameId,
+    entry?.frame?.correlationId,
+  ]) {
+    const id = String(value || '').trim();
+    if (id && !out.includes(id)) out.push(id);
+  }
+  return out;
+}
+
+function findQueuedFrameForRouteObservation(observation) {
+  const candidates = [
+    observation?.frameId,
+    observation?.ackedFrameId,
+    observation?.correlationId,
+    observation?.activationId,
+    observation?.routePromiseId,
+  ].map((value) => String(value || '').trim()).filter(Boolean);
+  if (candidates.length === 0) return null;
+  for (const candidate of candidates) {
+    const direct = findQueuedFrame(candidate);
+    if (direct) return direct;
+  }
+  for (const entry of outboundSwarmFrames.values()) {
+    const ids = queueCorrelationIds(entry);
+    if (candidates.some((candidate) => ids.includes(candidate))) return entry;
+  }
+  return null;
+}
+
+function normalizeRouteObservation(value = {}) {
+  const source = value && typeof value === 'object' ? value : {};
+  const state = String(source.state || source.status || '').trim() || 'observed';
+  const failedPredicates = normalizeArray(source.failedPredicates || source.failed_predicates || source.predicates)
+    .map((entry) => String(entry || '').trim())
+    .filter(Boolean);
+  const candidateMembers = normalizeArray(source.candidateMembers || source.candidate_members || source.candidates)
+    .filter((entry) => entry && typeof entry === 'object')
+    .map((entry) => safeClone(entry));
+  const deliveredTo = uniqueTrimmedStrings(source.deliveredTo || source.delivered_to || []);
+  return {
+    observationId: String(source.observationId || source.observation_id || '').trim() || randomOpaqueId('route-observation'),
+    state,
+    frameId: String(source.frameId || source.frame_id || source.ackedFrameId || source.acked_frame_id || '').trim(),
+    correlationId: String(source.correlationId || source.correlation_id || '').trim(),
+    routePromiseId: String(source.routePromiseId || source.route_promise_id || '').trim(),
+    activationId: String(source.activationId || source.activation_id || '').trim(),
+    deliveredTo,
+    failedPredicates,
+    candidateMembers,
+    message: String(source.message || source.reason || source.detail || '').trim(),
+    retryable: source.retryable === true,
+    observedAt: Number(source.observedAt || source.observed_at || 0) || nowMs(),
+    raw: safeClone(source),
+  };
+}
+
+function recordRouteObservation(value) {
+  const observation = normalizeRouteObservation(value);
+  const entry = findQueuedFrameForRouteObservation(observation);
+  let ignoredReason = '';
+  if (entry) {
+    const state = observation.state;
+    if (state === 'expired') {
+      entry.routeObservation = safeClone(observation);
+      entry.routeObservedAt = observation.observedAt;
+      entry.status = 'expired';
+      clearServiceAdmissionTimeout(entry);
+      entry.retrySuppressed = true;
+      entry.lastError = {
+        code: 'activation.expired',
+        message: observation.message || 'activation attempt expired before terminal delivery',
+        retryable: false,
+      };
+    } else if (markQueuedSwarmFrameExpired(entry, observation.observedAt) || queuedSwarmFrameTerminal(entry)) {
+      ignoredReason = 'terminalActivation';
+    } else {
+      entry.routeObservation = safeClone(observation);
+      entry.routeObservedAt = observation.observedAt;
+      if (routeObservationReachedMember(state)) {
+        entry.status = state;
+        scheduleServiceAdmissionTimeout(entry);
+      } else if (state === 'accepted') {
+        if (!routeObservationReachedMember(entry.status)) {
+          entry.status = 'routeAccepted';
+        }
+      }
+      else if (state === 'closed' || state === 'released') {
+        clearServiceAdmissionTimeout(entry);
+        entry.status = state;
+      }
+      else if (state === 'rejected') {
+        clearServiceAdmissionTimeout(entry);
+        entry.status = observation.retryable ? 'rejected' : 'failed';
+        entry.lastError = {
+          code: 'route.rejected',
+          message: observation.message || 'route rejected',
+          retryable: observation.retryable,
+        };
+      } else if (state === 'observingUnreachable' || state === 'unreachableFor') {
+        entry.status = state;
+        entry.lastError = {
+          code: 'route.unreachable',
+          message: observation.message || observation.failedPredicates.join(', ') || 'route currently unreachable',
+          retryable: true,
+        };
+      } else if (state === 'degraded') {
+        entry.status = 'degraded';
+      }
+    }
+  }
+  swarmEdge.routeObservations.push(observation);
+  if (swarmEdge.routeObservations.length > 100) {
+    swarmEdge.routeObservations.splice(0, swarmEdge.routeObservations.length - 100);
+  }
+  touchRuntime();
+  recordRuntimeEvent(ignoredReason ? 'route.observation.ignored' : 'route.observation', {
+    frameId: observation.frameId,
+    correlationId: observation.correlationId,
+    activationId: String(entry?.activationId || observation.activationId || '').trim(),
+    routePromiseId: String(entry?.routePromiseId || observation.routePromiseId || '').trim(),
+    interactionId: String(entry?.interactionId || '').trim(),
+    state: observation.state,
+    ignoredReason,
+    currentStatus: String(entry?.status || '').trim(),
+    failedPredicates: observation.failedPredicates,
+    deliveredTo: observation.deliveredTo,
+    deliveredCount: observation.deliveredTo.length,
+    candidateMembers: observation.candidateMembers,
+    candidateCount: observation.candidateMembers.length,
+    routeDelivery: entry ? routeDeliveryPosture(entry) : null,
+    authoritySummary: entry?.authoritySummary ? safeClone(entry.authoritySummary) : null,
+    message: observation.message,
+  });
+  schedulePersist();
+  broadcast({ type: 'swarm.edge.routeObservation', observation: safeClone(observation) });
+  broadcastSnapshot();
+  return observation;
+}
+
+function routeObservationFromOpenedFrame(frame) {
+  const payload = frame?.body?.payload && typeof frame.body.payload === 'object' ? frame.body.payload : {};
+  const recordRefKind = String(frame?.recordRef?.kind || frame?.record_ref?.kind || '').trim();
+  const recordKind = String(payload.recordKind || payload.record_kind || payload.kind || recordRefKind || '').trim();
+  if (payload.routeObservation && typeof payload.routeObservation === 'object') return payload.routeObservation;
+  if (payload.route_observation && typeof payload.route_observation === 'object') return payload.route_observation;
+  if (recordKind === 'route.observation') {
+    if (payload.record && typeof payload.record === 'object') return payload.record;
+    return payload;
+  }
+  return null;
+}
+
+function streamLifecycleRecordFromOpenedFrame(frame) {
+  return streamSessionLifecycleRecordFromCarrier(frame);
+}
+
+function mediaTransportObservationFromOpenedFrame(frame) {
+  const payload = frame?.body?.payload && typeof frame.body.payload === 'object' ? frame.body.payload : {};
+  const recordRefKind = String(frame?.recordRef?.kind || frame?.record_ref?.kind || '').trim();
+  const recordKind = String(payload.recordKind || payload.record_kind || payload.kind || recordRefKind || '').trim();
+  if (recordKind !== SWARM.RECORD_KIND.MEDIA_TRANSPORT_OBSERVATION) return null;
+  const record = payload.record && typeof payload.record === 'object' ? payload.record : payload;
+  return assertMediaTransportObservation(record);
+}
+
+function contributionLifecycleFromOpenedFrame(frame) {
+  const payload = frame?.body?.payload && typeof frame.body.payload === 'object' ? frame.body.payload : {};
+  const recordRefKind = String(frame?.recordRef?.kind || frame?.record_ref?.kind || '').trim();
+  const recordKind = String(payload.recordKind || payload.record_kind || payload.kind || recordRefKind || '').trim();
+  if (recordKind !== SWARM.RECORD_KIND.CONTRIBUTION_LIFECYCLE) return null;
+  const record = payload.record && typeof payload.record === 'object' ? payload.record : payload;
+  return assertContributionLifecycle(record);
+}
+
+function findQueuedFrameForContributionLifecycle(record) {
+  const candidates = uniqueTrimmedStrings([
+    record?.parentRef,
+    record?.subjectRef,
+    record?.targetContributionRef,
+    ...normalizeArray(record?.witnessRefs),
+    ...normalizeArray(record?.evidenceRefs),
+  ]);
+  if (candidates.length === 0) return null;
+  for (const candidate of candidates) {
+    const direct = findQueuedFrame(candidate);
+    if (direct) return direct;
+  }
+  for (const entry of outboundSwarmFrames.values()) {
+    const ids = queueCorrelationIds(entry);
+    if (candidates.some((candidate) => ids.includes(candidate))) return entry;
+  }
+  return null;
+}
+
+function rememberContributionLifecycle(record) {
+  const contributionId = String(record?.contributionId || '').trim();
+  if (!contributionId) return;
+  const index = swarmEdge.contributionLifecycles.findIndex((entry) => String(entry?.contributionId || '').trim() === contributionId);
+  if (index >= 0) swarmEdge.contributionLifecycles.splice(index, 1);
+  swarmEdge.contributionLifecycles.push(safeClone(record));
+  while (swarmEdge.contributionLifecycles.length > CONTRIBUTION_LIFECYCLE_LIMIT) swarmEdge.contributionLifecycles.shift();
+}
+
+function reduceContributionLifecycleRecord(record, openedFrame = {}) {
+  rememberContributionLifecycle(record);
+  const observedAt = Number(record.observedAt || record.issuedAt || 0) || nowMs();
+  const entry = findQueuedFrameForContributionLifecycle(record);
+  if (entry) {
+    entry.contributionLifecycle = safeClone(record);
+    if (
+      record.contributionType === SWARM.CONTRIBUTION_TYPE.WITNESS
+      || record.state === SWARM.CONTRIBUTION_STATE.WITNESSED
+    ) {
+      entry.contributionWitnessedAt = observedAt;
+    }
+  }
+  recordRuntimeEvent('contribution.lifecycle.applied', {
+    frameId: String(openedFrame?.frameId || '').trim(),
+    correlationId: String(openedFrame?.correlationId || '').trim(),
+    contributionId: String(record.contributionId || '').trim(),
+    contributionType: String(record.contributionType || '').trim(),
+    state: String(record.state || SWARM.CONTRIBUTION_STATE.ACTIVE).trim(),
+    parentRef: String(record.parentRef || '').trim(),
+    subjectRef: String(record.subjectRef || '').trim(),
+    targetContributionRef: String(record.targetContributionRef || '').trim(),
+    writerRef: String(record.writerRef || '').trim(),
+    role: String(record.role || '').trim(),
+    activationId: String(entry?.activationId || '').trim(),
+    routePromiseId: String(entry?.routePromiseId || '').trim(),
+    witnessed: Boolean(entry?.contributionWitnessedAt),
+  });
+  touchRuntime();
+  schedulePersist();
+  broadcastSnapshot();
+  return record;
+}
+
+function handleContributionLifecycleFrame(openedFrame) {
+  const record = contributionLifecycleFromOpenedFrame(openedFrame);
+  if (!record) return false;
+  reduceContributionLifecycleRecord(record, openedFrame);
+  return true;
+}
+
+function mediaFulfillmentStateForTransportObservation(record) {
+  const state = String(record?.state || '').trim();
+  if (state === SWARM.MEDIA_TRANSPORT_OBSERVATION_STATE.CONNECTED) return SWARM.MEDIA_FULFILLMENT_STATE.USABLE;
+  if (
+    state === SWARM.MEDIA_TRANSPORT_OBSERVATION_STATE.FAILED
+    || state === SWARM.MEDIA_TRANSPORT_OBSERVATION_STATE.BLOCKED
+  ) {
+    return SWARM.MEDIA_FULFILLMENT_STATE.BLOCKED;
+  }
+  if (
+    state === SWARM.MEDIA_TRANSPORT_OBSERVATION_STATE.CLOSED
+    || state === SWARM.MEDIA_TRANSPORT_OBSERVATION_STATE.RELEASED
+  ) {
+    return SWARM.MEDIA_FULFILLMENT_STATE.RELEASED;
+  }
+  return SWARM.MEDIA_FULFILLMENT_STATE.PENDING;
+}
+
+function blockedReasonForTransportObservation(record) {
+  const state = String(record?.state || '').trim();
+  if (
+    state !== SWARM.MEDIA_TRANSPORT_OBSERVATION_STATE.FAILED
+    && state !== SWARM.MEDIA_TRANSPORT_OBSERVATION_STATE.BLOCKED
+  ) {
+    return '';
+  }
+  return String(record?.blockedReason || record?.reason || record?.connectionState || 'mediaTransportBlocked').trim();
+}
+
+function fulfillmentEvidenceFromTransportObservation(record, openedFrame) {
+  const fulfillmentState = mediaFulfillmentStateForTransportObservation(record);
+  const safeFacts = {
+    observationId: String(record.observationId || '').trim(),
+    participantRole: String(record.participantRole || '').trim(),
+    observationState: String(record.state || '').trim(),
+    connectionState: String(record.connectionState || '').trim(),
+    reason: String(record.reason || '').trim(),
+  };
+  const evidence = {
+    kind: SWARM.RECORD_KIND.MEDIA_FULFILLMENT_EVIDENCE,
+    evidenceId: `media-observation:${String(record.observationId || openedFrame?.frameId || randomOpaqueId('media-observation')).trim()}`,
+    evidenceKind: SWARM.MEDIA_FULFILLMENT_EVIDENCE_KIND.TRANSPORT_STATE,
+    state: fulfillmentState,
+    sessionId: String(record.sessionId || '').trim(),
+    activationId: String(record.activationId || '').trim() || undefined,
+    correlationId: String(openedFrame?.correlationId || openedFrame?.frameId || '').trim() || undefined,
+    routePromiseId: String(record.routePromiseId || '').trim() || undefined,
+    participantRef: String(record.participantRef || '').trim(),
+    adapterRef: String(record.participantRole || '').trim() === SWARM.MEDIA_TRANSPORT_PARTICIPANT_ROLE.BROWSER
+      ? String(record.participantRef || '').trim()
+      : undefined,
+    serviceRef: String(record.participantRole || '').trim() === SWARM.MEDIA_TRANSPORT_PARTICIPANT_ROLE.SERVICE
+      ? String(record.participantRef || '').trim()
+      : undefined,
+    safeFacts,
+    evidenceRefs: uniqueTrimmedStrings([record.observationId, record.pathId, openedFrame?.frameId]),
+    observedAt: Number(record.observedAt || 0) || nowMs(),
+    expiresAt: Number(record.expiresAt || 0) || undefined,
+    ...(blockedReasonForTransportObservation(record) ? { blockedReason: blockedReasonForTransportObservation(record) } : {}),
+  };
+  return assertMediaFulfillmentEvidence(evidence);
+}
+
+function reduceMediaTransportObservationRecord(observation, openedFrame = {}) {
+  const evidence = fulfillmentEvidenceFromTransportObservation(observation, openedFrame);
+  const posture = reduceMediaFulfillmentEvidence(evidence);
+  recordRuntimeEvent('media.transport.observation', {
+    level: posture.state === SWARM.MEDIA_FULFILLMENT_STATE.BLOCKED ? 'warn' : 'info',
+    frameId: String(openedFrame?.frameId || '').trim(),
+    correlationId: String(openedFrame?.correlationId || '').trim(),
+    sessionId: posture.sessionId,
+    activationId: posture.activationId,
+    routePromiseId: String(observation.routePromiseId || '').trim(),
+    participantRef: String(observation.participantRef || '').trim(),
+    participantRole: String(observation.participantRole || '').trim(),
+    observationState: String(observation.state || '').trim(),
+    fulfillmentState: posture.state,
+    visibleFrame: posture.visibleFrame,
+    trackLive: posture.trackLive,
+    transportUsable: posture.transportUsable,
+  });
+  touchRuntime();
+  schedulePersist();
+  broadcastSnapshot();
+  return posture;
+}
+
+function handleMediaTransportObservationFrame(openedFrame) {
+  const observation = mediaTransportObservationFromOpenedFrame(openedFrame);
+  if (!observation) return false;
+  reduceMediaTransportObservationRecord(observation, openedFrame);
+  return true;
+}
+
+function findQueuedFrameForStreamLifecycle(frame, record) {
+  const constraints = record?.constraints && typeof record.constraints === 'object' ? record.constraints : {};
+  const recordRef = frame?.recordRef || frame?.record_ref || {};
+  const candidates = [
+    frame?.correlationId,
+    frame?.correlation_id,
+    frame?.frameId,
+    frame?.frame_id,
+    record?.activationId,
+    record?.activation_id,
+    record?.routePromiseId,
+    record?.route_promise_id,
+    constraints.routePromiseId,
+    constraints.route_promise_id,
+    record?.sessionId,
+    record?.session_id,
+    recordRef.id,
+  ].map((value) => String(value || '').trim()).filter(Boolean);
+  for (const candidate of candidates) {
+    const entry = findQueuedFrame(candidate);
+    if (entry) return entry;
+  }
+  for (const entry of outboundSwarmFrames.values()) {
+    const ids = queueCorrelationIds(entry);
+    if (candidates.some((candidate) => ids.includes(candidate))) return entry;
+  }
+  return null;
+}
+
+function handleStreamSessionLifecycleFrame(openedFrame) {
+  const lifecycle = streamLifecycleRecordFromOpenedFrame(openedFrame);
+  if (!lifecycle) return false;
+  const { recordKind, record } = lifecycle;
+  const phase = lifecycle.phase || streamSessionLifecyclePhase(recordKind);
+  const entry = findQueuedFrameForStreamLifecycle(openedFrame, record);
+  if (!entry) {
+    recordRuntimeEvent('stream.lifecycle.unbound', {
+      frameId: String(openedFrame?.frameId || '').trim(),
+      correlationId: String(openedFrame?.correlationId || '').trim(),
+      recordKind,
+      sessionId: String(record?.sessionId || record?.session_id || '').trim(),
+    });
+    return false;
+  }
+  if (queuedSwarmFrameTerminal(entry)) {
+    recordRuntimeEvent('stream.lifecycle.ignored', {
+      frameId: entry.frameId,
+      recordKind,
+      ignoredReason: 'terminalActivation',
+      currentStatus: String(entry.status || '').trim(),
+    });
+    return true;
+  }
+  const observedAt = nowMs();
+  if (phase === STREAM_SESSION_LIFECYCLE_PHASE.ADMISSION) {
+    clearServiceAdmissionTimeout(entry);
+    entry.status = 'serviceAccepted';
+    entry.serviceAccepted = true;
+    entry.serviceAcceptedAt = observedAt;
+    entry.serviceAdmission = safeClone(record);
+    entry.lastError = undefined;
+    recordRuntimeEvent('service.accepted', {
+      frameId: entry.frameId,
+      correlationId: String(openedFrame?.correlationId || '').trim(),
+      activationId: String(entry.activationId || '').trim(),
+      routePromiseId: String(entry.routePromiseId || record?.constraints?.routePromiseId || '').trim(),
+      sessionId: String(record?.sessionId || '').trim(),
+      admittedBy: String(record?.admittedBy || '').trim(),
+    });
+  } else if (phase === STREAM_SESSION_LIFECYCLE_PHASE.REJECT) {
+    clearServiceAdmissionTimeout(entry);
+    entry.status = 'serviceRejected';
+    entry.serviceRejected = true;
+    entry.rejectedAt = observedAt;
+    entry.serviceReject = safeClone(record);
+    entry.lastError = {
+      reason: String(record?.reasonCode || record?.reason || 'serviceRejected').trim(),
+      recordKind,
+    };
+    recordRuntimeEvent('service.rejected', {
+      frameId: entry.frameId,
+      correlationId: String(openedFrame?.correlationId || '').trim(),
+      activationId: String(entry.activationId || '').trim(),
+      routePromiseId: String(entry.routePromiseId || record?.constraints?.routePromiseId || '').trim(),
+      sessionId: String(record?.sessionId || '').trim(),
+      rejectedBy: String(record?.rejectedBy || '').trim(),
+      reasonCode: String(record?.reasonCode || record?.reason || 'serviceRejected').trim(),
+    });
+  } else if (phase === STREAM_SESSION_LIFECYCLE_PHASE.ANSWER) {
+    clearServiceAdmissionTimeout(entry);
+    entry.serviceAccepted = true;
+    if (!entry.serviceAcceptedAt) entry.serviceAcceptedAt = observedAt;
+    entry.serviceAnswer = safeClone(record);
+    entry.serviceAnswerAt = observedAt;
+    if (entry.status !== 'serviceAccepted') entry.status = 'serviceAccepted';
+    recordRuntimeEvent('service.response.materialized', {
+      frameId: entry.frameId,
+      correlationId: String(openedFrame?.correlationId || '').trim(),
+      activationId: String(entry.activationId || '').trim(),
+      routePromiseId: String(entry.routePromiseId || '').trim(),
+      recordKind,
+      sessionId: String(record?.sessionId || '').trim(),
+    });
+  }
+  touchRuntime();
+  schedulePersist();
+  broadcastSnapshot();
+  return true;
+}
+
+function projectionSnapshotFromOpenedFrame(frame) {
+  const payload = frame?.body?.payload && typeof frame.body.payload === 'object' ? frame.body.payload : {};
+  const direct = payload.snapshot && typeof payload.snapshot === 'object' ? payload.snapshot : null;
+  if (direct && String(direct.projectionId || '').trim()) return direct;
+  if (frame?.kind === SWARM.FRAME_KIND.PROJECTION_SNAPSHOT && payload && String(payload.projectionId || '').trim()) return payload;
+  return null;
+}
+
+function projectionDeltaFromOpenedFrame(frame) {
+  const payload = frame?.body?.payload && typeof frame.body.payload === 'object' ? frame.body.payload : {};
+  const direct = payload.delta && typeof payload.delta === 'object' ? payload.delta : null;
+  if (direct && String(direct.projectionId || '').trim()) return direct;
+  if (frame?.kind === SWARM.FRAME_KIND.PROJECTION_DELTA && payload && String(payload.projectionId || '').trim()) return payload;
+  return null;
+}
+
+function runtimeProjectionResponseFromOpenedFrame(frame) {
+  const payload = frame?.body?.payload && typeof frame.body.payload === 'object' ? frame.body.payload : {};
+  if (!payload || typeof payload !== 'object') return null;
+  const result = payload.result && typeof payload.result === 'object' ? payload.result : null;
+  const projection = result?.projection || payload.projection || null;
+  if (!projection || typeof projection !== 'object') return null;
+  return {
+    requestId: String(payload.requestId || payload.request_id || frame.correlationId || frame.frameId || '').trim(),
+    ok: payload.ok !== false,
+    result: { projection },
+  };
+}
+
+function handleProjectionInboxFrame(openedFrame) {
+  const snapshot = projectionSnapshotFromOpenedFrame(openedFrame);
+  if (snapshot) {
+    try {
+      const result = handleProjectionSnapshotApply({ snapshot });
+      recordRuntimeEvent('projection.inbox.applied', {
+        frameId: openedFrame.frameId,
+        kind: 'snapshot',
+        projectionId: String(snapshot.projectionId || '').trim(),
+        policyId: String(snapshot.policyId || '').trim(),
+      });
+      scheduleDiagnosticLoggingFlush(10);
+      return { handled: true, result };
+    } catch (error) {
+      recordRuntimeEvent('projection.inbox.ignored', {
+        frameId: openedFrame.frameId,
+        kind: 'snapshot',
+        projectionId: String(snapshot.projectionId || '').trim(),
+        error: String(error?.message || error || 'invalid projection snapshot'),
+      });
+      return { handled: true, result: { ok: false, error: String(error?.message || error || 'invalid projection snapshot') } };
+    }
+  }
+  const delta = projectionDeltaFromOpenedFrame(openedFrame);
+  if (delta) {
+    try {
+      const result = handleProjectionDeltaApply({ delta });
+      recordRuntimeEvent('projection.inbox.applied', {
+        frameId: openedFrame.frameId,
+        kind: 'delta',
+        projectionId: String(delta.projectionId || '').trim(),
+        policyId: String(delta.policyId || '').trim(),
+      });
+      scheduleDiagnosticLoggingFlush(10);
+      return { handled: true, result };
+    } catch (error) {
+      recordRuntimeEvent('projection.inbox.ignored', {
+        frameId: openedFrame.frameId,
+        kind: 'delta',
+        projectionId: String(delta.projectionId || '').trim(),
+        error: String(error?.message || error || 'invalid projection delta'),
+      });
+      return { handled: true, result: { ok: false, error: String(error?.message || error || 'invalid projection delta') } };
+    }
+  }
+  const response = runtimeProjectionResponseFromOpenedFrame(openedFrame);
+  if (response) {
+    const result = handleRuntimeProjectionSyncResponse(response);
+    recordRuntimeEvent('projection.inbox.response', {
+      frameId: openedFrame.frameId,
+      requestId: response.requestId,
+      handled: Boolean(result),
+      ok: result?.ok !== false,
+    });
+    return { handled: true, result: result || { ok: false, error: 'projection response had no pending observer' } };
+  }
+  return { handled: false };
+}
+
+function isPlaceholderRuntimeMemberRef(value) {
+  const text = String(value || '').trim();
+  return !text || text === 'browser-runtime' || text === 'account-runtime';
+}
+
+function resolvedRuntimeAuthorityMemberRef() {
+  return resolvedMemberPkFromCandidates(
+    runtimeAuthorityPostureState?.devicePk,
+    runtimeAuthorityDevice?.nostr?.pk,
+    runtimeAuthorityDevice?.pk,
+    runtimeAuthorityDevice?.devicePk,
+  );
+}
+
+function resolvedEdgeMemberRefFromMessage(source) {
+  const memberRef = String(source?.memberRef || '').trim();
+  if (!memberRef) {
+    const authorityRef = resolvedRuntimeAuthorityMemberRef();
+    if (authorityRef) return authorityRef;
+  }
+  const resolved = resolvedMemberPkFromRef(memberRef);
+  if (!resolved || isPlaceholderRuntimeMemberRef(memberRef)) {
+    throw new Error('resolved swarm edge memberRef is required');
+  }
+  return resolved;
+}
+
+async function edgeHelloFromMessage(message) {
+  const source = message?.payload && typeof message.payload === 'object' ? message.payload : message;
+  const memberRef = resolvedEdgeMemberRefFromMessage(source);
+  const zoneScope = appIntentZoneScope(source);
+  const lastProjectionRevisions = {};
+  for (const [projectionId, projection] of retainedProjections.entries()) {
+    lastProjectionRevisions[projectionId] = Number(projection?.revision || 0);
+  }
+  return {
+    memberKind: 'browser-runtime',
+    memberRef,
+    zoneScope,
+    supportedVersions: [SWARM.FRAME_VERSION],
+    lastAckedFrameId: String(source.lastAckedFrameId || '').trim() || undefined,
+    lastProjectionRevisions,
+    capabilityRefs: uniqueTrimmedStrings([
+      ...RUNTIME_SWARM_RECEIVE_CAPABILITY_REFS,
+      ...normalizeArray(source.capabilityRefs),
+    ]),
+    channelRefs: uniqueTrimmedStrings([
+      ...RUNTIME_SWARM_RECEIVE_CHANNEL_REFS,
+      ...normalizeArray(source.channelRefs),
+    ]),
+    promiseRefs: uniqueTrimmedStrings(normalizeArray(source.promiseRefs)),
+    nonce: String(source.nonce || '').trim() || randomOpaqueId('edge-nonce'),
+    issuedAt: Number(source.issuedAt || 0) || nowMs(),
+    sealedClaims: source.sealedClaims && typeof source.sealedClaims === 'object'
+      ? safeClone(source.sealedClaims)
+      : {
+          encoding: SWARM.BODY_ENCODING.CAAC,
+          envelope: {
+            envelopeId: randomOpaqueId('caac-edge'),
+            memberRef,
+          },
+        },
+  };
+}
+
+function runtimeReplayCache() {
+  return {
+    has(id) {
+      return inboundEnvelopeReplayIds.has(String(id || ''));
+    },
+    add(id) {
+      inboundEnvelopeReplayIds.add(String(id || ''));
+    },
+  };
+}
+
+async function openRuntimeFrameBody(frame) {
+  if (frame?.body?.encoding !== SWARM.BODY_ENCODING.CAAC || !frame?.body?.envelope) {
+    return frame;
+  }
+  const authority = await runtimeDeviceAuthority();
+  const opened = openEnvelope(frame.body.envelope, authority.secretKey, {
+    now: nowMs(),
+    replayCache: runtimeReplayCache(),
+  });
+  return {
+    ...frame,
+    body: {
+      ...frame.body,
+      envelope: {
+        envelopeId: String(frame.body.envelope.envelopeId || '').trim(),
+        kind: String(frame.body.envelope.kind || '').trim(),
+        issuerPk: String(frame.body.envelope.issuerPk || '').trim(),
+        opened: true,
+      },
+      payload: opened,
+    },
+  };
+}
+
+async function handleEdgeWireFrame(frame, wireMessage = {}) {
+  if (!frame || typeof frame !== 'object') return;
+  if (frame.kind === SWARM.FRAME_KIND.ACK) {
+    for (const observation of normalizeArray(wireMessage.routeObservations || wireMessage.route_observations)) {
+      if (observation && typeof observation === 'object') recordRouteObservation(observation);
+    }
+    handleSwarmEdgeAck({
+      frame,
+      correlationId: frame.correlationId || frame?.ack?.ackedFrameId || '',
+      propagation: wireMessage.propagation,
+      bridge: wireMessage.bridge,
+    });
+    return;
+  }
+  if (frame.kind === SWARM.FRAME_KIND.REJECT) {
+    for (const observation of normalizeArray(wireMessage.routeObservations || wireMessage.route_observations)) {
+      if (observation && typeof observation === 'object') recordRouteObservation(observation);
+    }
+    handleSwarmEdgeReject({
+      frame,
+      correlationId: frame.correlationId || frame?.ack?.ackedFrameId || '',
+      bridge: wireMessage.bridge,
+      routeObservations: wireMessage.routeObservations || wireMessage.route_observations,
+    });
+    return;
+  }
+  const unsealedPayload = frame?.body?.payload || null;
+  if (
+    unsealedPayload
+    && String(frame?.recordRef?.kind || frame?.record_ref?.kind || '').trim() === 'route.observation'
+  ) {
+    const routeObservation = routeObservationFromOpenedFrame(frame);
+    if (routeObservation) {
+      recordRouteObservation(routeObservation);
+      return;
+    }
+  }
+  let openedFrame = frame;
+  try {
+    openedFrame = await openRuntimeFrameBody(frame);
+  } catch (error) {
+    broadcast({
+      type: 'swarm.edge.reject',
+      rejection: {
+        correlationId: String(frame?.correlationId || frame?.frameId || '').trim(),
+        error: {
+          code: 'caacOpenFailed',
+          message: String(error?.message || error || 'failed to open CAAC frame'),
+          retryable: false,
+        },
+      },
+    });
+    return;
+  }
+  const payload = openedFrame?.body?.payload || openedFrame?.body?.envelope?.payload || null;
+  const routeObservation = routeObservationFromOpenedFrame(openedFrame);
+  if (routeObservation) {
+    recordRouteObservation(routeObservation);
+    return;
+  }
+  if (handleContributionLifecycleFrame(openedFrame)) {
+    return;
+  }
+  handleStreamSessionLifecycleFrame(openedFrame);
+  if (handleMediaTransportObservationFrame(openedFrame)) {
+    return;
+  }
+  const projectionInbox = handleProjectionInboxFrame(openedFrame);
+  if (projectionInbox.handled) {
+    return;
+  }
+  broadcast({ type: 'swarm.edge.frame', frame: safeClone(openedFrame) });
+}
+
+async function handleEdgeWireMessage(raw) {
+  let message = raw;
+  if (typeof raw === 'string') {
+    try {
+      message = JSON.parse(raw);
+    } catch {
+      return;
+    }
+  }
+  const type = String(message?.type || '').trim();
+  if (type === 'swarm.edge.accept') {
+    swarmEdge.sessionId = String(message?.accept?.sessionId || message?.sessionId || '').trim();
+    swarmEdge.connected = true;
+    clearRuntimeControlPlaneBusy();
+    const acceptedZoneScope = normalizeServiceZoneScope(message?.accept?.zoneScope || message?.accept?.zone_scope || message?.zoneScope || message?.zone_scope);
+    if (acceptedZoneScope) swarmEdge.zoneScope = acceptedZoneScope;
+    recordRuntimeEvent('adapter.edge.accepted', {
+      sessionId: swarmEdge.sessionId,
+      zoneScope: swarmEdge.zoneScope,
+    });
+    touchRuntime();
+    broadcast({ type: 'swarm.edge.accept', edge: edgeSnapshot() });
+    sendQueuedSwarmFrames();
+    requestRuntimeDirectoryObserve('edge.accept');
+    void flushPendingRouteIntents('edge.accept');
+    scheduleDiagnosticLoggingFlush(10);
+    broadcastSnapshot();
+    return;
+  }
+  if (type === 'swarm.frame') {
+    await handleEdgeWireFrame(message.frame, message);
+    return;
+  }
+  if (type === 'swarm.edge.reject') {
+    const handled = handleSwarmEdgeReject(message);
+    if (!handled?.ok) {
+      const rejection = {
+        frameId: String(message.frameId || '').trim(),
+        correlationId: String(message.correlationId || '').trim(),
+        error: structuredRejectError(message),
+        preserved: false,
+        rejectedAt: nowMs(),
+      };
+      swarmEdge.rejections.push(rejection);
+      recordRuntimeEvent('frame.reject', {
+        frameId: rejection.frameId,
+        correlationId: rejection.correlationId,
+        error: rejection.error,
+        preserved: false,
+      });
+      touchRuntime();
+      schedulePersist();
+      broadcast({ type: 'swarm.edge.reject', rejection: safeClone(rejection) });
+      broadcastSnapshot();
+    }
+    return;
+  }
+  if (type === 'swarm.edge.close') {
+    swarmEdge.connected = false;
+    swarmEdge.sessionId = '';
+    recordRuntimeEvent('adapter.edge.closed', {
+      reasonCode: String(message?.reasonCode || '').trim(),
+    });
+    touchRuntime();
+    broadcast({ type: 'swarm.edge.close', reasonCode: String(message?.reasonCode || '').trim() });
+    broadcastSnapshot();
+  }
+}
+
+function closeSwarmEdgeSocket() {
+  const socket = swarmEdge.socket;
+  swarmEdge.socket = null;
+  if (socket) {
+    try {
+      socket.onopen = null;
+      socket.onmessage = null;
+      socket.onerror = null;
+      socket.onclose = null;
+      socket.close?.();
+    } catch {}
+  }
+}
+
+function sameEdgeZoneScope(left, right) {
+  return String(left?.zoneId || '').trim() === String(right?.zoneId || '').trim()
+    && String(left?.privacy || '').trim() === String(right?.privacy || '').trim()
+    && Number(left?.ttl || 0) === Number(right?.ttl || 0)
+    && Number(left?.maxHops || 0) === Number(right?.maxHops || 0);
+}
+
+function edgeEndpointDiagnosticFacts(endpoint) {
+  try {
+    const parsed = new URL(String(endpoint || ''));
+    return {
+      endpointScheme: parsed.protocol.replace(/:$/, ''),
+      endpointHost: parsed.hostname,
+      endpointPort: parsed.port || (parsed.protocol === 'wss:' ? '443' : parsed.protocol === 'ws:' ? '80' : ''),
+    };
+  } catch {
+    return {};
+  }
+}
+
+async function attachLiveSwarmEdge(message) {
+  const source = message?.payload && typeof message.payload === 'object' ? message.payload : message;
+  const socketEndpoint = String(source.swarmEdgeEndpoint || source.edgeEndpoint || source.endpoint || '').trim();
+  if (!socketEndpoint) {
+    recordRuntimeEvent('adapter.edge.attach.failed', { error: { message: 'missing swarm edge endpoint' }, level: 'error' });
+    return { ok: false, error: 'missing swarm edge endpoint' };
+  }
+  if (typeof WebSocket !== 'function') {
+    recordRuntimeEvent('adapter.edge.attach.failed', { error: { message: 'WebSocket unavailable in runtime worker' }, level: 'error' });
+    return { ok: false, error: 'WebSocket unavailable in runtime worker' };
+  }
+  markRuntimeControlPlaneBusy(15_000);
+  let memberRef = '';
+  try {
+    memberRef = resolvedEdgeMemberRefFromMessage(source);
+  } catch (error) {
+    recordRuntimeEvent('adapter.edge.attach.failed', {
+      error: { message: String(error?.message || error || 'resolved swarm edge memberRef is required') },
+      level: 'error',
+    });
+    return { ok: false, error: String(error?.message || error || 'resolved swarm edge memberRef is required') };
+  }
+  const requestedZoneScope = appIntentZoneScope(source);
+  const attachTarget = `${socketEndpoint}|${memberRef}|${stableJson(requestedZoneScope)}`;
+  if (liveSwarmEdgeAttachInFlight && liveSwarmEdgeAttachInFlightTarget === attachTarget) {
+    return await liveSwarmEdgeAttachInFlight;
+  }
+  liveSwarmEdgeAttachInFlightTarget = attachTarget;
+  liveSwarmEdgeAttachInFlight = attachLiveSwarmEdgeResolved(source, {
+    socketEndpoint,
+    memberRef,
+    zoneScope: requestedZoneScope,
+  });
+  try {
+    return await liveSwarmEdgeAttachInFlight;
+  } finally {
+    if (liveSwarmEdgeAttachInFlightTarget === attachTarget) {
+      liveSwarmEdgeAttachInFlightTarget = '';
+      liveSwarmEdgeAttachInFlight = null;
+    }
+  }
+}
+
+async function attachLiveSwarmEdgeResolved(source, resolved) {
+  const socketEndpoint = resolved.socketEndpoint;
+  const hello = await edgeHelloFromMessage({
+    ...source,
+    memberRef: resolved.memberRef,
+    zoneScope: resolved.zoneScope,
+  });
+  const existingSocket = swarmEdge.socket;
+  if (
+    existingSocket
+    && (existingSocket.readyState === WebSocket.OPEN || existingSocket.readyState === WebSocket.CONNECTING)
+    && swarmEdge.endpoint === socketEndpoint
+    && swarmEdge.memberRef === hello.memberRef
+    && sameEdgeZoneScope(swarmEdge.zoneScope, hello.zoneScope)
+  ) {
+    return { ok: true, result: edgeSnapshot() };
+  }
+  closeSwarmEdgeSocket();
+  swarmEdge.mode = 'live';
+  swarmEdge.endpoint = socketEndpoint;
+  swarmEdge.connected = false;
+  swarmEdge.sessionId = '';
+  swarmEdge.memberRef = hello.memberRef;
+  swarmEdge.zoneScope = safeClone(hello.zoneScope);
+  const socket = new WebSocket(socketEndpoint);
+  swarmEdge.socket = socket;
+  socket.onopen = () => {
+    postLiveEdgeRecord({ type: 'swarm.edge.hello', hello });
+  };
+  socket.onmessage = (event) => {
+    void handleEdgeWireMessage(event?.data);
+  };
+  socket.onerror = () => {
+    swarmEdge.connected = false;
+    markRuntimeControlPlaneBusy(3000);
+    recordRuntimeEvent('adapter.edge.error', {
+      level: 'warn',
+      message: 'edge websocket unavailable',
+      ...edgeEndpointDiagnosticFacts(socketEndpoint),
+      memberRef: hello.memberRef,
+      zoneScope: swarmEdge.zoneScope,
+    });
+    broadcast({ type: 'swarm.edge.error', edge: edgeSnapshot() });
+    broadcastSnapshot();
+  };
+  socket.onclose = (event) => {
+    swarmEdge.connected = false;
+    markRuntimeControlPlaneBusy(3000);
+    swarmEdge.sessionId = '';
+    swarmEdge.zoneScope = null;
+    swarmEdge.memberRef = '';
+    if (swarmEdge.socket === socket) swarmEdge.socket = null;
+    recordRuntimeEvent('adapter.edge.closed', {
+      ...edgeEndpointDiagnosticFacts(socketEndpoint),
+      memberRef: hello.memberRef,
+      closeCode: Number(event?.code || 0) || 0,
+      closeReason: String(event?.reason || '').trim(),
+      wasClean: event?.wasClean === true,
+      zoneScope: hello.zoneScope,
+    });
+    broadcast({ type: 'swarm.edge.closed', edge: edgeSnapshot() });
+    broadcastSnapshot();
+  };
+  touchRuntime();
+  recordRuntimeEvent('adapter.edge.attach', {
+    ...edgeEndpointDiagnosticFacts(socketEndpoint),
+    zoneScope: hello.zoneScope,
+    memberRef: hello.memberRef,
+  });
+  broadcastSnapshot();
+  return { ok: true, result: edgeSnapshot() };
+}
+
+function queueSwarmFrame(message) {
+  const frame = swarmFrameFromMessage(message);
+  const existing = outboundSwarmFrames.get(frame.frameId);
+  const entry = existing || {
+    frameId: frame.frameId,
+    frame,
+    status: 'queued',
+    queuedAt: nowMs(),
+    attempts: 0,
+    retryPolicy: normalizeSwarmRetryPolicy(message.retryPolicy || message?.payload?.retryPolicy),
+  };
+  if (existing) {
+    entry.frame = frame;
+    entry.retryPolicy = normalizeSwarmRetryPolicy(message.retryPolicy || message?.payload?.retryPolicy || existing.retryPolicy);
+  }
+  if (message.activationId) entry.activationId = String(message.activationId || '').trim();
+  if (message.interactionId) entry.interactionId = String(message.interactionId || '').trim();
+  if (message.routePromiseId) entry.routePromiseId = String(message.routePromiseId || '').trim();
+  if (message.authoritySummary && typeof message.authoritySummary === 'object') {
+    entry.authoritySummary = safeClone(message.authoritySummary);
+  }
+  if (message.routingScope && typeof message.routingScope === 'object') {
+    entry.routingScope = safeClone(message.routingScope);
+  } else if (entry.authoritySummary?.routingScope && typeof entry.authoritySummary.routingScope === 'object') {
+    entry.routingScope = safeClone(entry.authoritySummary.routingScope);
+  }
+  if (message.interaction && typeof message.interaction === 'object') {
+    entry.interaction = safeClone(message.interaction);
+  }
+  if (message.swarmActivation && typeof message.swarmActivation === 'object') {
+    entry.swarmActivation = safeClone(message.swarmActivation);
+  }
+  outboundSwarmFrames.set(frame.frameId, entry);
+  recordRuntimeEvent('frame.queued', {
+    frameId: frame.frameId,
+    kind: frame.kind,
+    correlationId: frame.correlationId || '',
+    channelId: frame.channelId || '',
+    capability: frame.capability || '',
+  });
+  touchRuntime();
+  schedulePersist();
+  sendQueuedSwarmFrames();
+  broadcastSnapshot();
+  return { ok: true, result: safeClone(entry) };
+}
+
+function appIntentPayload(message) {
+  const source = message?.payload && typeof message.payload === 'object'
+    ? message.payload
+    : message?.intent && typeof message.intent === 'object'
+      ? message.intent
+      : {};
+  return safeClone(source);
+}
+
+function appIntentFrameKind(method, intent) {
+  const explicit = String(intent?.frameKind || intent?.kind || '').trim();
+  if (explicit && Object.values(SWARM.FRAME_KIND).includes(explicit)) return explicit;
+  switch (method) {
+    case RUNTIME_APP_INTENT.DIAGNOSTIC_LOG:
+      return SWARM.FRAME_KIND.RECORD_PUBLISH;
+    case RUNTIME_APP_INTENT.CHANNEL_RESOLVE:
+    case RUNTIME_APP_INTENT.PROJECTION_OBSERVE:
+      return SWARM.FRAME_KIND.CHANNEL_OBSERVE;
+    case RUNTIME_APP_INTENT.STREAM_OPEN:
+      return SWARM.FRAME_KIND.STREAM_INTENT;
+    case RUNTIME_APP_INTENT.STREAM_CONTROL:
+    case RUNTIME_APP_INTENT.STREAM_CLOSE:
+      return SWARM.FRAME_KIND.STREAM_CONTROL;
+    case RUNTIME_APP_INTENT.STORAGE_PIN:
+      return SWARM.FRAME_KIND.STORAGE_PIN_INTENT;
+    case RUNTIME_APP_INTENT.CAPABILITY_RESOLVE:
+    default:
+      return SWARM.FRAME_KIND.SERVICE_INTENT;
+  }
+}
+
+function appIntentCapability(method, intent) {
+  const explicit = String(intent?.capabilityRef || intent?.capability || '').trim();
+  if (explicit) return explicit;
+  switch (method) {
+    case RUNTIME_APP_INTENT.DIAGNOSTIC_LOG:
+      return 'logging.events.ingest';
+    case RUNTIME_APP_INTENT.PROJECTION_OBSERVE:
+      return SWARM.CORE_CAPABILITY.PROJECTION_OBSERVE;
+    case RUNTIME_APP_INTENT.STREAM_OPEN:
+      return SWARM.CORE_CAPABILITY.STREAM_SESSION_OFFER;
+    case RUNTIME_APP_INTENT.STREAM_CONTROL:
+    case RUNTIME_APP_INTENT.STREAM_CLOSE:
+      return SWARM.CORE_CAPABILITY.STREAM_SESSION_CONTROL;
+    case RUNTIME_APP_INTENT.STORAGE_PIN:
+      return SWARM.CORE_CAPABILITY.STORAGE_PIN;
+    case RUNTIME_APP_INTENT.CHANNEL_RESOLVE:
+    case RUNTIME_APP_INTENT.CAPABILITY_RESOLVE:
+    default:
+      return method;
+  }
+}
+
+function isRuntimeStreamIntent(method) {
+  return method === RUNTIME_APP_INTENT.STREAM_OPEN
+    || method === RUNTIME_APP_INTENT.STREAM_CONTROL
+    || method === RUNTIME_APP_INTENT.STREAM_CLOSE;
+}
+
+function streamServiceContractBaseline(method, intent, derived = null) {
+  if (!isRuntimeStreamIntent(method)) return null;
+  const service = String(
+    intent?.service
+      || derived?.service
+      || (isRuntimeStreamIntent(method) ? NVR_SERVICE_ID : '')
+      || '',
+  ).trim().toLowerCase();
+  if (service !== NVR_SERVICE_ID) return null;
+  const capability = String(intent?.capabilityRef || intent?.capability || appIntentCapability(method, intent)).trim();
+  const streamCapabilities = new Set([
+    SWARM.CORE_CAPABILITY.MEDIA_STREAM_PREVIEW,
+    SWARM.CORE_CAPABILITY.STREAM_SESSION_OFFER,
+    SWARM.CORE_CAPABILITY.STREAM_SESSION_CONTROL,
+  ]);
+  if (capability && !streamCapabilities.has(capability)) return null;
+  return {
+    service: NVR_SERVICE_ID,
+    nodeRef: NVR_STREAM_CHANNEL,
+    channelId: NVR_STREAM_CHANNEL,
+    capability: capability || SWARM.CORE_CAPABILITY.MEDIA_STREAM_PREVIEW,
+  };
+}
+
+function appIntentChannelId(method, intent) {
+  const explicit = String(intent?.channelId || intent?.channel || intent?.projectionId || '').trim();
+  if (explicit) return explicit;
+  const selectedNodeChannel = String(
+    intent?.selectedNode?.channelId
+      || intent?.selectedNode?.channel
+      || intent?.selectedNode?.backingChannel
+      || '',
+  ).trim();
+  if (selectedNodeChannel) return selectedNodeChannel;
+  const contractBaseline = streamServiceContractBaseline(method, intent);
+  if (contractBaseline?.channelId) return contractBaseline.channelId;
+  if (method === RUNTIME_APP_INTENT.DIAGNOSTIC_LOG) return 'logging.events';
+  if (method === RUNTIME_APP_INTENT.STORAGE_PIN) return 'storage.pin';
+  if (isRuntimeStreamIntent(method)) return '';
+  return method;
+}
+
+function streamIntentNodeChannel(method, intent) {
+  if (!isRuntimeStreamIntent(method)) return '';
+  const contractBaseline = streamServiceContractBaseline(method, intent);
+  if (contractBaseline?.channelId) return contractBaseline.channelId;
+  const nodeRef = String(intent?.nodeRef || intent?.nodeId || '').trim();
+  if (!nodeRef || nodeRef.includes('://')) return '';
+  if (/^[a-z][a-z0-9-]*(?:\.[a-z0-9][a-z0-9-]*)+$/i.test(nodeRef)) return nodeRef;
+  return '';
+}
+
+function positiveNumber(value, fallback) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : fallback;
+}
+
+function nonNegativeNumber(value, fallback) {
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? number : fallback;
+}
+
+function appIntentZoneScope(intent, options = {}) {
+  const requirePropagation = Boolean(options.requirePropagation);
+  const source = intent?.zoneScope && typeof intent.zoneScope === 'object' ? intent.zoneScope : {};
+  const fallback = swarmEdge.zoneScope && typeof swarmEdge.zoneScope === 'object' ? swarmEdge.zoneScope : {};
+  const sourceZoneId = String(source.zoneId || intent?.zoneId || '').trim();
+  const fallbackZoneId = String(fallback.zoneId || '').trim();
+  const sourceIsLocalOnly = sourceZoneId.startsWith('identity:') || sourceZoneId === 'runtime.local' || sourceZoneId === 'local';
+  const useFallback = sourceIsLocalOnly && fallbackZoneId;
+  const scope = useFallback ? fallback : source;
+  const ttl = scope.ttl || (!useFallback ? intent?.ttl : undefined) || fallback.ttl || (requirePropagation ? 30 : 1);
+  const maxHops = scope.maxHops ?? (!useFallback ? intent?.maxHops : undefined) ?? fallback.maxHops ?? (requirePropagation ? 2 : 0);
+  return {
+    zoneId: String(scope.zoneId || (useFallback ? '' : intent?.zoneId) || fallback.zoneId || 'local').trim() || 'local',
+    privacy: String(scope.privacy || fallback.privacy || '').trim() || undefined,
+    ttl: requirePropagation ? positiveNumber(ttl, 30) : positiveNumber(ttl, 1),
+    maxHops: requirePropagation ? positiveNumber(maxHops, 2) : nonNegativeNumber(maxHops, 0),
+  };
+}
+
+function zoneScopeLooksLocalOnly(zoneScope) {
+  const zoneId = String(zoneScope?.zoneId || '').trim();
+  return !zoneId || zoneId === 'local' || zoneId === 'runtime.local' || zoneId.startsWith('identity:');
+}
+
+function routeChannelMatches(candidate, targetChannel) {
+  const channelId = String(candidate?.channelId || candidate?.channel_id || '').trim();
+  const channelRefs = normalizeArray(candidate?.channelRefs || candidate?.channel_refs)
+    .map((entry) => String(entry || '').trim())
+    .filter(Boolean);
+  return !targetChannel || channelId === targetChannel || channelRefs.includes(targetChannel);
+}
+
+function routeCapabilityMatches(candidate, targetCapability) {
+  const capability = String(candidate?.capability || candidate?.capabilityRef || candidate?.capability_ref || '').trim();
+  const capabilityRefs = normalizeArray(candidate?.capabilityRefs || candidate?.capability_refs)
+    .map((entry) => String(entry || '').trim())
+    .filter(Boolean);
+  return !targetCapability || capability === targetCapability || capabilityRefs.includes(targetCapability);
+}
+
+function routeServiceMatches(candidate, { servicePk = '', service = '', serviceRef = '' } = {}) {
+  const targetServicePk = String(servicePk || '').trim();
+  const targetService = String(service || '').trim().toLowerCase();
+  const targetServiceRef = String(serviceRef || '').trim();
+  const candidateServiceRef = String(candidate?.serviceRef || candidate?.service_ref || '').trim();
+  const candidateServicePk = String(candidate?.servicePk || candidate?.service_pk || '').trim() || servicePkFromServiceRef(candidateServiceRef);
+  const candidateService = String(candidate?.service || candidate?.service_id || '').trim().toLowerCase();
+  const candidateChannel = String(candidate?.channelId || candidate?.channel_id || '').trim().toLowerCase();
+  const channelImpliesService = Boolean(targetService && candidateChannel && (
+    candidateChannel === targetService
+    || candidateChannel.startsWith(`${targetService}.`)
+  ));
+  const candidateHasServiceIdentity = Boolean(candidateServicePk || candidateServiceRef || candidateService);
+  if (targetServicePk && candidateHasServiceIdentity && candidateServicePk !== targetServicePk && !serviceRefMatches(candidateServiceRef, targetServicePk)) return false;
+  if (targetServicePk && !candidateHasServiceIdentity && !channelImpliesService) return false;
+  if (targetServiceRef && candidateHasServiceIdentity && candidateServiceRef && candidateServiceRef !== targetServiceRef && !serviceRefMatches(candidateServiceRef, targetServicePk)) return false;
+  if (targetService && candidateService && candidateService !== targetService && !candidateServiceRef.toLowerCase().includes(targetService) && !channelImpliesService) return false;
+  if (targetService && !candidateHasServiceIdentity && !channelImpliesService) return false;
+  return true;
+}
+
+function directoryRoutingBaseline({ zoneScope, channelId = '', capability = '', servicePk = '', service = '', serviceRef = '' } = {}) {
+  const zoneId = String(zoneScope?.zoneId || '').trim();
+  if (!zoneId || zoneScopeLooksLocalOnly(zoneScope)) return null;
+  const targetChannel = String(channelId || '').trim();
+  const targetCapability = String(capability || '').trim();
+  const targetServicePk = String(servicePk || '').trim();
+  const targetService = String(service || '').trim().toLowerCase();
+  const targetServiceRef = String(serviceRef || '').trim();
+  const candidateServiceScore = (candidate) => {
+    const candidateServiceRef = String(candidate?.serviceRef || candidate?.service_ref || '').trim();
+    const candidateServicePk = String(candidate?.servicePk || candidate?.service_pk || '').trim() || servicePkFromServiceRef(candidateServiceRef);
+    const candidateService = String(candidate?.service || candidate?.service_id || '').trim().toLowerCase();
+    let score = 0;
+    if (targetServicePk && (candidateServicePk === targetServicePk || serviceRefMatches(candidateServiceRef, targetServicePk))) score += 100;
+    if (targetServiceRef && candidateServiceRef && (candidateServiceRef === targetServiceRef || serviceRefMatches(candidateServiceRef, targetServicePk))) score += 80;
+    if (targetService && candidateService === targetService) score += 40;
+    if (candidateServicePk || candidateServiceRef || candidateService) score += 10;
+    return score;
+  };
+  let sawDirectory = false;
+  let sawZone = false;
+  let best = null;
+  for (const [projectionKey, projection] of retainedProjections.entries()) {
+    const projectionId = String(projection?.projectionId || '').trim();
+    if (projectionId && projectionId !== RUNTIME_DIRECTORY_OBSERVE_CHANNEL) continue;
+    const payload = projection?.payload && typeof projection.payload === 'object' ? projection.payload : {};
+    const directory = payload.directory && typeof payload.directory === 'object'
+      ? payload.directory
+      : payload.state?.directory && typeof payload.state.directory === 'object'
+        ? payload.state.directory
+        : null;
+    if (!directory) continue;
+    sawDirectory = true;
+    const updatedAt = Number(
+      projection?.freshness?.updatedAt
+        || projection?.updatedAt
+        || projection?.issuedAt
+        || projection?.revision
+        || 0,
+    ) || nowMs();
+    const baselineRef = `projection:${projectionId || RUNTIME_DIRECTORY_OBSERVE_CHANNEL}:${projectionKey}`;
+    const advertisements = normalizeArray(directory.advertisements);
+    const candidates = normalizeArray(directory.entries).map((entry) => {
+      const memberRef = resolvedMemberPkFromRef(entry?.memberRef || entry?.member_ref || '');
+      if (!memberRef) return null;
+      const advertisement = advertisements.find((ad) => {
+        if (!ad || typeof ad !== 'object') return false;
+        return resolvedMemberPkFromRef(ad.memberRef || ad.member_ref || '') === memberRef;
+      }) || null;
+      return { entry: { ...entry, memberRef }, advertisement };
+    }).filter(Boolean);
+    for (const { entry, advertisement } of candidates) {
+      const entryZoneScope = normalizeServiceZoneScope(entry?.zoneScope || entry?.zone_scope || advertisement?.zoneScope || advertisement?.zone_scope);
+      if (String(entryZoneScope?.zoneId || '').trim() !== zoneId) continue;
+      sawZone = true;
+      const candidate = { ...safeClone(advertisement || {}), ...safeClone(entry || {}) };
+      if (!routeChannelMatches(candidate, targetChannel)) continue;
+      if (!routeCapabilityMatches(candidate, targetCapability)) continue;
+      if (!routeServiceMatches(candidate, { servicePk: targetServicePk, service: targetService, serviceRef: targetServiceRef })) continue;
+      const selected = {
+        state: SWARM.ROUTING_SCOPE_STATE.READY,
+        source: 'swarm.directory',
+        baselineRef,
+        selectedMemberRef: String(entry?.memberRef || '').trim(),
+        serviceMemberRef: String(entry?.memberRef || '').trim(),
+        updatedAt,
+        score: candidateServiceScore(candidate),
+      };
+      if (!best || selected.score > best.score) best = selected;
+    }
+  }
+  if (best) {
+    const { score, ...baseline } = best;
+    return baseline;
+  }
+  if (!sawDirectory) return null;
+  return {
+    state: SWARM.ROUTING_SCOPE_STATE.SYNCING,
+    source: sawZone ? 'swarm.directory.partial' : 'swarm.directory.pendingZone',
+    baselineRef: `projection:${RUNTIME_DIRECTORY_OBSERVE_CHANNEL}`,
+    blockedReason: sawZone
+      ? SWARM.ROUTING_BLOCKED_REASON.NO_MEMBER_IN_ZONE
+      : SWARM.ROUTING_BLOCKED_REASON.MISSING_ZONE_BASELINE,
+    updatedAt: nowMs(),
+  };
+}
+
+function appIntentRoutingScopeRequired(method, intent) {
+  const explicitKind = String(intent?.routingScope?.kind || intent?.routingScopeKind || '').trim();
+  if (explicitKind === SWARM.ROUTING_SCOPE_KIND.LOCAL) return false;
+  if (explicitKind && explicitKind !== SWARM.ROUTING_SCOPE_KIND.LOCAL) return true;
+  return isRuntimeStreamIntent(method)
+    || method === RUNTIME_APP_INTENT.DIAGNOSTIC_LOG
+    || method === RUNTIME_APP_INTENT.PROJECTION_OBSERVE
+    || method === RUNTIME_APP_INTENT.STORAGE_PIN
+    || Boolean(appIntentChannelId(method, intent));
+}
+
+function runtimeStreamRequiresLiveEdge(method, channelId) {
+  return isRuntimeStreamIntent(method) && String(channelId || '').trim() === NVR_STREAM_CHANNEL;
+}
+
+function streamLiveEdgePosture() {
+  return {
+    edgeAccepted: swarmEdge.connected === true,
+    edgeMode: String(swarmEdge.mode || '').trim(),
+    edgeSessionId: String(swarmEdge.sessionId || '').trim(),
+    edgeEndpoint: String(swarmEdge.endpoint || '').trim(),
+    edgeMemberRef: String(swarmEdge.memberRef || '').trim(),
+  };
+}
+
+function applyStreamEdgeActionability(method, channelId, routingScope) {
+  const scope = routingScope && typeof routingScope === 'object' ? routingScope : {};
+  if (!runtimeStreamRequiresLiveEdge(method, channelId)) return scope;
+  const edge = streamLiveEdgePosture();
+  if (edge.edgeAccepted) {
+    return {
+      ...scope,
+      ...edge,
+    };
+  }
+  const baseState = String(scope.state || '').trim();
+  const blockedReason = SWARM.ROUTING_BLOCKED_REASON.EDGE_NOT_ACCEPTED || 'edgeNotAccepted';
+  if (
+    baseState === SWARM.ROUTING_SCOPE_STATE.READY
+    || baseState === SWARM.ROUTING_SCOPE_STATE.NOT_REQUIRED
+  ) {
+    return {
+      ...scope,
+      ...edge,
+      state: SWARM.ROUTING_SCOPE_STATE.SYNCING,
+      source: 'edgeSession.pending',
+      blockedReason,
+      updatedAt: nowMs(),
+    };
+  }
+  return {
+    ...scope,
+    ...edge,
+    edgeBlockedReason: blockedReason,
+  };
+}
+
+function appIntentRoutingScopePosture(method, intent, options = {}) {
+  const channelId = String(options.channelId || appIntentChannelId(method, intent)).trim();
+  if (intent?.routingScope && typeof intent.routingScope === 'object') {
+    return applyStreamEdgeActionability(method, channelId, safeClone(intent.routingScope));
+  }
+  const required = options.required ?? appIntentRoutingScopeRequired(method, intent);
+  const explicitKind = String(intent?.routingScopeKind || '').trim();
+  const kind = explicitKind || (required ? SWARM.ROUTING_SCOPE_KIND.SWARM_ZONE : SWARM.ROUTING_SCOPE_KIND.LOCAL);
+  if (!required) {
+    return {
+      kind,
+      required: false,
+      state: SWARM.ROUTING_SCOPE_STATE.NOT_REQUIRED,
+      source: 'runtime.local',
+      updatedAt: nowMs(),
+    };
+  }
+  if (kind !== SWARM.ROUTING_SCOPE_KIND.SWARM_ZONE) {
+    return {
+      kind,
+      required: true,
+      state: SWARM.ROUTING_SCOPE_STATE.READY,
+      source: 'explicitRoutingScope',
+      updatedAt: nowMs(),
+    };
+  }
+  const derived = deriveServiceContextForIntent(method, intent);
+  const selectedNode = derived?.selectedNode && typeof derived.selectedNode === 'object' ? derived.selectedNode : null;
+  let zoneScope = normalizeServiceZoneScope(intent?.zoneScope)
+    || normalizeServiceZoneScope(selectedNode?.zoneScope || selectedNode?.zone_scope)
+    || normalizeServiceZoneScope(derived?.zoneScope || derived?.zone_scope)
+    || normalizeServiceZoneScope(swarmEdge.zoneScope);
+  if (
+    zoneScope
+    && (zoneScopeLooksLocalOnly(zoneScope) || (isRuntimeStreamIntent(method) && Number(zoneScope.maxHops || 0) <= 0))
+  ) {
+    zoneScope = appIntentZoneScope({ ...intent, zoneScope }, { requirePropagation: true });
+  }
+  if (!zoneScope || zoneScopeLooksLocalOnly(zoneScope)) {
+    return {
+      kind,
+      required: true,
+      state: SWARM.ROUTING_SCOPE_STATE.MISSING,
+      source: 'runtime.route',
+      blockedReason: SWARM.ROUTING_BLOCKED_REASON.MISSING_ZONE_BASELINE,
+      updatedAt: nowMs(),
+    };
+  }
+  const capability = String(options.capability || appIntentCapability(method, intent)).trim();
+  const servicePk = String(intent?.servicePk || derived?.servicePk || '').trim();
+  const service = String(intent?.service || derived?.service || '').trim();
+  const serviceRef = String(intent?.serviceRef || derived?.serviceRef || '').trim() || defaultServiceRefForService(service, servicePk);
+  const directoryBaseline = directoryRoutingBaseline({ zoneScope, channelId, capability, servicePk, service, serviceRef });
+  const serviceMemberRef = resolvedMemberPkFromCandidates(
+    intent?.serviceMemberRef
+    , intent?.routeMemberRef
+    , intent?.memberRef
+    , directoryBaseline?.serviceMemberRef
+    , derived?.serviceMemberRef
+    , derived?.routeMemberRef
+    , derived?.liveEdgeRoute?.memberRef
+    , servicePk
+  );
+  return applyStreamEdgeActionability(method, channelId, {
+    kind,
+    required: true,
+    state: directoryBaseline?.state || SWARM.ROUTING_SCOPE_STATE.SYNCING,
+    zoneScope,
+    source: directoryBaseline?.source || (derived?.zoneScope || selectedNode?.zoneScope ? 'retainedServiceBaseline' : 'edgeSession'),
+    baselineRef: directoryBaseline?.baselineRef || (servicePk ? `service:${servicePk}` : `zone:${zoneScope.zoneId}`),
+    ...(serviceMemberRef ? { serviceMemberRef, selectedMemberRef: serviceMemberRef } : {}),
+    ...(directoryBaseline?.blockedReason ? { blockedReason: directoryBaseline.blockedReason } : {}),
+    updatedAt: directoryBaseline?.updatedAt || nowMs(),
+  });
+}
+
+function appIntentAudience(method, intent) {
+  if (intent?.audience && typeof intent.audience === 'object') return safeClone(intent.audience);
+  const derived = deriveServiceContextForIntent(method, intent);
+  const service = String(intent?.service || derived?.service || '').trim();
+  const servicePk = String(intent?.servicePk || intent?.recipientServicePk || derived?.servicePk || '').trim();
+  const serviceRef = String(intent?.serviceRef || derived?.serviceRef || '').trim() || defaultServiceRefForService(service, servicePk);
+  const serviceMemberRef = resolvedMemberPkFromCandidates(
+    intent?.serviceMemberRef
+    , intent?.routeMemberRef
+    , intent?.memberRef
+    , derived?.serviceMemberRef
+    , derived?.routeMemberRef
+    , derived?.liveEdgeRoute?.memberRef
+    , servicePk
+  );
+  const gatewayRef = String(intent?.gatewayPk || intent?.gatewayRef || derived?.hostGatewayPk || '').trim();
+  const capability = String(intent?.capabilityRef || intent?.capability || appIntentCapability(method, intent)).trim();
+  const audienceRefs = uniqueTrimmedStrings([serviceMemberRef, servicePk, serviceRef, defaultServiceRefForPk(servicePk), defaultServiceRefForService(service, servicePk)]);
+  if (servicePk || serviceRef || serviceMemberRef || gatewayRef || capability) {
+    return {
+      ...(serviceMemberRef ? { memberRef: serviceMemberRef, serviceMemberRef } : {}),
+      ...(servicePk ? { servicePk } : {}),
+      ...(serviceRef ? { serviceRef } : {}),
+      ...(gatewayRef ? { gatewayRef } : {}),
+      ...(capability ? { capability } : {}),
+      ...(audienceRefs.length ? { audienceRefs } : {}),
+    };
+  }
+  return undefined;
+}
+
+function defaultIdentityId() {
+  return String(
+    runtimeStatus.shell?.identity?.identityId
+      || runtimeStatus.shell?.identityId
+      || normalizeArray(managedState.sourceSnapshot?.identityDevices)[0]?.identityId
+      || normalizeArray(managedState.sourceSnapshot?.identityDevices)[0]?.ownerIdentityId
+      || '',
+  ).trim();
+}
+
+function deriveServiceContextForIntent(method, intent) {
+  const requestedService = String(intent?.service || intent?.serviceRef || '').trim().toLowerCase() || (
+    isRuntimeStreamIntent(method)
+      ? 'nvr'
+      : ''
+  );
+  const requestedCapability = String(intent?.capabilityRef || intent?.capability || '').trim();
+  const requestedNode = String(intent?.nodeRef || intent?.nodeId || '').trim().toLowerCase();
+  const services = serviceCatalog().services;
+  for (const service of services) {
+    if (requestedService && String(service.service || '').trim().toLowerCase() !== requestedService) continue;
+    if (!requestedCapability && !requestedNode) return service;
+    const selectedNode = normalizeArray(service.nodes).find((node) => {
+      const nodeIds = [
+        node.path,
+        node.nodeId,
+        node.label,
+      ].map((value) => String(value || '').trim().toLowerCase()).filter(Boolean);
+      const capabilities = normalizeArray(node.capabilities).map((value) => String(value || '').trim());
+      return (!requestedNode || nodeIds.includes(requestedNode))
+        && (!requestedCapability || capabilities.includes(requestedCapability));
+    }) || (requestedCapability ? normalizeArray(service.nodes).find((node) => {
+      const capabilities = normalizeArray(node.capabilities).map((value) => String(value || '').trim());
+      return capabilities.includes(requestedCapability);
+    }) : null);
+    if (selectedNode) {
+      return mergeLiveEdgeRouteDescriptor(
+        { ...service, selectedNode: safeClone(selectedNode) },
+        {
+          capability: requestedCapability,
+          channelId: String(selectedNode.channelId || selectedNode.channel || selectedNode.backingChannel || '').trim(),
+        },
+      );
+    }
+  }
+  const fallback = services.find((service) => !requestedService || String(service.service || '').trim().toLowerCase() === requestedService) || null;
+  if (!fallback) {
+    const liveRoute = liveEdgeRouteForService({
+      servicePk: String(intent?.servicePk || intent?.recipientServicePk || '').trim(),
+      service: requestedService,
+      capability: requestedCapability,
+      channelId: streamIntentNodeChannel(method, intent),
+    });
+    if (!liveRoute) return null;
+    return {
+      service: requestedService || 'edge',
+      servicePk: liveRoute.servicePk,
+      serviceRef: liveRoute.serviceRef || defaultServiceRefForService(requestedService || 'edge', liveRoute.servicePk),
+      serviceMemberRef: liveRoute.memberRef,
+      routeMemberRef: liveRoute.memberRef,
+      hostGatewayPk: '',
+      zoneScope: liveRoute.zoneScope,
+      location: null,
+      aliases: [],
+      surfaceChannel: '',
+      summary: '',
+      health: {},
+      nodes: liveRoute.channelId ? [{
+        path: requestedNode || liveRoute.channelId,
+        nodeId: requestedNode || liveRoute.channelId,
+        label: requestedNode || liveRoute.channelId,
+        description: '',
+        channelId: liveRoute.channelId,
+        zoneScope: liveRoute.zoneScope,
+        capabilities: [liveRoute.capability].filter(Boolean),
+      }] : [],
+      selectedNode: liveRoute.channelId ? {
+        path: requestedNode || liveRoute.channelId,
+        nodeId: requestedNode || liveRoute.channelId,
+        label: requestedNode || liveRoute.channelId,
+        description: '',
+        channelId: liveRoute.channelId,
+        zoneScope: liveRoute.zoneScope,
+        capabilities: [liveRoute.capability].filter(Boolean),
+      } : null,
+      liveEdgeRoute: liveRoute,
+    };
+  }
+  const contractBaseline = streamServiceContractBaseline(method, intent, fallback);
+  const contractSelectedNode = contractBaseline
+    ? {
+        path: contractBaseline.nodeRef,
+        nodeId: contractBaseline.nodeRef,
+        label: contractBaseline.nodeRef,
+        description: '',
+        channelId: contractBaseline.channelId,
+        zoneScope: fallback.zoneScope || null,
+        capabilities: [contractBaseline.capability].filter(Boolean),
+      }
+    : null;
+  return mergeLiveEdgeRouteDescriptor(
+    contractSelectedNode
+      ? {
+          ...fallback,
+          selectedNode: contractSelectedNode,
+          nodes: normalizeArray(fallback.nodes).length ? fallback.nodes : [contractSelectedNode],
+        }
+      : fallback,
+    {
+      capability: requestedCapability || contractBaseline?.capability || '',
+      channelId: contractBaseline?.channelId || '',
+    },
+  );
+}
+
+function appIntentActivationId(method, intent, requestId = '') {
+  return String(
+    intent?.activationId
+      || intent?.intentId
+      || intent?.sessionId
+      || intent?.requestId
+      || requestId
+      || `${method}:${randomOpaqueId('activation')}`,
+  ).trim();
+}
+
+function appIntentNodeRef(method, intent) {
+  const contractBaseline = streamServiceContractBaseline(method, intent);
+  if (contractBaseline?.nodeRef) return contractBaseline.nodeRef;
+  const explicit = String(intent?.nodeRef || intent?.nodeId || '').trim();
+  if (explicit) return explicit;
+  const sourceIds = normalizeArray(intent?.sourceIds || intent?.sources || intent?.offer?.sourceIds || intent?.payload?.sourceIds)
+    .concat(String(intent?.sourceId || intent?.payload?.sourceId || '').trim() ? [intent?.sourceId || intent?.payload?.sourceId] : [])
+    .map((entry) => String(entry || '').trim())
+    .filter(Boolean);
+  if (sourceIds.length > 0) return sourceIds[0];
+  if (method === RUNTIME_APP_INTENT.STREAM_OPEN || method === RUNTIME_APP_INTENT.STREAM_CONTROL || method === RUNTIME_APP_INTENT.STREAM_CLOSE) {
+    return 'media.stream.preview';
+  }
+  if (method === RUNTIME_APP_INTENT.STORAGE_PIN) return 'storage.pin';
+  if (method === RUNTIME_APP_INTENT.PROJECTION_OBSERVE) return String(intent?.projectionId || 'projection.observe').trim();
+  return method;
+}
+
+function withoutActivationForbiddenFields(value) {
+  if (!value || typeof value !== 'object') return value;
+  const forbidden = new Set(SWARM.ACTIVATION_FORBIDDEN_FIELDS || []);
+  if (Array.isArray(value)) return value.map((entry) => withoutActivationForbiddenFields(entry));
+  const out = {};
+  for (const [key, entry] of Object.entries(value)) {
+    if (forbidden.has(key)) continue;
+    out[key] = withoutActivationForbiddenFields(entry);
+  }
+  return out;
+}
+
+function appIntentActivationParams(method, intent) {
+  const params = intent?.params && typeof intent.params === 'object'
+    ? safeClone(intent.params)
+    : intent?.payload && typeof intent.payload === 'object'
+      ? safeClone(intent.payload)
+      : {};
+  const sourceIds = normalizeArray(intent?.sourceIds || intent?.sources || intent?.offer?.sourceIds || params.sourceIds)
+    .concat(String(intent?.sourceId || params.sourceId || '').trim() ? [intent?.sourceId || params.sourceId] : [])
+    .map((entry) => String(entry || '').trim())
+    .filter(Boolean);
+  if (sourceIds.length) params.sourceIds = Array.from(new Set(sourceIds));
+  const transport = String(intent?.transport || params.transport || '').trim();
+  if (transport) params.transport = transport;
+  if (intent?.offer && typeof intent.offer === 'object') params.offer = safeClone(intent.offer);
+  if (normalizeArray(intent?.candidates).length) params.candidates = safeClone(normalizeArray(intent.candidates));
+  if (method === RUNTIME_APP_INTENT.STREAM_CLOSE) params.release = true;
+  return withoutActivationForbiddenFields(params);
+}
+
+function appIntentActivationRecord(method, intent, authority, issuedAt, expiresAt, requestId) {
+  const record = {
+    kind: SWARM.RECORD_KIND.RUNTIME_ACTIVATION_REQUEST,
+    activationId: appIntentActivationId(method, intent, requestId),
+    nodeRef: appIntentNodeRef(method, intent),
+    capabilityRef: appIntentCapability(method, intent),
+    params: appIntentActivationParams(method, intent),
+    requesterRef: String(intent?.requesterRef || authority.publicKey).trim(),
+    timeoutMs: positiveNumber(intent?.timeoutMs || intent?.timeoutPreferenceMs, 90_000),
+    issuedAt,
+    expiresAt,
+  };
+  assertRuntimeActivationRequest(record);
+  return record;
+}
+
+function appIntentResolvedRoute(method, intent) {
+  const derived = deriveServiceContextForIntent(method, intent);
+  const selectedNode = derived?.selectedNode && typeof derived.selectedNode === 'object' ? derived.selectedNode : null;
+  const contractBaseline = streamServiceContractBaseline(method, intent, derived);
+  const resolvedNodeRef = contractBaseline?.nodeRef || appIntentNodeRef(method, intent);
+  const zoneScope = normalizeServiceZoneScope(intent?.zoneScope)
+    || normalizeServiceZoneScope(selectedNode?.zoneScope || selectedNode?.zone_scope)
+    || normalizeServiceZoneScope(derived?.zoneScope || derived?.zone_scope);
+  const servicePk = String(intent?.servicePk || derived?.servicePk || '').trim();
+  const service = String(intent?.service || derived?.service || 'nvr').trim();
+  const serviceRef = String(intent?.serviceRef || derived?.serviceRef || '').trim() || defaultServiceRefForService(service, servicePk);
+  const serviceMemberRef = resolvedMemberPkFromCandidates(
+    intent?.serviceMemberRef
+    , intent?.routeMemberRef
+    , intent?.memberRef
+    , derived?.serviceMemberRef
+    , derived?.routeMemberRef
+    , derived?.liveEdgeRoute?.memberRef
+    , servicePk
+  );
+  return {
+    ...intent,
+    nodeRef: resolvedNodeRef,
+    service,
+    servicePk,
+    serviceRef,
+    ...(serviceMemberRef ? { serviceMemberRef, routeMemberRef: serviceMemberRef, memberRef: serviceMemberRef } : {}),
+    gatewayPk: String(intent?.gatewayPk || derived?.hostGatewayPk || '').trim(),
+    identityId: String(intent?.identityId || derived?.identityId || defaultIdentityId()).trim(),
+    capability: appIntentCapability(method, intent),
+    selectedNode,
+    ...(zoneScope ? { zoneScope } : {}),
+    channelId: String(
+      intent?.channelId
+      || selectedNode?.channelId
+      || selectedNode?.channel
+      || selectedNode?.backingChannel
+      || derived?.liveEdgeRoute?.channelId
+      || contractBaseline?.channelId
+      || streamIntentNodeChannel(method, intent)
+      || '',
+    ).trim(),
+  };
+}
+
+function appIntentRecordRef(method, intent, activation = null) {
+  if (intent?.recordRef && typeof intent.recordRef === 'object') return safeClone(intent.recordRef);
+  if (method === RUNTIME_APP_INTENT.DIAGNOSTIC_LOG) {
+    const eventId = String(intent?.payload?.record?.eventId || intent?.eventId || intent?.requestId || '').trim();
+    if (eventId) {
+      return {
+        kind: 'logging.event',
+        id: eventId,
+        revision: 1,
+      };
+    }
+  }
+  const id = String(
+    activation?.activationId
+    || intent?.activationId
+    || intent?.intentId
+    || intent?.requestId
+    || intent?.sessionId
+    || intent?.projectionId
+    || intent?.channelId
+    || '',
+  ).trim();
+  if (!id) return undefined;
+  return {
+    kind: appIntentRecordKind(method, intent),
+    id,
+  };
+}
+
+function appIntentRecordKind(method, intent) {
+  const explicit = String(intent?.recordKind || intent?.record_kind || '').trim();
+  if (explicit) return explicit;
+  if (method === RUNTIME_APP_INTENT.STREAM_OPEN) return 'stream.session.offer';
+  if (method === RUNTIME_APP_INTENT.STREAM_CLOSE) return 'stream.session.close';
+  if (method === RUNTIME_APP_INTENT.STREAM_CONTROL) {
+    const payload = intent?.payload && typeof intent.payload === 'object' ? intent.payload : {};
+    if (intent?.candidateId || payload.candidate || payload.candidateId) return 'stream.session.candidate';
+    return 'stream.session.control';
+  }
+  return SWARM.RECORD_KIND.RUNTIME_ACTIVATION_REQUEST;
+}
+
+function appIntentSignalType(method, intent) {
+  const explicit = String(intent?.signalType || intent?.signal_type || '').trim();
+  if (explicit) return explicit;
+  if (method === RUNTIME_APP_INTENT.STREAM_OPEN) return 'offer';
+  if (method === RUNTIME_APP_INTENT.STREAM_CLOSE) return 'close';
+  if (method === RUNTIME_APP_INTENT.STREAM_CONTROL) {
+    const payload = intent?.payload && typeof intent.payload === 'object' ? intent.payload : {};
+    if (intent?.candidateId || payload.candidate || payload.candidateId) return 'candidate';
+    return 'control';
+  }
+  return 'intent';
+}
+
+function appIntentRoutePromise(method, intent, authority, issuedAt, expiresAt, activation) {
+  if (
+    method !== RUNTIME_APP_INTENT.STREAM_OPEN
+    && method !== RUNTIME_APP_INTENT.STREAM_CONTROL
+    && method !== RUNTIME_APP_INTENT.STREAM_CLOSE
+  ) {
+    return null;
+  }
+  const service = String(intent?.service || '').trim();
+  const servicePk = String(intent?.servicePk || '').trim();
+  const serviceRef = String(intent?.serviceRef || '').trim() || defaultServiceRefForService(service, servicePk);
+  const serviceMemberRef = resolvedMemberPkFromCandidates(
+    intent?.serviceMemberRef,
+    intent?.routeMemberRef,
+    intent?.memberRef,
+    servicePk,
+  );
+  const gatewayRef = String(intent?.gatewayPk || intent?.gatewayRef || '').trim();
+  const identityRef = String(intent?.identityId || '').trim();
+  const zoneScope = appIntentZoneScope(intent, { requirePropagation: true });
+  const returnZoneScope = normalizeServiceZoneScope(swarmEdge.zoneScope);
+  const audienceRefs = uniqueTrimmedStrings([
+    serviceMemberRef,
+    servicePk,
+    defaultServiceRefForPk(servicePk),
+    defaultServiceRefForService(service, servicePk),
+  ]);
+  const routePromise = {
+    kind: SWARM.RECORD_KIND.ROUTE_PROMISE,
+    promiseId: String(intent?.routePromiseId || `route:${activation.activationId}`).trim(),
+    activationId: activation.activationId,
+    nodeRef: activation.nodeRef,
+    capabilityRef: activation.capabilityRef,
+    requesterRef: activation.requesterRef || authority.publicKey,
+    ...(serviceMemberRef ? { serviceMemberRef } : {}),
+    servicePk,
+    channelId: appIntentChannelId(method, intent),
+    zoneScope,
+    ...(returnZoneScope ? { returnZoneScope } : {}),
+    audienceRefs,
+    authorityRefs: [identityRef ? `identity:${identityRef}` : '', authority.publicKey].filter(Boolean),
+    routePolicy: {
+      delivery: 'targetMember',
+      transport: String(intent?.transport || intent?.params?.transport || 'edge').trim() || 'edge',
+    },
+    pathRefs: [gatewayRef ? `gateway:${gatewayRef}` : '', serviceMemberRef].filter(Boolean),
+    issuedAt,
+    expiresAt,
+    releasePolicy: {
+      onClose: true,
+      leaseMs: Math.max(1, expiresAt - issuedAt),
+    },
+  };
+  assertRoutePromise(routePromise);
+  return routePromise;
+}
+
+function appIntentAuthorityClaims(method, intent, authority, issuedAt, expiresAt, nonce) {
+  const source = intent?.authority && typeof intent.authority === 'object' ? intent.authority : {};
+  const grantedScope = intent?.grantedScope && typeof intent.grantedScope === 'object' ? intent.grantedScope : {};
+  const intentSourceIds = normalizeArray(intent?.sourceIds || intent?.sources)
+    .concat(String(intent?.sourceId || '').trim() ? [intent.sourceId] : [])
+    .map((entry) => String(entry || '').trim())
+    .filter(Boolean);
+  const derived = deriveServiceContextForIntent(method, intent);
+  const service = String(intent?.service || source.service || derived?.service || 'nvr').trim();
+  const servicePk = String(intent?.servicePk || source.servicePk || derived?.servicePk || '').trim();
+  const gatewayPk = String(intent?.gatewayPk || source.gatewayPk || derived?.hostGatewayPk || '').trim();
+  const identityId = String(intent?.identityId || source.identityId || derived?.identityId || defaultIdentityId()).trim();
+  if (
+    (method === RUNTIME_APP_INTENT.STREAM_OPEN || method === RUNTIME_APP_INTENT.STREAM_CONTROL || method === RUNTIME_APP_INTENT.STREAM_CLOSE)
+    && (!servicePk || !gatewayPk || !identityId)
+  ) {
+    throw new Error('runtime could not resolve stream service, gateway, or identity authority');
+  }
+  return {
+    capabilityId: String(intent?.capabilityId || intent?.intentId || intent?.requestId || nonce).trim(),
+    gatewayPk,
+    servicePk,
+    service,
+    identityId,
+    devicePk: authority.publicKey,
+    capability: appIntentCapability(method, intent),
+    owner: Boolean(intent?.owner ?? source.owner ?? grantedScope.owner),
+    viewSources: normalizeArray(intent?.viewSources || source.viewSources || grantedScope.viewSources || intentSourceIds).map((entry) => String(entry || '').trim()).filter(Boolean),
+    controlSources: normalizeArray(intent?.controlSources || source.controlSources || grantedScope.controlSources || intentSourceIds).map((entry) => String(entry || '').trim()).filter(Boolean),
+    issuedAt,
+    expiresAt,
+    nonce,
+  };
+}
+
+function runtimeMemberRef(authority, intent = {}) {
+  return resolvedMemberPkFromCandidates(
+    intent?.runtimeMemberRef,
+    intent?.coordinatorRef,
+    swarmEdge.memberRef,
+    authority?.publicKey,
+  );
+}
+
+function swarmInteractionId(method, intent, activation) {
+  return String(
+    intent?.interactionId
+      || intent?.swarmInteractionId
+      || `interaction:${method}:${activation.activationId}`,
+  ).trim();
+}
+
+function appIntentAuthoritySummary(method, intent, authority) {
+  const derived = deriveServiceContextForIntent(method, intent);
+  const identityId = String(intent?.identityId || derived?.identityId || defaultIdentityId()).trim();
+  const service = String(intent?.service || derived?.service || '').trim();
+  const servicePk = String(intent?.servicePk || derived?.servicePk || '').trim();
+  const serviceRef = String(intent?.serviceRef || derived?.serviceRef || '').trim() || defaultServiceRefForService(service, servicePk);
+  const serviceMemberRef = resolvedMemberPkFromCandidates(
+    intent?.serviceMemberRef,
+    intent?.routeMemberRef,
+    intent?.memberRef,
+    derived?.serviceMemberRef,
+    derived?.routeMemberRef,
+    derived?.liveEdgeRoute?.memberRef,
+    servicePk,
+  );
+  const gatewayPk = String(intent?.gatewayPk || intent?.gatewayRef || derived?.hostGatewayPk || '').trim();
+  const runtimeRef = runtimeMemberRef(authority, intent);
+  const storageMemberRef = String(intent?.storageMemberRef || 'member:storage:indexeddb:runtime-cache').trim();
+  const isStream = isRuntimeStreamIntent(method);
+  const routingScope = appIntentRoutingScopePosture(method, intent);
+  return {
+    routingScope,
+    requester: {
+      domain: SWARM.AUTHORITY_DOMAIN.IDENTITY,
+      state: identityId ? 'ready' : 'missingGrant',
+      identityRef: identityId ? `identity:${identityId}` : '',
+      grantRefs: identityId ? [`grant:identity:${identityId}:runtime-session`] : [],
+    },
+    runtime: {
+      domain: SWARM.AUTHORITY_DOMAIN.RUNTIME,
+      state: runtimeRef ? 'delegated' : 'missingRuntimeMember',
+      memberRef: runtimeRef,
+      deviceRef: authority?.publicKey || '',
+    },
+    gateway: {
+      domain: SWARM.AUTHORITY_DOMAIN.GATEWAY,
+      state: gatewayPk ? 'waitingAdmission' : (isStream ? 'missingGatewayGrant' : 'notRequired'),
+      gatewayRef: gatewayPk ? `gateway:${gatewayPk}` : '',
+    },
+    service: {
+      domain: SWARM.AUTHORITY_DOMAIN.SERVICE,
+      state: servicePk || serviceRef ? 'waitingAcceptance' : (isStream ? 'missingServiceGrant' : 'notRequired'),
+      service,
+      serviceRef,
+      serviceMemberRef,
+      servicePk,
+    },
+    storage: {
+      domain: SWARM.AUTHORITY_DOMAIN.RUNTIME,
+      state: 'cacheOnly',
+      memberRef: storageMemberRef,
+      identityAuthority: false,
+    },
+    recovery: {
+      root: 'deviceRoot',
+      route: 'storageRoute',
+      activeLeaseRestored: false,
+    },
+  };
+}
+
+function appIntentInteractionRecord(method, intent, authority, activation, routePromise, issuedAt) {
+  const interactionId = swarmInteractionId(method, intent, activation);
+  const runtimeRef = runtimeMemberRef(authority, intent);
+  const derived = deriveServiceContextForIntent(method, intent);
+  const gatewayPk = String(intent?.gatewayPk || intent?.gatewayRef || derived?.hostGatewayPk || '').trim();
+  const service = String(intent?.service || derived?.service || '').trim();
+  const servicePk = String(intent?.servicePk || derived?.servicePk || '').trim();
+  const serviceRef = String(intent?.serviceRef || derived?.serviceRef || '').trim() || defaultServiceRefForService(service, servicePk);
+  const serviceMemberRef = resolvedMemberPkFromCandidates(
+    intent?.serviceMemberRef,
+    intent?.routeMemberRef,
+    intent?.memberRef,
+    derived?.serviceMemberRef,
+    derived?.routeMemberRef,
+    derived?.liveEdgeRoute?.memberRef,
+    servicePk,
+  );
+  const capabilityRef = appIntentCapability(method, intent);
+  const channelId = appIntentChannelId(method, intent);
+  const routingScope = appIntentRoutingScopePosture(method, intent, { channelId, capability: capabilityRef });
+  const participants = [
+    {
+      role: SWARM.INTERACTION_ROLE.REQUESTER,
+      memberRef: activation.requesterRef || runtimeRef,
+      capabilityRefs: [capabilityRef],
+      channelRefs: channelId ? [channelId] : [],
+      authorityRefs: ['identity:runtime-session'].filter(Boolean),
+      contractView: { view: 'runtimeIntent' },
+      safeFacts: { requester: 'runtimeClient' },
+    },
+    {
+      role: SWARM.INTERACTION_ROLE.COORDINATOR,
+      memberRef: runtimeRef,
+      capabilityRefs: [capabilityRef],
+      channelRefs: channelId ? [channelId] : [],
+      authorityRefs: ['runtime:session'].filter(Boolean),
+      contractView: { view: 'preparedActivation' },
+      safeFacts: { delegatedRuntimeMember: Boolean(runtimeRef) },
+    },
+    {
+      role: SWARM.INTERACTION_ROLE.STORAGE,
+      memberRef: runtimeRef,
+      capabilityRefs: [SWARM.CORE_CAPABILITY.STORAGE_PIN],
+      channelRefs: ['storage.pin'],
+      authorityRefs: ['runtime:cache'],
+      contractView: {
+        view: 'cacheOnly',
+        storageRef: String(intent?.storageMemberRef || 'storage:indexeddb:runtime-cache').trim(),
+      },
+      safeFacts: { identityAuthority: false, storageHolder: 'browserRuntime' },
+    },
+  ];
+  if (gatewayPk) {
+    participants.push({
+      role: SWARM.INTERACTION_ROLE.ROUTER,
+      memberRef: gatewayPk,
+      capabilityRefs: [capabilityRef],
+      channelRefs: channelId ? [channelId] : [],
+      authorityRefs: [`gateway:${gatewayPk}:admission`],
+      contractView: { view: 'gatewayAdmission' },
+      safeFacts: { authorityDomain: SWARM.AUTHORITY_DOMAIN.GATEWAY },
+    });
+  }
+  if (serviceMemberRef) {
+    participants.push({
+      role: SWARM.INTERACTION_ROLE.EXECUTOR,
+      memberRef: serviceMemberRef,
+      capabilityRefs: [capabilityRef],
+      channelRefs: channelId ? [channelId] : [],
+      authorityRefs: serviceRef ? [`${serviceRef}:serviceGrant`] : [],
+      contractView: { view: 'serviceContract', service },
+      safeFacts: { authorityDomain: SWARM.AUTHORITY_DOMAIN.SERVICE },
+    });
+  }
+  if (method === RUNTIME_APP_INTENT.DIAGNOSTIC_LOG && serviceMemberRef) {
+    participants.push({
+      role: SWARM.INTERACTION_ROLE.OBSERVER,
+      memberRef: serviceMemberRef,
+      capabilityRefs: ['logging.events.ingest'],
+      channelRefs: ['logging.events'],
+      authorityRefs: ['logging:observe'],
+      contractView: { view: 'safeEvidenceOnly' },
+      safeFacts: { controlPlane: false },
+    });
+  }
+  const record = {
+    kind: SWARM.RECORD_KIND.SWARM_INTERACTION,
+    interactionId,
+    contractRef: String(intent?.contractRef || routePromise?.channelId || channelId || method).trim(),
+    interactionKind: isRuntimeStreamIntent(method) ? 'activation' : method,
+    state: SWARM.INTERACTION_STATE.PREPARED,
+    participants,
+    capabilityRefs: [capabilityRef],
+    channelRefs: channelId ? [channelId] : [],
+    routingScope,
+    authority: {
+      domains: [
+        SWARM.AUTHORITY_DOMAIN.IDENTITY,
+        SWARM.AUTHORITY_DOMAIN.RUNTIME,
+        ...(gatewayPk ? [SWARM.AUTHORITY_DOMAIN.GATEWAY] : []),
+        ...(serviceRef || servicePk || service ? [SWARM.AUTHORITY_DOMAIN.SERVICE] : []),
+      ],
+      grantRefs: normalizeArray(routePromise?.authorityRefs),
+    },
+    safeFacts: {
+      method,
+      activationId: activation.activationId,
+      routePromiseId: routePromise?.promiseId || '',
+      routingScopeState: routingScope.state,
+      routingScopeKind: routingScope.kind,
+    },
+    issuedAt,
+  };
+  assertSwarmInteraction(record);
+  return record;
+}
+
+function appIntentSwarmActivationRecord(activation, interaction, authoritySummary, issuedAt, expiresAt) {
+  const record = {
+    kind: SWARM.RECORD_KIND.SWARM_ACTIVATION,
+    activationId: activation.activationId,
+    interactionId: interaction.interactionId,
+    nodeRef: activation.nodeRef,
+    capabilityRef: activation.capabilityRef,
+    requesterRef: activation.requesterRef,
+    runtimeMemberRef: String(authoritySummary?.runtime?.memberRef || '').trim(),
+    state: SWARM.INTERACTION_STATE.PREPARED,
+    authoritySummary: safeClone(authoritySummary),
+    safeFacts: {
+      activationKind: 'runtimePreparedInteraction',
+      routeCritical: true,
+      routingScope: safeClone(authoritySummary?.routingScope || null),
+    },
+    issuedAt,
+    expiresAt,
+  };
+  assertSwarmActivation(record);
+  return record;
+}
+
+function streamCandidateEndpointEvidence(candidate) {
+  const text = String(candidate?.candidate || '').trim();
+  const parts = text.split(/\s+/).filter(Boolean);
+  if (parts.length < 8) return null;
+  const protocol = String(parts[2] || '').trim().toLowerCase();
+  if (protocol !== 'udp' && protocol !== 'tcp') return null;
+  const address = String(parts[4] || '').trim();
+  const port = Number.parseInt(String(parts[5] || ''), 10);
+  const typIndex = parts.findIndex((part) => part === 'typ');
+  const candidateType = typIndex >= 0 ? String(parts[typIndex + 1] || '').trim() : '';
+  if (!address || !Number.isInteger(port) || port < 1 || port > 65_535 || !candidateType) return null;
+  return {
+    protocol,
+    address,
+    port,
+    candidateType,
+  };
+}
+
+function runtimeStreamCandidateRecord(intent, candidatePayload, issuedAt, idx = 0) {
+  const candidate = candidatePayload?.candidate && typeof candidatePayload.candidate === 'object'
+    ? candidatePayload.candidate
+    : candidatePayload;
+  const endpoint = streamCandidateEndpointEvidence(candidate);
+  const record = {
+    kind: SWARM.STREAM_RECORD_KIND.CANDIDATE,
+    candidateId: String(
+      candidatePayload?.candidateId
+        || intent?.candidateId
+        || `candidate:${String(intent?.sessionId || intent?.nonce || 'stream').trim()}:${idx}`,
+    ).trim(),
+    sessionId: String(intent?.sessionId || candidatePayload?.sessionId || '').trim(),
+    transport: String(intent?.transport || candidatePayload?.transport || 'webrtc').trim() || 'webrtc',
+    candidateRole: 'browser',
+    actionability: endpoint ? 'usable' : 'blocked',
+    ...(endpoint ? { endpoint } : { blockedReason: 'missingCandidateEndpoint' }),
+    payload: safeClone(candidatePayload || {}),
+    issuedAt,
+  };
+  assertStreamSessionCandidate(record);
+  return record;
+}
+
+function runtimeCandidatePayloads(intent, payload) {
+  const out = [];
+  if (payload?.candidate) out.push(payload);
+  for (const candidate of normalizeArray(intent?.candidates)) {
+    if (candidate && typeof candidate === 'object') {
+      out.push({ candidate });
+    }
+  }
+  for (const candidate of normalizeArray(payload?.candidates)) {
+    if (candidate && typeof candidate === 'object') {
+      out.push({ candidate });
+    }
+  }
+  return out;
+}
+
+function appIntentClaims(method, intent, authority, issuedAt, expiresAt, nonce, activation) {
+  const payload = intent?.payload && typeof intent.payload === 'object'
+    ? safeClone(intent.payload)
+    : intent?.params && typeof intent.params === 'object'
+      ? safeClone(intent.params)
+      : {};
+  const routePromise = appIntentRoutePromise(method, intent, authority, issuedAt, expiresAt, activation);
+  const authoritySummary = appIntentAuthoritySummary(method, intent, authority);
+  const interaction = appIntentInteractionRecord(method, intent, authority, activation, routePromise, issuedAt);
+  const swarmActivation = appIntentSwarmActivationRecord(activation, interaction, authoritySummary, issuedAt, expiresAt);
+  const claims = {
+    method,
+    signalType: appIntentSignalType(method, intent),
+    activation: safeClone(activation),
+    interaction: safeClone(interaction),
+    swarmActivation: safeClone(swarmActivation),
+    authoritySummary: safeClone(authoritySummary),
+    authority: appIntentAuthorityClaims(method, intent, authority, issuedAt, expiresAt, nonce),
+    payload,
+    record: safeClone(activation),
+  };
+  const candidatePayloads = runtimeCandidatePayloads(intent, payload);
+  if (candidatePayloads.length) {
+    const candidateRecords = candidatePayloads.map((candidatePayload, idx) => (
+      runtimeStreamCandidateRecord(intent, candidatePayload, issuedAt, idx)
+    ));
+    const blocked = candidateRecords.find((record) => record.actionability === 'blocked');
+    if (blocked) {
+      throw new Error(String(blocked.blockedReason || 'stream candidate is not actionable'));
+    }
+    claims.candidateRecords = candidateRecords;
+    if (method === RUNTIME_APP_INTENT.STREAM_CONTROL && appIntentSignalType(method, intent) === 'candidate') {
+      claims.record = safeClone(candidateRecords[0]);
+    }
+  }
+  if (routePromise) {
+    claims.routePromise = safeClone(routePromise);
+    claims.routePromiseId = routePromise.promiseId;
+  }
+  if (intent?.offer && typeof intent.offer === 'object') claims.offer = safeClone(intent.offer);
+  if (normalizeArray(intent?.candidates).length) claims.candidates = safeClone(normalizeArray(intent.candidates));
+  if (normalizeArray(payload?.candidates).length) claims.candidates = safeClone(normalizeArray(payload.candidates));
+  return claims;
+}
+
+function appIntentBody(method, intent, authority, issuedAt, expiresAt, nonce, activation) {
+  const recordKind = appIntentRecordKind(method, intent);
+  const envelope = sealEnvelope({
+    kind: recordKind,
+    claims: appIntentClaims(method, intent, authority, issuedAt, expiresAt, nonce, activation),
+    issuerSecretKey: authority.secretKey,
+    recipientPks: appIntentRecipientPks(intent, authority),
+    issuedAt,
+    expiresAt,
+    envelopeId: String(intent?.envelopeId || '').trim() || undefined,
+  });
+  return {
+    encoding: SWARM.BODY_ENCODING.CAAC,
+    envelope,
+  };
+}
+
+function blockedRuntimeAuthoritySummary(method, intent, posture) {
+  const summary = appIntentAuthoritySummary(method, intent, { publicKey: '' });
+  summary.runtime = {
+    ...safeClone(summary.runtime || {}),
+    domain: SWARM.AUTHORITY_DOMAIN.RUNTIME,
+    state: String(posture?.state || 'waitingAuthority').trim() || 'waitingAuthority',
+    ready: false,
+    memberRef: String(posture?.devicePk || '').trim(),
+    deviceRef: String(posture?.devicePk || '').trim(),
+    blockedAuthorityDomain: SWARM.AUTHORITY_DOMAIN.RUNTIME,
+    missingGrantReason: String(posture?.reason || 'runtime authority not ready').trim(),
+  };
+  summary.blocked = true;
+  summary.blockedAuthorityDomain = SWARM.AUTHORITY_DOMAIN.RUNTIME;
+  summary.authorityLifecycleState = summary.runtime.state;
+  return summary;
+}
+
+function routingScopeReadyForActivation(method, intent, routingScope) {
+  if (!isRuntimeStreamIntent(method)) return true;
+  const channelId = String(appIntentChannelId(method, intent)).trim();
+  if (channelId !== NVR_STREAM_CHANNEL) return true;
+  if (swarmEdge.connected !== true) return false;
+  const state = String(routingScope?.state || '').trim();
+  return state === SWARM.ROUTING_SCOPE_STATE.READY || state === SWARM.ROUTING_SCOPE_STATE.NOT_REQUIRED;
+}
+
+function routeWaitingStateForRoutingScope(routingScope) {
+  const blockedReason = String(routingScope?.blockedReason || '').trim();
+  if (
+    blockedReason === SWARM.ROUTING_BLOCKED_REASON.NO_MEMBER_IN_ZONE
+    || blockedReason === SWARM.ROUTING_BLOCKED_REASON.ZERO_PROPAGATION
+    || blockedReason === SWARM.ROUTING_BLOCKED_REASON.AUDIENCE_MISMATCH
+  ) {
+    return 'waitingMemberCandidate';
+  }
+  return 'waitingRouteBaseline';
+}
+
+function runtimePostureFacet(state, reason = '', extras = {}) {
+  const facet = {
+    state,
+    ...safeClone(normalizeObject(extras)),
+  };
+  const text = String(reason || '').trim();
+  if (text) facet.reason = text;
+  return facet;
+}
+
+function resourceFacetForSelfCapability() {
+  const sample = runtimeResourceSample();
+  const state = String(sample?.posture?.state || RESOURCE_POSTURE_STATES.WITHIN_BUDGET).trim();
+  const reasons = normalizeArray(sample?.posture?.reasons).map((entry) => String(entry || '').trim()).filter(Boolean);
+  if (state === RESOURCE_POSTURE_STATES.OVER_BUDGET || state === RESOURCE_POSTURE_STATES.BLOCKED) {
+    return runtimePostureFacet(SWARM.POSTURE_FACET_STATE.DEGRADED, reasons.join(', ') || 'runtime resource posture is over budget', {
+      evidenceRefs: [`resource.sample:${sample.observedAt}`],
+    });
+  }
+  if (state === RESOURCE_POSTURE_STATES.PRESSURE) {
+    return runtimePostureFacet(SWARM.POSTURE_FACET_STATE.DEGRADED, reasons.join(', ') || 'runtime resource posture is under pressure', {
+      evidenceRefs: [`resource.sample:${sample.observedAt}`],
+    });
+  }
+  return runtimePostureFacet(SWARM.POSTURE_FACET_STATE.READY, '', {
+    evidenceRefs: [`resource.sample:${sample.observedAt}`],
+  });
+}
+
+function routingFacetForSelfCapability(method, routingScope) {
+  if (!appIntentRoutingScopeRequired(method, {})) {
+    return runtimePostureFacet(SWARM.POSTURE_FACET_STATE.NOT_REQUIRED);
+  }
+  const state = String(routingScope?.state || '').trim();
+  if (state === SWARM.ROUTING_SCOPE_STATE.READY) return runtimePostureFacet(SWARM.POSTURE_FACET_STATE.READY);
+  if (state === SWARM.ROUTING_SCOPE_STATE.NOT_REQUIRED) return runtimePostureFacet(SWARM.POSTURE_FACET_STATE.NOT_REQUIRED);
+  if (state === SWARM.ROUTING_SCOPE_STATE.SYNCING || state === SWARM.ROUTING_SCOPE_STATE.STALE) {
+    return runtimePostureFacet(SWARM.POSTURE_FACET_STATE.MISSING, String(routingScope?.blockedReason || `route baseline is ${state}`).trim(), {
+      evidenceRefs: String(routingScope?.baselineRef || '').trim() ? [String(routingScope.baselineRef).trim()] : [],
+    });
+  }
+  return runtimePostureFacet(SWARM.POSTURE_FACET_STATE.MISSING, String(routingScope?.blockedReason || state || 'route baseline is missing').trim(), {
+    evidenceRefs: String(routingScope?.baselineRef || '').trim() ? [String(routingScope.baselineRef).trim()] : [],
+  });
+}
+
+function selfCapabilityStatusFromFacets(facets) {
+  const values = Object.values(facets || {});
+  if (values.some((facet) => facet?.state === SWARM.POSTURE_FACET_STATE.BLOCKED || facet?.state === SWARM.POSTURE_FACET_STATE.MISSING)) {
+    return SWARM.SELF_CAPABILITY_STATUS.BLOCKED;
+  }
+  if (values.some((facet) => facet?.state === SWARM.POSTURE_FACET_STATE.DEGRADED || facet?.state === SWARM.POSTURE_FACET_STATE.UNKNOWN)) {
+    return SWARM.SELF_CAPABILITY_STATUS.DEGRADED;
+  }
+  return SWARM.SELF_CAPABILITY_STATUS.AVAILABLE;
+}
+
+function selfCapabilityRunlevelFromFacets(facets, fallbackState) {
+  const state = String(fallbackState || '').trim();
+  if (state === 'waitingAuthority') return SWARM.PARTICIPANT_RUNLEVEL.LOCAL_CACHE;
+  if (facets?.authority?.state !== SWARM.POSTURE_FACET_STATE.READY) return SWARM.PARTICIPANT_RUNLEVEL.LOCAL_CACHE;
+  if (facets?.route?.state === SWARM.POSTURE_FACET_STATE.READY) return SWARM.PARTICIPANT_RUNLEVEL.ROUTE_READY;
+  if (swarmEdge.connected) return SWARM.PARTICIPANT_RUNLEVEL.EDGE_ATTACHED;
+  if (state === 'waitingResolution') return SWARM.PARTICIPANT_RUNLEVEL.AUTHORITY_READY;
+  if (state === 'resolved') return SWARM.PARTICIPANT_RUNLEVEL.INTERACTIVE;
+  return SWARM.PARTICIPANT_RUNLEVEL.DEGRADED;
+}
+
+function blockedReasonsFromFacets(facets) {
+  return uniqueTrimmedStrings(Object.entries(facets || {})
+    .filter(([, facet]) => facet?.state === SWARM.POSTURE_FACET_STATE.BLOCKED || facet?.state === SWARM.POSTURE_FACET_STATE.MISSING)
+    .map(([name, facet]) => String(facet?.reason || `${name}.${facet?.state || 'blocked'}`).trim()));
+}
+
+function runtimeSelfCapabilityAssessment({
+  method,
+  activationId,
+  capability,
+  posture,
+  state,
+  nodeRef,
+  channelId,
+  service,
+  servicePk,
+  serviceRef,
+  serviceMemberRef,
+  routingScope,
+  updatedAt,
+}) {
+  const authorityReady = posture?.ready === true;
+  const facets = {
+    authority: authorityReady
+      ? runtimePostureFacet(SWARM.POSTURE_FACET_STATE.READY, '', {
+          authorityRefs: String(posture?.devicePk || '').trim() ? [String(posture.devicePk).trim()] : [],
+        })
+      : runtimePostureFacet(SWARM.POSTURE_FACET_STATE.BLOCKED, String(posture?.reason || 'runtime authority is not ready').trim(), {
+          authorityRefs: String(posture?.devicePk || '').trim() ? [String(posture.devicePk).trim()] : [],
+        }),
+    resource: resourceFacetForSelfCapability(),
+    policy: runtimePostureFacet(SWARM.POSTURE_FACET_STATE.READY),
+    directory: (service || servicePk || serviceRef)
+      ? runtimePostureFacet(serviceMemberRef || !isRuntimeStreamIntent(method) ? SWARM.POSTURE_FACET_STATE.READY : SWARM.POSTURE_FACET_STATE.MISSING, serviceMemberRef || !isRuntimeStreamIntent(method) ? '' : 'service member has not resolved from directory')
+      : runtimePostureFacet(SWARM.POSTURE_FACET_STATE.MISSING, 'service has not resolved'),
+    route: routingFacetForSelfCapability(method, routingScope),
+    adapter: runtimePostureFacet(SWARM.POSTURE_FACET_STATE.NOT_REQUIRED),
+    retention: runtimePostureFacet(SWARM.POSTURE_FACET_STATE.NOT_REQUIRED),
+    domain: nodeRef && channelId
+      ? runtimePostureFacet(SWARM.POSTURE_FACET_STATE.READY)
+      : runtimePostureFacet(SWARM.POSTURE_FACET_STATE.MISSING, nodeRef ? 'channel has not resolved' : 'node has not resolved'),
+  };
+  const status = selfCapabilityStatusFromFacets(facets);
+  const participantRef = resolvedMemberPkFromCandidates(posture?.devicePk);
+  const assessment = {
+    kind: SWARM.RECORD_KIND.PARTICIPANT_SELF_CAPABILITY,
+    assessmentId: `self-capability:${activationId}`,
+    participantRef,
+    participantKind: 'browserRuntime',
+    ...(serviceRef ? { serviceRef } : {}),
+    ...(serviceMemberRef ? { serviceMemberRef } : {}),
+    ...(nodeRef ? { subjectRef: nodeRef } : {}),
+    capabilityRef: capability,
+    actions: [isRuntimeStreamIntent(method) ? SWARM.SELF_CAPABILITY_ACTION.REQUEST : SWARM.SELF_CAPABILITY_ACTION.OBSERVE],
+    status,
+    runlevel: selfCapabilityRunlevelFromFacets(facets, state),
+    facets,
+    blockedReasons: blockedReasonsFromFacets(facets),
+    evidenceRefs: [activationId].filter(Boolean),
+    authorityRefs: String(posture?.devicePk || '').trim() ? [String(posture.devicePk).trim()] : [],
+    updatedAt,
+  };
+  if (!participantRef) {
+    return {
+      ...assessment,
+      kind: 'runtime.selfCapability.localPosture',
+      contractReady: false,
+      blockedReasons: uniqueTrimmedStrings([...assessment.blockedReasons, 'runtimeParticipantUnresolved']),
+    };
+  }
+  return assertSelfCapabilityAssessment(assessment);
+}
+
+function messageWithActivationId(message, activationId) {
+  const cloned = safeClone(message || {});
+  const payload = cloned.payload && typeof cloned.payload === 'object'
+    ? { ...cloned.payload }
+    : cloned.intent && typeof cloned.intent === 'object'
+      ? { ...cloned.intent }
+      : {};
+  payload.activationId = String(payload.activationId || activationId || '').trim();
+  cloned.payload = payload;
+  return cloned;
+}
+
+function pendingRouteIntent(method, message, context) {
+  const {
+    resolvedIntent,
+    activation,
+    routePromise,
+    interaction,
+    swarmActivation,
+    authoritySummary,
+    routingScope,
+    channelId,
+  } = context;
+  const activationId = String(activation?.activationId || '').trim();
+  const state = routeWaitingStateForRoutingScope(routingScope);
+  const entry = {
+    requestId: String(resolvedIntent?.requestId || message?.requestId || '').trim(),
+    method,
+    message: messageWithActivationId(message, activationId),
+    intent: safeClone(resolvedIntent),
+    activationId,
+    interactionId: String(interaction?.interactionId || '').trim(),
+    routePromiseId: String(routePromise?.promiseId || '').trim(),
+    state,
+    nodeRef: String(activation?.nodeRef || '').trim(),
+    capabilityRef: String(activation?.capabilityRef || '').trim(),
+    channelId: String(channelId || '').trim(),
+    zoneScope: safeClone(resolvedIntent?.zoneScope || routingScope?.zoneScope || null),
+    routingScope: safeClone(routingScope || null),
+    audience: safeClone(appIntentAudience(method, resolvedIntent) || null),
+    authoritySummary: safeClone(authoritySummary || null),
+    interaction: safeClone(interaction || null),
+    swarmActivation: safeClone(swarmActivation || null),
+    queuedAt: nowMs(),
+    updatedAt: nowMs(),
+    expiresAt: Number(activation?.expiresAt || resolvedIntent?.expiresAt || 0),
+    attempts: 0,
+    lastError: {
+      reason: String(routingScope?.blockedReason || routingScope?.state || 'route baseline not ready').trim(),
+      routingScopeState: String(routingScope?.state || '').trim(),
+    },
+  };
+  pendingRouteIntents.set(activationId, entry);
+  while (pendingRouteIntents.size > PENDING_AUTHORITY_INTENT_LIMIT) {
+    const first = pendingRouteIntents.keys().next().value;
+    pendingRouteIntents.delete(first);
+  }
+  recordRuntimeEvent('interaction.prepared', {
+    activationId,
+    interactionId: entry.interactionId,
+    routePromiseId: entry.routePromiseId,
+    channelId,
+    capability: appIntentCapability(method, resolvedIntent),
+    state,
+    authoritySummary,
+    routingScope,
+    blockedReason: entry.lastError.reason,
+  });
+  requestRuntimeDirectoryObserve(state);
+  broadcastSnapshot();
+  return {
+    ok: true,
+    result: {
+      activationId,
+      interactionId: entry.interactionId,
+      routePromiseId: entry.routePromiseId,
+      state,
+      pendingRoute: true,
+      routingScope,
+      authoritySummary,
+      reason: entry.lastError.reason,
+    },
+  };
+}
+
+function pendingRuntimeAuthorityIntent(method, message, posture) {
+  const intent = appIntentPayload(message);
+  const requestId = String(intent.requestId || message.requestId || '').trim();
+  const issuedAt = Number(intent.issuedAt || 0) || nowMs();
+  const expiresAt = Number(intent.expiresAt || 0) || (issuedAt + 90_000);
+  const pendingRequesterRef = resolvedMemberPkFromCandidates(
+    intent.requesterRef,
+    intent.requester_ref,
+    posture?.devicePk,
+  );
+  const pendingIntent = {
+    ...intent,
+    requesterRef: pendingRequesterRef,
+  };
+  const resolvedIntent = appIntentResolvedRoute(method, pendingIntent);
+  const channelId = appIntentChannelId(method, resolvedIntent);
+  if (isRuntimeStreamIntent(method) && !channelId) {
+    throw new Error('runtime could not resolve stream route channel');
+  }
+  const activation = pendingRequesterRef
+    ? appIntentActivationRecord(method, resolvedIntent, { publicKey: pendingRequesterRef }, issuedAt, expiresAt, requestId)
+    : {
+      activationId: appIntentActivationId(method, resolvedIntent, requestId),
+      nodeRef: appIntentNodeRef(method, resolvedIntent),
+      capabilityRef: appIntentCapability(method, resolvedIntent),
+      requesterRef: '',
+      params: appIntentActivationParams(method, resolvedIntent),
+      issuedAt,
+      expiresAt,
+    };
+  const activationId = String(activation.activationId || requestId || randomOpaqueId('activation')).trim();
+  const interactionId = swarmInteractionId(method, resolvedIntent, activation);
+  const routingScope = appIntentRoutingScopePosture(method, resolvedIntent, { channelId, capability: activation.capabilityRef });
+  const authoritySummary = blockedRuntimeAuthoritySummary(method, resolvedIntent, posture);
+  authoritySummary.routingScope = routingScope;
+  const entry = {
+    requestId,
+    method,
+    message: safeClone(message),
+    intent: safeClone(resolvedIntent),
+    activationId,
+    interactionId,
+    state: 'waitingAuthority',
+    authorityLifecycleState: String(posture?.state || 'waitingAuthority').trim() || 'waitingAuthority',
+    blockedAuthorityDomain: SWARM.AUTHORITY_DOMAIN.RUNTIME,
+    nodeRef: activation.nodeRef,
+    capabilityRef: activation.capabilityRef,
+    channelId,
+    zoneScope: safeClone(resolvedIntent.zoneScope || null),
+    routingScope,
+    audience: safeClone(appIntentAudience(method, resolvedIntent)),
+    authoritySummary,
+    queuedAt: issuedAt,
+    updatedAt: nowMs(),
+    expiresAt,
+    attempts: 0,
+    lastError: {
+      reason: String(posture?.reason || 'runtime authority not ready').trim(),
+      authorityLifecycleState: String(posture?.state || 'waitingAuthority').trim() || 'waitingAuthority',
+    },
+  };
+  pendingAuthorityIntents.set(activationId, entry);
+  while (pendingAuthorityIntents.size > PENDING_AUTHORITY_INTENT_LIMIT) {
+    const first = pendingAuthorityIntents.keys().next().value;
+    pendingAuthorityIntents.delete(first);
+  }
+  recordRuntimeEvent('interaction.prepared', {
+    activationId,
+    interactionId,
+    channelId,
+    capability: appIntentCapability(method, resolvedIntent),
+    state: 'waitingAuthority',
+    authoritySummary,
+    routingScope,
+    blockedAuthorityDomain: SWARM.AUTHORITY_DOMAIN.RUNTIME,
+    authorityLifecycleState: entry.authorityLifecycleState,
+    reason: entry.lastError.reason,
+  });
+  broadcastSnapshot();
+  return {
+    ok: true,
+    result: {
+      activationId,
+      interactionId,
+      state: 'waitingAuthority',
+      pendingAuthority: true,
+      blockedAuthorityDomain: SWARM.AUTHORITY_DOMAIN.RUNTIME,
+      authorityLifecycleState: entry.authorityLifecycleState,
+      authoritySummary,
+      routingScope,
+      reason: entry.lastError.reason,
+    },
+  };
+}
+
+async function flushPendingAuthorityIntents(reason = 'authority.ready') {
+  if (flushingPendingAuthorityIntents || pendingAuthorityIntents.size === 0) return;
+  flushingPendingAuthorityIntents = true;
+  try {
+    const posture = await runtimeAuthorityPosture();
+    if (posture.state !== 'ready') return;
+    for (const [activationId, entry] of Array.from(pendingAuthorityIntents.entries())) {
+      if (Number(entry.expiresAt || 0) > 0 && Number(entry.expiresAt || 0) <= nowMs()) {
+        pendingAuthorityIntents.set(activationId, {
+          ...entry,
+          state: 'expired',
+          updatedAt: nowMs(),
+          lastError: { reason: 'pending activation expired before runtime authority became ready' },
+        });
+        continue;
+      }
+      pendingAuthorityIntents.delete(activationId);
+      try {
+        const queued = await queueRuntimeAppIntent(entry.method, entry.message);
+        recordRuntimeEvent('interaction.repaired', {
+          activationId,
+          interactionId: entry.interactionId,
+          level: 'info',
+          reason,
+          repairedState: queued?.result?.state || queued?.result?.status || 'queued',
+          frameId: queued?.result?.frameId || queued?.result?.frame?.frameId || '',
+        });
+      } catch (error) {
+        pendingAuthorityIntents.set(activationId, {
+          ...entry,
+          state: 'repairPending',
+          attempts: Number(entry.attempts || 0) + 1,
+          updatedAt: nowMs(),
+          lastError: { reason: String(error?.message || error || 'pending activation repair failed') },
+        });
+        recordRuntimeEvent('interaction.repair.failed', {
+          activationId,
+          interactionId: entry.interactionId,
+          reason: String(error?.message || error || 'pending activation repair failed'),
+        });
+      }
+    }
+  } finally {
+    flushingPendingAuthorityIntents = false;
+    broadcastSnapshot();
+  }
+}
+
+async function flushPendingRouteIntents(reason = 'route.ready') {
+  if (flushingPendingRouteIntents || pendingRouteIntents.size === 0) return;
+  flushingPendingRouteIntents = true;
+  try {
+    for (const [activationId, entry] of Array.from(pendingRouteIntents.entries())) {
+      if (Number(entry.expiresAt || 0) > 0 && Number(entry.expiresAt || 0) <= nowMs()) {
+        pendingRouteIntents.set(activationId, {
+          ...entry,
+          state: 'expired',
+          updatedAt: nowMs(),
+          lastError: { reason: 'pending activation expired before route baseline became ready' },
+        });
+        continue;
+      }
+      const resolvedIntent = appIntentResolvedRoute(entry.method, entry.intent || appIntentPayload(entry.message));
+      const channelId = appIntentChannelId(entry.method, resolvedIntent);
+      const routingScope = appIntentRoutingScopePosture(entry.method, resolvedIntent, {
+        channelId,
+        capability: appIntentCapability(entry.method, resolvedIntent),
+      });
+      if (!routingScopeReadyForActivation(entry.method, resolvedIntent, routingScope)) {
+        pendingRouteIntents.set(activationId, {
+          ...entry,
+          state: routeWaitingStateForRoutingScope(routingScope),
+          routingScope,
+          updatedAt: nowMs(),
+          lastError: {
+            reason: String(routingScope?.blockedReason || routingScope?.state || 'route baseline not ready').trim(),
+            routingScopeState: String(routingScope?.state || '').trim(),
+          },
+        });
+        continue;
+      }
+      pendingRouteIntents.delete(activationId);
+      try {
+        const queued = await queueRuntimeAppIntent(entry.method, entry.message);
+        recordRuntimeEvent('interaction.repaired', {
+          activationId,
+          interactionId: entry.interactionId,
+          level: 'info',
+          reason,
+          repairedState: queued?.result?.state || queued?.result?.status || 'queued',
+          frameId: queued?.result?.frameId || queued?.result?.frame?.frameId || '',
+        });
+      } catch (error) {
+        pendingRouteIntents.set(activationId, {
+          ...entry,
+          state: 'repairPending',
+          attempts: Number(entry.attempts || 0) + 1,
+          updatedAt: nowMs(),
+          lastError: { reason: String(error?.message || error || 'pending route activation repair failed') },
+        });
+        recordRuntimeEvent('interaction.repair.failed', {
+          activationId,
+          interactionId: entry.interactionId,
+          reason: String(error?.message || error || 'pending route activation repair failed'),
+        });
+      }
+    }
+  } finally {
+    flushingPendingRouteIntents = false;
+    broadcastSnapshot();
+  }
+}
+
+async function resolveRuntimeCapability(message) {
+  const intent = appIntentPayload(message);
+  const requestId = String(intent.requestId || message.requestId || '').trim();
+  const issuedAt = Number(intent.issuedAt || 0) || nowMs();
+  const expiresAt = Number(intent.expiresAt || 0) || (issuedAt + 90_000);
+  const capability = String(intent.capabilityRef || intent.capability || '').trim() || RUNTIME_APP_INTENT.CAPABILITY_RESOLVE;
+  const resolutionMethod = capability === SWARM.CORE_CAPABILITY.MEDIA_STREAM_PREVIEW
+    || capability === SWARM.CORE_CAPABILITY.STREAM_SESSION_OFFER
+    || capability === SWARM.CORE_CAPABILITY.STREAM_SESSION_CONTROL
+    ? RUNTIME_APP_INTENT.STREAM_OPEN
+    : RUNTIME_APP_INTENT.CAPABILITY_RESOLVE;
+  const resolvedIntent = appIntentResolvedRoute(resolutionMethod, {
+    ...intent,
+    capabilityRef: capability,
+  });
+  const derived = deriveServiceContextForIntent(resolutionMethod, resolvedIntent);
+  const selectedNode = derived?.selectedNode && typeof derived.selectedNode === 'object' ? derived.selectedNode : null;
+  const nodeRef = String(
+    resolvedIntent.nodeRef
+      || selectedNode?.nodeId
+      || selectedNode?.path
+      || selectedNode?.label
+      || appIntentNodeRef(resolutionMethod, resolvedIntent)
+      || '',
+  ).trim();
+  const channelId = String(
+    resolvedIntent.channelId
+      || selectedNode?.channelId
+      || selectedNode?.channel
+      || selectedNode?.backingChannel
+      || appIntentChannelId(resolutionMethod, resolvedIntent)
+      || '',
+  ).trim();
+  const service = String(resolvedIntent.service || derived?.service || '').trim();
+  const servicePk = String(resolvedIntent.servicePk || derived?.servicePk || '').trim();
+  const serviceRef = String(resolvedIntent.serviceRef || derived?.serviceRef || '').trim() || defaultServiceRefForService(service, servicePk);
+  const serviceMemberRef = resolvedMemberPkFromCandidates(
+    resolvedIntent.serviceMemberRef,
+    resolvedIntent.routeMemberRef,
+    resolvedIntent.memberRef,
+    derived?.serviceMemberRef,
+    derived?.routeMemberRef,
+    derived?.liveEdgeRoute?.memberRef,
+    servicePk,
+  );
+  const routingScope = appIntentRoutingScopePosture(resolutionMethod, resolvedIntent, { channelId, capability });
+  const posture = await runtimeAuthorityPosture();
+  const authorityReady = posture?.ready === true;
+  const routeReady = routingScopeReadyForActivation(resolutionMethod, resolvedIntent, routingScope);
+  const state = !service && !servicePk
+    ? 'waitingResolution'
+    : !nodeRef || !channelId
+      ? 'waitingResolution'
+      : !authorityReady
+        ? 'waitingAuthority'
+        : !routeReady
+        ? routeWaitingStateForRoutingScope(routingScope)
+        : 'resolved';
+  const authorityState = String(posture?.state || 'unavailable').trim() || 'unavailable';
+  const activationId = appIntentActivationId(resolutionMethod, resolvedIntent, requestId);
+  const resolvedAt = nowMs();
+  const selfCapability = runtimeSelfCapabilityAssessment({
+    method: resolutionMethod,
+    activationId,
+    capability,
+    posture,
+    state,
+    nodeRef,
+    channelId,
+    service,
+    servicePk,
+    serviceRef,
+    serviceMemberRef,
+    routingScope,
+    updatedAt: resolvedAt,
+  });
+  const result = {
+    local: true,
+    state,
+    requestId,
+    activationId,
+    nodeRef,
+    capabilityRef: capability,
+    channelId,
+    service,
+    servicePk,
+    serviceRef,
+    ...(serviceMemberRef ? { serviceMemberRef, routeMemberRef: serviceMemberRef } : {}),
+    gatewayPk: String(resolvedIntent.gatewayPk || derived?.hostGatewayPk || '').trim(),
+    identityId: String(resolvedIntent.identityId || derived?.identityId || defaultIdentityId()).trim(),
+    routingScope,
+    authorityLifecycleState: authorityState,
+    selfCapability,
+    resolvedActivationEnvelope: {
+      kind: 'runtime.resolvedActivationEnvelope',
+      activationId,
+      requesterRef: resolvedMemberPkFromCandidates(resolvedIntent.requesterRef, posture?.devicePk),
+      authority: {
+        runtime: {
+          state: authorityState,
+          ready: posture?.ready === true,
+          devicePk: String(posture?.devicePk || '').trim(),
+        },
+      },
+      service,
+      servicePk,
+      serviceRef,
+      ...(serviceMemberRef ? { serviceMemberRef, routeMemberRef: serviceMemberRef } : {}),
+      nodeRef,
+      capabilityRef: capability,
+      channelId,
+      sourceIds: normalizeArray(resolvedIntent.sourceIds || resolvedIntent.sources || resolvedIntent.offer?.sourceIds || resolvedIntent.payload?.sourceIds)
+        .map((entry) => String(entry || '').trim())
+        .filter(Boolean),
+      routingScope,
+      issuedAt,
+      expiresAt,
+      resolvedAt,
+    },
+  };
+  recordRuntimeEvent('runtime.capability.resolved', {
+    activationId,
+    state,
+    service,
+    servicePk,
+    serviceRef,
+    serviceMemberRef,
+    nodeRef,
+    capability,
+    channelId,
+    routingScope,
+    authorityLifecycleState: authorityState,
+    selfCapabilityStatus: String(selfCapability?.status || '').trim(),
+    selfCapabilityRunlevel: String(selfCapability?.runlevel || '').trim(),
+    selfCapabilityContractReady: selfCapability?.contractReady !== false,
+    blockedReasons: safeClone(selfCapability?.blockedReasons || []),
+  });
+  broadcastSnapshot();
+  return { ok: true, result };
+}
+
+async function queueRuntimeAppIntent(method, message) {
+  const intent = appIntentPayload(message);
+  const requestId = String(intent.requestId || message.requestId || '').trim();
+  const posture = await runtimeAuthorityPosture();
+  if (posture.state !== 'ready') {
+    return pendingRuntimeAuthorityIntent(method, message, posture);
+  }
+  const authority = await runtimeDeviceAuthority();
+  const issuedAt = Number(intent.issuedAt || 0) || nowMs();
+  const expiresAt = Number(intent.expiresAt || 0) || (issuedAt + 90_000);
+  const nonce = String(intent.nonce || '').trim() || randomOpaqueId('nonce');
+  const resolvedIntent = appIntentResolvedRoute(method, intent);
+  const activation = appIntentActivationRecord(method, resolvedIntent, authority, issuedAt, expiresAt, requestId);
+  const channelId = appIntentChannelId(method, resolvedIntent);
+  if (isRuntimeStreamIntent(method) && !channelId) {
+    throw new Error('runtime could not resolve stream route channel');
+  }
+  const routingScope = appIntentRoutingScopePosture(method, resolvedIntent, { channelId, capability: appIntentCapability(method, resolvedIntent) });
+  const routePromise = appIntentRoutePromise(method, resolvedIntent, authority, issuedAt, expiresAt, activation);
+  const authoritySummary = appIntentAuthoritySummary(method, resolvedIntent, authority);
+  authoritySummary.routingScope = routingScope;
+  const interaction = appIntentInteractionRecord(method, resolvedIntent, authority, activation, routePromise, issuedAt);
+  const swarmActivation = appIntentSwarmActivationRecord(activation, interaction, authoritySummary, issuedAt, expiresAt);
+  if (!routingScopeReadyForActivation(method, resolvedIntent, routingScope)) {
+    return pendingRouteIntent(method, message, {
+      resolvedIntent,
+      activation,
+      routePromise,
+      interaction,
+      swarmActivation,
+      authoritySummary,
+      routingScope,
+      channelId,
+    });
+  }
+  const frame = makeSwarmFrame({
+    kind: appIntentFrameKind(method, resolvedIntent),
+    issuer: authority.publicKey,
+    audience: appIntentAudience(method, resolvedIntent),
+    zoneScope: appIntentZoneScope(resolvedIntent, { requirePropagation: true }),
+    issuedAt,
+    expiresAt,
+    nonce,
+    correlationId: requestId || activation.activationId || nonce,
+    channelId,
+    recordRef: appIntentRecordRef(method, resolvedIntent, activation),
+    capability: appIntentCapability(method, resolvedIntent),
+    body: appIntentBody(method, resolvedIntent, authority, issuedAt, expiresAt, nonce, activation),
+  });
+  recordRuntimeEvent('interaction.prepared', {
+    activationId: activation.activationId,
+    interactionId: interaction.interactionId,
+    routePromiseId: routePromise?.promiseId || '',
+    channelId,
+    capability: appIntentCapability(method, resolvedIntent),
+    authoritySummary,
+    routingScope,
+  });
+  return queueSwarmFrame({
+    frame,
+    retryPolicy: message.retryPolicy || intent.retryPolicy || { onReject: 'preserve' },
+    activationId: activation.activationId,
+    interactionId: interaction.interactionId,
+    routePromiseId: routePromise?.promiseId || '',
+    authoritySummary,
+    routingScope,
+    interaction,
+    swarmActivation,
+  });
+}
+
+function findQueuedFrame(correlationId) {
+  const target = String(correlationId || '').trim();
+  if (!target) return null;
+  if (outboundSwarmFrames.has(target)) return outboundSwarmFrames.get(target);
+  for (const entry of outboundSwarmFrames.values()) {
+    if (queueCorrelationIds(entry).includes(target)) return entry;
+  }
+  return null;
+}
+
+function handleSwarmEdgeAck(message) {
+  const correlationId = String(message?.frame?.correlationId || message.correlationId || message.frameId || '').trim();
+  const entry = findQueuedFrame(correlationId);
+  if (!entry) return { ok: false, error: 'queued frame not found' };
+  if (markQueuedSwarmFrameExpired(entry) || queuedSwarmFrameTerminal(entry)) {
+    recordRuntimeEvent('frame.ack.ignored', {
+      frameId: entry.frameId,
+      correlationId,
+      ignoredReason: 'terminalActivation',
+      currentStatus: String(entry.status || '').trim(),
+    });
+    touchRuntime();
+    schedulePersist();
+    broadcastSnapshot();
+    return {
+      ok: true,
+      result: {
+        frameId: entry.frameId,
+        correlationId,
+        ignored: true,
+        status: String(entry.status || '').trim(),
+      },
+    };
+  }
+  const propagation = Array.isArray(message.propagation) ? safeClone(message.propagation) : [];
+  const bridge = message.bridge && typeof message.bridge === 'object' ? safeClone(message.bridge) : null;
+  entry.status = 'accepted';
+  entry.ackedAt = nowMs();
+  entry.ack = { correlationId, propagation, bridge, ackedAt: entry.ackedAt };
+  recordRuntimeEvent('frame.ack', {
+    frameId: entry.frameId,
+    correlationId,
+    propagationCount: propagation.length,
+  });
+  if (propagation.length === 0 && String(entry?.frame?.audience || entry?.frame?.capability || entry?.frame?.channelId || '').trim()) {
+    recordRouteObservation({
+      state: 'observingUnreachable',
+      frameId: entry.frameId,
+      correlationId,
+      failedPredicates: ['zeroPropagation'],
+      message: 'frame accepted at edge intake but no eligible route member was selected',
+      retryable: true,
+    });
+  }
+  touchRuntime();
+  schedulePersist();
+  broadcast({ type: 'swarm.edge.ack', frameId: entry.frameId, correlationId, propagation, bridge });
+  broadcastSnapshot();
+  return { ok: true, result: { frameId: entry.frameId, correlationId, propagation, bridge } };
+}
+
+function structuredRejectError(message) {
+  const error = message.error && typeof message.error === 'object'
+    ? message.error
+    : message?.frame?.body?.error && typeof message.frame.body.error === 'object'
+      ? message.frame.body.error
+      : {};
+  const ackReason = String(message?.frame?.ack?.reasonCode || message?.frame?.ack?.reason_code || '').trim();
+  const detail = String(message.detail || '').trim();
+  return {
+    code: String(error.code || message.reasonCode || ackReason || 'gateway.reject').trim(),
+    message: String(error.message || message.reason || detail || ackReason || 'frame rejected').trim(),
+    retryable: error.retryable !== undefined ? error.retryable === true : message.retryable === true,
+  };
+}
+
+function handleSwarmEdgeReject(message) {
+  const correlationId = String(message?.frame?.correlationId || message.correlationId || message.frameId || '').trim();
+  const entry = findQueuedFrame(correlationId);
+  if (!entry) return { ok: false, error: 'queued frame not found' };
+  if (markQueuedSwarmFrameExpired(entry) || queuedSwarmFrameTerminal(entry)) {
+    recordRuntimeEvent('frame.reject.ignored', {
+      frameId: entry.frameId,
+      correlationId,
+      ignoredReason: 'terminalActivation',
+      currentStatus: String(entry.status || '').trim(),
+    });
+    touchRuntime();
+    schedulePersist();
+    broadcastSnapshot();
+    return {
+      ok: true,
+      result: {
+        frameId: entry.frameId,
+        correlationId,
+        ignored: true,
+        status: String(entry.status || '').trim(),
+      },
+    };
+  }
+  const error = structuredRejectError(message);
+  const policy = normalizeSwarmRetryPolicy(message.retryPolicy || entry.retryPolicy);
+  const replayLike = ['replay', 'replayedFrame', 'replayed_frame'].includes(String(error.code || '').trim());
+  const preserve = !replayLike && error.retryable !== false && policy.onReject !== 'drop';
+  entry.status = preserve ? 'rejected' : 'dropped';
+  entry.rejectedAt = nowMs();
+  entry.lastError = error;
+  entry.retrySuppressed = true;
+  const rejection = {
+    frameId: entry.frameId,
+    correlationId,
+    error,
+    preserved: preserve,
+    retrySuppressed: true,
+    rejectedAt: entry.rejectedAt,
+  };
+  swarmEdge.rejections.push(rejection);
+  if (!preserve) {
+    clearServiceAdmissionTimeout(entry);
+    outboundSwarmFrames.delete(entry.frameId);
+  }
+  recordRuntimeEvent('frame.reject', {
+    frameId: entry.frameId,
+    correlationId,
+    error,
+    preserved: preserve,
+    retrySuppressed: true,
+  });
+  touchRuntime();
+  schedulePersist();
+  broadcast({ type: 'swarm.edge.reject', rejection: safeClone(rejection) });
+  broadcastSnapshot();
+  return { ok: true, result: safeClone(rejection) };
+}
+
+function serviceRecordService(record) {
+  return String(record?.service || record?.role || '').trim().toLowerCase();
+}
+
+function serviceRecordServicePk(record) {
+  return String(record?.servicePk || record?.service_pk || record?.devicePk || record?.pk || '').trim();
+}
+
+function serviceRecordMemberRef(record) {
+  return resolvedMemberPkFromCandidates(
+    record?.swarmEdge?.memberRef
+    , record?.swarmEdge?.member_ref
+    , record?.swarm_edge?.memberRef
+    , record?.swarm_edge?.member_ref
+    , record?.memberRef
+    , record?.member_ref
+    , record?.serviceMemberRef
+    , record?.service_member_ref
+    , record?.facts?.swarmEdge?.memberRef
+    , record?.facts?.swarm_edge?.member_ref
+    , record?.servicePk
+    , record?.service_pk
+    , record?.devicePk
+    , record?.pk
+  );
+}
+
+function serviceRecordServiceRef(record) {
+  return String(record?.serviceRef || record?.service_ref || '').trim()
+    || defaultServiceRefForService(serviceRecordService(record), serviceRecordServicePk(record));
+}
+
+function serviceRecordHostGatewayPk(record) {
+  return String(record?.hostGatewayPk || record?.host_gateway_pk || record?.gatewayPk || record?.gateway_pk || '').trim();
+}
+
+function serviceRecordIdentityId(record) {
+  const facts = record?.facts && typeof record.facts === 'object' ? record.facts : {};
+  return String(
+    record?.identityId
+    || record?.identity_id
+    || record?.ownerIdentityId
+    || record?.owner_identity_id
+    || facts.identityId
+    || facts.identity_id
+    || facts.ownerIdentityId
+    || facts.owner_identity_id
+    || '',
+  ).trim();
+}
+
+function serviceRecordSurfaceChannel(record) {
+  return String(record?.surfaceChannel || record?.surface_channel || '').trim();
+}
+
+function serviceRecordAliases(record) {
+  const aliases = normalizeArray(record?.aliases || record?.serviceAliases || record?.service_aliases)
+    .map((alias) => String(alias || '').trim())
+    .filter(Boolean);
+  const label = String(record?.deviceLabel || record?.label || record?.serviceLabel || record?.name || '').trim();
+  const service = serviceRecordService(record);
+  return Array.from(new Set([label, service, ...aliases].filter(Boolean)));
+}
+
+function serviceRecordLocation(record) {
+  const source = record?.location && typeof record.location === 'object' ? record.location : {};
+  const gatewayPk = serviceRecordHostGatewayPk(record) || String(source.gatewayPk || source.gateway_pk || '').trim();
+  const label = String(
+    source.label
+      || record?.hostGatewayLabel
+      || record?.host_gateway_label
+      || managedState.resourceNames?.[gatewayPk]
+      || '',
+  ).trim();
+  const locationId = String(source.locationId || source.location_id || label || gatewayPk || '').trim();
+  if (!locationId && !gatewayPk && !label) return null;
+  return {
+    locationId,
+    label: label || locationId || gatewayPk,
+    gatewayPk,
+  };
+}
+
+function serviceRecordSummary(record) {
+  return String(record?.summary || record?.description || '').trim();
+}
+
+function serviceRecordHealth(record) {
+  const health = record?.health && typeof record.health === 'object' ? record.health : {};
+  return safeClone(health);
+}
+
+function normalizeServiceZoneScope(value) {
+  if (!value) return null;
+  const source = value && typeof value === 'object' ? value : { zoneId: value };
+  const zoneId = String(
+    source.zoneId
+    || source.zone_id
+    || source.zone
+    || source.zoneKey
+    || source.zone_key
+    || source.key
+    || '',
+  ).trim();
+  if (!zoneId || zoneId.startsWith('identity:') || zoneId === 'runtime.local' || zoneId === 'local') return null;
+  return {
+    zoneId,
+    privacy: String(source.privacy || 'rawIds').trim() || 'rawIds',
+    ttl: positiveNumber(source.ttl || source.ttlSeconds || source.ttl_seconds, 30),
+    maxHops: nonNegativeNumber(source.maxHops ?? source.max_hops, 2),
+  };
+}
+
+function firstServiceZoneScopeFromList(value) {
+  if (!Array.isArray(value)) return null;
+  for (const entry of value) {
+    const scope = normalizeServiceZoneScope(entry);
+    if (scope) return scope;
+  }
+  return null;
+}
+
+function serviceRecordZoneScope(record) {
+  if (!record || typeof record !== 'object') return null;
+  const facts = record.facts && typeof record.facts === 'object' ? record.facts : {};
+  const health = record.health && typeof record.health === 'object' ? record.health : {};
+  return normalizeServiceZoneScope(record.zoneScope || record.zone_scope)
+    || normalizeServiceZoneScope(facts.zoneScope || facts.zone_scope)
+    || normalizeServiceZoneScope(health.zoneScope || health.zone_scope)
+    || normalizeServiceZoneScope({
+      zoneId: record.zoneId || record.zone_id || record.zoneKey || record.zone_key || record.zone,
+      privacy: record.zonePrivacy || record.zone_privacy,
+    })
+    || normalizeServiceZoneScope({
+      zoneId: facts.zoneId || facts.zone_id || facts.zoneKey || facts.zone_key || facts.zone,
+      privacy: facts.zonePrivacy || facts.zone_privacy,
+    })
+    || firstServiceZoneScopeFromList(record.zones)
+    || firstServiceZoneScopeFromList(facts.zones)
+    || firstServiceZoneScopeFromList(health.zones);
+}
+
+function serviceRecordNodeCandidates(record) {
+  const facts = record?.facts && typeof record.facts === 'object' ? record.facts : {};
+  const health = record?.health && typeof record.health === 'object' ? record.health : {};
+  const candidates = [];
+  for (const source of [
+    record?.nodeDescriptors,
+    record?.node_descriptors,
+    facts.nodeDescriptors,
+    facts.node_descriptors,
+    health.nodeDescriptors,
+    health.node_descriptors,
+    record?.nodes,
+    facts.nodes,
+    health.nodes,
+  ]) {
+    for (const node of normalizeArray(source)) {
+      candidates.push(node);
+    }
+  }
+  return candidates;
+}
+
+function capabilitiesFromNode(node) {
+  const direct = normalizeArray(node?.capabilities)
+    .map((capability) => String(capability || '').trim())
+    .filter(Boolean);
+  const fieldCapabilities = normalizeArray(node?.fields)
+    .flatMap((field) => normalizeArray(field?.capabilities))
+    .map((capability) => String(capability || '').trim())
+    .filter(Boolean);
+  return Array.from(new Set([...direct, ...fieldCapabilities]));
+}
+
+function normalizeServiceNodeDescriptor(node, fallbackZoneScope = null) {
+  if (typeof node === 'string') {
+    const path = node.trim();
+    if (!path) return null;
+    return {
+      path,
+      nodeId: path,
+      label: path,
+      description: '',
+      channelId: '',
+      zoneScope: fallbackZoneScope || null,
+      capabilities: [],
+    };
+  }
+  if (!node || typeof node !== 'object') return null;
+  const path = String(node.path || node.nodePath || node.node_path || node.nodeId || node.node_id || node.label || '').trim();
+  const nodeId = String(node.nodeId || node.node_id || path).trim();
+  const label = String(node.label || path || nodeId).trim();
+  const channelId = String(node.channelId || node.channel_id || node.channel || node.backingChannel || node.backing_channel || '').trim();
+  if (!path && !nodeId && !label && !channelId) return null;
+  return {
+    path: path || nodeId || label || channelId,
+    nodeId: nodeId || path || label || channelId,
+    label: label || path || nodeId || channelId,
+    description: String(node.description || '').trim(),
+    channelId,
+    zoneScope: normalizeServiceZoneScope(node.zoneScope || node.zone_scope) || fallbackZoneScope || null,
+    capabilities: capabilitiesFromNode(node),
+  };
+}
+
+function serviceRecordNodes(record) {
+  const fallbackZoneScope = serviceRecordZoneScope(record);
+  const seen = new Set();
+  const out = [];
+  for (const node of serviceRecordNodeCandidates(record)) {
+    const normalized = normalizeServiceNodeDescriptor(node, fallbackZoneScope);
+    if (!normalized) continue;
+    const key = [normalized.path, normalized.nodeId, normalized.channelId].filter(Boolean).join('|');
+    if (key && seen.has(key)) continue;
+    if (key) seen.add(key);
+    out.push(normalized);
+  }
+  return out;
+}
+
+function hostedServiceRecords() {
+  const out = [];
+  const seen = new Set();
+  for (const bucket of Object.values(managedState.applianceSnapshot || {})) {
+    for (const record of normalizeArray(bucket)) {
+      if (isManagedServiceRecord(record)) {
+        const service = serviceRecordService(record);
+        const servicePk = serviceRecordServicePk(record);
+        const key = [servicePk, service, serviceRecordHostGatewayPk(record)].filter(Boolean).join('|');
+        if (key && !seen.has(key)) {
+          seen.add(key);
+          out.push(safeClone(record));
+        }
+      }
+      const hostGatewayPk = String(record?.devicePk || record?.pk || '').trim();
+      const hostGatewayLabel = String(record?.deviceLabel || record?.label || '').trim();
+      const hostGatewayZoneScope = serviceRecordZoneScope(record);
+      for (const hosted of normalizeHostedServices(record?.hostedServices || record?.hosted_services)) {
+        const merged = {
+          ...hosted,
+          hostGatewayPk: serviceRecordHostGatewayPk(hosted) || hostGatewayPk,
+          hostGatewayLabel: hosted.hostGatewayLabel || hostGatewayLabel,
+          identityId: serviceRecordIdentityId(hosted) || serviceRecordIdentityId(record) || undefined,
+          zoneScope: serviceRecordZoneScope(hosted) || hostGatewayZoneScope || undefined,
+        };
+        const service = serviceRecordService(merged);
+        const servicePk = serviceRecordServicePk(merged);
+        const key = [servicePk, service, serviceRecordHostGatewayPk(merged)].filter(Boolean).join('|');
+        if (key && !seen.has(key)) {
+          seen.add(key);
+          out.push(safeClone(merged));
+        }
+      }
+    }
+  }
+  return out.filter((record) => serviceRecordService(record) && serviceRecordServicePk(record));
+}
+
+function serviceDescriptorFromRecord(record) {
+  const surfaceChannel = serviceRecordSurfaceChannel(record);
+  return {
+    service: serviceRecordService(record),
+    servicePk: serviceRecordServicePk(record),
+    serviceRef: serviceRecordServiceRef(record),
+    serviceMemberRef: serviceRecordMemberRef(record),
+    hostGatewayPk: serviceRecordHostGatewayPk(record),
+    identityId: serviceRecordIdentityId(record),
+    zoneScope: serviceRecordZoneScope(record),
+    location: serviceRecordLocation(record),
+    aliases: serviceRecordAliases(record),
+    surfaceChannel,
+    summary: serviceRecordSummary(record),
+    health: serviceRecordHealth(record),
+    nodes: serviceRecordNodes(record),
+  };
+}
+
+function surfaceFromProjection(projection) {
+  const surface = projection?.payload?.surface && typeof projection.payload.surface === 'object'
+    ? projection.payload.surface
+    : projection?.surface && typeof projection.surface === 'object'
+      ? projection.surface
+      : null;
+  return surface ? safeClone(surface) : null;
+}
+
+function retainedSurfaceForDescriptor(descriptor) {
+  const surfaceChannel = String(descriptor?.surfaceChannel || '').trim();
+  const servicePk = String(descriptor?.servicePk || '').trim();
+  const service = String(descriptor?.service || '').trim();
+  if (!surfaceChannel) return null;
+  for (const projection of retainedProjections.values()) {
+    if (String(projection?.channelId || '').trim() !== surfaceChannel) continue;
+    if (servicePk && String(projection?.servicePk || projection?.service_pk || '').trim() !== servicePk) continue;
+    if (!servicePk && service && String(projection?.service || '').trim() !== service) continue;
+    const surface = surfaceFromProjection(projection);
+    if (surface) return surface;
+  }
+  return null;
+}
+
+function serviceCatalog() {
+  const services = hostedServiceRecords().map((record) => {
+    const descriptor = serviceDescriptorFromRecord(record);
+    const surface = retainedSurfaceForDescriptor(descriptor);
+    return {
+      ...descriptor,
+      summary: String(surface?.summary || descriptor.summary || '').trim(),
+      health: surface?.health && typeof surface.health === 'object' ? safeClone(surface.health) : descriptor.health,
+      healthNode: String(surface?.healthNode || '').trim(),
+      nodes: Array.isArray(surface?.nodes)
+        ? surface.nodes.map((node) => ({
+            path: String(node?.path || node?.nodePath || node?.nodeId || '').trim(),
+            nodeId: String(node?.nodeId || '').trim(),
+            label: String(node?.label || node?.path || node?.nodeId || '').trim(),
+            description: String(node?.description || '').trim(),
+            channelId: String(node?.channelId || node?.channel || node?.backingChannel || '').trim(),
+            zoneScope: normalizeServiceZoneScope(node?.zoneScope || node?.zone_scope) || descriptor.zoneScope || null,
+            capabilities: capabilitiesFromNode(node),
+          }))
+        : descriptor.nodes
+            .map((node) => normalizeServiceNodeDescriptor(node, descriptor.zoneScope || null))
+            .filter(Boolean),
+      surface: surface || null,
+    };
+  });
+  return {
+    updatedAt: runtimeUpdatedAt || nowMs(),
+    services,
+  };
+}
+
+function liveDirectoryPayloads() {
+  const out = [];
+  for (const projection of retainedProjections.values()) {
+    const payload = projection?.payload && typeof projection.payload === 'object' ? projection.payload : {};
+    const directory = payload.directory && typeof payload.directory === 'object'
+      ? payload.directory
+      : payload.state?.directory && typeof payload.state.directory === 'object'
+        ? payload.state.directory
+        : null;
+    if (directory) out.push(directory);
+  }
+  return out;
+}
+
+function servicePkFromServiceRef(value) {
+  const text = String(value || '').trim();
+  if (!text.startsWith('service:')) return '';
+  const raw = text.slice('service:'.length);
+  const parts = raw.split(':').map((part) => part.trim()).filter(Boolean);
+  return parts.length > 1 ? parts.at(-1) : raw;
+}
+
+function resolvedMemberPkFromRef(value) {
+  const text = String(value || '').trim();
+  if (!text) return '';
+  try {
+    return assertResolvedMemberRef(text);
+  } catch {
+    const servicePk = servicePkFromServiceRef(text);
+    if (servicePk) {
+      try {
+        return assertResolvedMemberRef(servicePk);
+      } catch {
+        return '';
+      }
+    }
+    return '';
+  }
+}
+
+function resolvedMemberPkFromCandidates(...values) {
+  for (const value of values) {
+    const resolved = resolvedMemberPkFromRef(value);
+    if (resolved) return resolved;
+  }
+  return '';
+}
+
+function defaultServiceRefForPk(value) {
+  const pk = String(value || '').trim();
+  return pk ? `service:${pk}` : '';
+}
+
+function defaultServiceRefForService(service, value) {
+  const pk = String(value || '').trim();
+  const serviceId = String(service || '').trim().toLowerCase();
+  if (!pk) return '';
+  return serviceId ? `service:${serviceId}:${pk}` : defaultServiceRefForPk(pk);
+}
+
+function serviceRefMatches(value, servicePk) {
+  const serviceRef = String(value || '').trim();
+  const pk = String(servicePk || '').trim();
+  return Boolean(serviceRef && pk && (
+    serviceRef === pk
+    || serviceRef === `service:${pk}`
+    || servicePkFromServiceRef(serviceRef) === pk
+  ));
+}
+
+function liveEdgeRouteForService({ servicePk = '', service = '', capability = '', channelId = '' } = {}) {
+  const targetServicePk = String(servicePk || '').trim();
+  const targetService = String(service || '').trim().toLowerCase();
+  const targetCapability = String(capability || '').trim();
+  const targetChannel = String(channelId || '').trim();
+  let best = null;
+  const scoreCandidate = ({ serviceRef = '', servicePk = '', service = '' } = {}) => {
+    const candidateServiceRef = String(serviceRef || '').trim();
+    const candidateServicePk = String(servicePk || '').trim() || servicePkFromServiceRef(candidateServiceRef);
+    const candidateService = String(service || '').trim().toLowerCase();
+    let score = 0;
+    if (targetServicePk && (candidateServicePk === targetServicePk || serviceRefMatches(candidateServiceRef, targetServicePk))) score += 100;
+    if (targetService && candidateService === targetService) score += 40;
+    if (candidateServicePk || candidateServiceRef || candidateService) score += 10;
+    return score;
+  };
+  for (const directory of liveDirectoryPayloads()) {
+    const advertisements = normalizeArray(directory.advertisements);
+    const entries = normalizeArray(directory.entries);
+    for (const entry of entries) {
+      if (!entry || typeof entry !== 'object') continue;
+      const entryCapability = String(entry.capability || '').trim();
+      const entryChannel = String(entry.channelId || entry.channel_id || '').trim();
+      if (targetCapability && entryCapability !== targetCapability) continue;
+      if (targetChannel && entryChannel !== targetChannel) continue;
+      const advertisement = advertisements.find((ad) => {
+        if (!ad || typeof ad !== 'object') return false;
+        const adMember = String(ad.memberRef || ad.member_ref || '').trim();
+        const adCapability = String(ad.capability || '').trim();
+        return adMember === String(entry.memberRef || entry.member_ref || '').trim()
+          && (!entryCapability || adCapability === entryCapability);
+      }) || null;
+      const serviceRef = String(entry.serviceRef || entry.service_ref || advertisement?.serviceRef || advertisement?.service_ref || '').trim();
+      const entryServicePk = String(entry.servicePk || entry.service_pk || advertisement?.servicePk || advertisement?.service_pk || '').trim();
+      const inferredServicePk = entryServicePk || servicePkFromServiceRef(serviceRef);
+      const entryChannelLower = entryChannel.toLowerCase();
+      const channelImpliesService = Boolean(targetService && entryChannelLower && (
+        entryChannelLower === targetService
+        || entryChannelLower.startsWith(`${targetService}.`)
+      ));
+      const entryService = String(entry.service || entry.service_id || advertisement?.service || advertisement?.service_id || '').trim().toLowerCase();
+      const hasServiceIdentity = Boolean(inferredServicePk || serviceRef || entryService);
+      if (targetServicePk && hasServiceIdentity && inferredServicePk !== targetServicePk && !serviceRefMatches(serviceRef, targetServicePk)) continue;
+      if (targetServicePk && !hasServiceIdentity && !channelImpliesService) continue;
+      const serviceMatches = !targetService
+        || entryService === targetService
+        || serviceRef.toLowerCase().includes(targetService)
+        || channelImpliesService;
+      if (!targetServicePk && !serviceMatches) continue;
+      const zoneScope = normalizeServiceZoneScope(entry.zoneScope || entry.zone_scope || advertisement?.zoneScope || advertisement?.zone_scope);
+      const route = {
+        memberRef: String(entry.memberRef || entry.member_ref || serviceRef || '').trim(),
+        servicePk: targetServicePk || inferredServicePk,
+        serviceRef,
+        channelId: entryChannel,
+        capability: entryCapability,
+        zoneScope,
+        score: scoreCandidate({ serviceRef, servicePk: inferredServicePk, service: entryService }),
+      };
+      if (!best || route.score > best.score) best = route;
+    }
+  }
+  if (!best) return null;
+  const { score, ...route } = best;
+  return route;
+}
+
+function mergeLiveEdgeRouteDescriptor(descriptor, { capability = '', channelId = '' } = {}) {
+  if (!descriptor || typeof descriptor !== 'object') return descriptor;
+  const liveRoute = liveEdgeRouteForService({
+    servicePk: descriptor.servicePk,
+    service: descriptor.service,
+    capability,
+    channelId,
+  });
+  if (!liveRoute) return descriptor;
+  const selectedNode = descriptor.selectedNode && typeof descriptor.selectedNode === 'object'
+    ? {
+        ...descriptor.selectedNode,
+        channelId: descriptor.selectedNode.channelId || liveRoute.channelId,
+        zoneScope: descriptor.selectedNode.zoneScope || liveRoute.zoneScope || null,
+      }
+    : null;
+  return {
+    ...descriptor,
+    servicePk: descriptor.servicePk || liveRoute.servicePk,
+    serviceRef: descriptor.serviceRef || liveRoute.serviceRef,
+    serviceMemberRef: liveRoute.memberRef || descriptor.serviceMemberRef,
+    routeMemberRef: liveRoute.memberRef || descriptor.routeMemberRef,
+    zoneScope: descriptor.zoneScope || liveRoute.zoneScope || null,
+    selectedNode,
+    liveEdgeRoute: liveRoute,
+  };
+}
+
+function surfaceNodeMatches(node, nodePath) {
+  const target = String(nodePath || '').trim().toLowerCase();
+  if (!target) return false;
+  const candidates = [
+    node?.path,
+    node?.nodePath,
+    node?.nodeId,
+    node?.label,
+    ...(Array.isArray(node?.aliases) ? node.aliases : []),
+  ].map((value) => String(value || '').trim().toLowerCase()).filter(Boolean);
+  return candidates.includes(target);
+}
+
+function serviceNodeForPolicy(policy) {
+  const service = String(policy?.service || '').trim().toLowerCase();
+  const nodePath = String(policy?.nodePath || policy?.node || '').trim();
+  if (!service || !nodePath) return null;
+  for (const record of hostedServiceRecords()) {
+    if (serviceRecordService(record) !== service) continue;
+    const descriptor = serviceDescriptorFromRecord(record);
+    const surface = retainedSurfaceForDescriptor(descriptor);
+    const node = normalizeArray(surface?.nodes).find((candidate) => surfaceNodeMatches(candidate, nodePath));
+    if (node) return { descriptor, surface, node };
+  }
+  return null;
+}
+
+function projectionNodePath(projection) {
+  const direct = String(projection?.nodePath || projection?.node || projection?.payload?.nodePath || '').trim();
+  if (direct) return direct;
+  const channelId = String(projection?.channelId || '').trim();
+  const servicePk = String(projection?.servicePk || projection?.service_pk || '').trim();
+  const service = String(projection?.service || '').trim().toLowerCase();
+  if (!channelId) return '';
+  for (const record of hostedServiceRecords()) {
+    const descriptor = serviceDescriptorFromRecord(record);
+    if (servicePk && descriptor.servicePk !== servicePk) continue;
+    if (!servicePk && service && descriptor.service !== service) continue;
+    const surface = retainedSurfaceForDescriptor(descriptor);
+    const node = normalizeArray(surface?.nodes).find((candidate) => String(candidate?.backingChannel || '').trim() === channelId);
+    if (node) return String(node.path || node.nodePath || node.nodeId || '').trim();
+  }
+  return '';
+}
+
+function nodeProjectionForRequest(message) {
+  const service = String(message.service || message?.payload?.service || '').trim().toLowerCase();
+  const nodePath = String(message.nodePath || message?.payload?.nodePath || message.node || message?.payload?.node || '').trim();
+  const servicePk = String(message.servicePk || message?.payload?.servicePk || '').trim();
+  if (!service || !nodePath) return null;
+  for (const record of hostedServiceRecords()) {
+    const descriptor = serviceDescriptorFromRecord(record);
+    if (descriptor.service !== service) continue;
+    if (servicePk && descriptor.servicePk !== servicePk) continue;
+    const surface = retainedSurfaceForDescriptor(descriptor);
+    const node = normalizeArray(surface?.nodes).find((candidate) => surfaceNodeMatches(candidate, nodePath));
+    const backingChannel = String(node?.backingChannel || '').trim();
+    if (!backingChannel) continue;
+    for (const projection of retainedProjections.values()) {
+      if (String(projection?.channelId || '').trim() !== backingChannel) continue;
+      if (descriptor.servicePk && String(projection?.servicePk || projection?.service_pk || '').trim() !== descriptor.servicePk) continue;
+      return safeClone(projection);
+    }
+  }
+  return null;
 }
 
 function projectionStoreKey(projection) {
@@ -392,7 +6627,11 @@ function projectionCoverage(projection) {
   const coverage = projection?.payload?.coverage && typeof projection.payload.coverage === 'object'
     ? projection.payload.coverage
     : {};
-  const materializedCount = projectionPayloadCount(projection);
+  const payloadCount = projectionPayloadCount(projection);
+  const coveredCount = Number(coverage.materializedCount);
+  const materializedCount = payloadCount > 0
+    ? payloadCount
+    : (Number.isFinite(coveredCount) ? Math.max(0, coveredCount) : 0);
   const targetCount = Math.max(Number(coverage.targetCount || 0), materializedCount);
   const completionRatio = targetCount > 0
     ? Math.min(1, materializedCount / targetCount)
@@ -439,7 +6678,7 @@ function randomOpaqueId(prefix) {
 function projectionPolicyStoreKey(policy) {
   return [
     String(policy?.service || '').trim(),
-    String(policy?.channelId || '').trim(),
+    String(policy?.nodePath || policy?.node || policy?.channelId || '').trim(),
     String(policy?.policyId || '').trim(),
   ].filter(Boolean).join('|');
 }
@@ -447,11 +6686,12 @@ function projectionPolicyStoreKey(policy) {
 function projectionPolicyForChannel(policy, channelId) {
   const targetChannelId = String(channelId || policy?.channelId || '').trim();
   const basePolicyId = String(policy?.policyId || 'default').trim() || 'default';
+  const sourceChannelId = String(policy?.channelId || '').trim();
   return {
     ...safeClone(policy),
     service: String(policy?.service || 'logging').trim() || 'logging',
     channelId: targetChannelId,
-    policyId: targetChannelId === String(policy?.channelId || '').trim()
+    policyId: !sourceChannelId || targetChannelId === sourceChannelId
       ? basePolicyId
       : `${basePolicyId}.${targetChannelId.replace(/[^a-z0-9]+/gi, '.')}`,
   };
@@ -459,10 +6699,18 @@ function projectionPolicyForChannel(policy, channelId) {
 
 function normalizeProjectionPolicyForRuntime(value) {
   const raw = value && typeof value === 'object' ? value : {};
+  const nodePath = String(raw.nodePath || raw.node || '').trim();
+  const service = String(raw.service || 'logging').trim() || 'logging';
+  const resolved = raw.channelId ? null : serviceNodeForPolicy({ service, nodePath });
+  const localLoggingChannel = service === 'logging' && nodePath
+    ? runtimeLoggingProjectionChannelForNodePath(nodePath)
+    : '';
+  const channelId = String(raw.channelId || resolved?.node?.backingChannel || localLoggingChannel || '').trim();
   const policy = {
     ...safeClone(raw),
-    service: String(raw.service || 'logging').trim() || 'logging',
-    channelId: String(raw.channelId || PROJECTION.CHANNEL.LOGGING_EVENTS).trim(),
+    service,
+    ...(nodePath ? { nodePath } : {}),
+    ...(channelId ? { channelId } : {}),
     policyId: String(raw.policyId || DEFAULT_LOGGING_POLICY_ID).trim() || DEFAULT_LOGGING_POLICY_ID,
     scope: raw.scope && typeof raw.scope === 'object' && !Array.isArray(raw.scope) ? safeClone(raw.scope) : {},
     syncDepthTarget: raw.syncDepthTarget && typeof raw.syncDepthTarget === 'object' && !Array.isArray(raw.syncDepthTarget)
@@ -472,7 +6720,8 @@ function normalizeProjectionPolicyForRuntime(value) {
       ? safeClone(raw.retentionTarget)
       : {},
   };
-  assertProjectionPolicy(policy);
+  if (policy.channelId) assertProjectionPolicy(policy);
+  if (!policy.channelId && !policy.nodePath) throw new Error('projection policy missing node path');
   return policy;
 }
 
@@ -506,19 +6755,28 @@ function projectionNeedsRuntimeSync(projection, policy, channelId) {
   const staleAfterMs = staleAfter > 0 && staleAfter < 9_999_999_999 ? staleAfter * 1000 : staleAfter;
   if (freshness.state === 'missing' || freshness.state === 'error') return true;
   if (staleAfterMs && staleAfterMs < nowMs()) return true;
-  if (String(channelId || '') !== PROJECTION.CHANNEL.LOGGING_EVENTS) return false;
+  const nodePath = String(policy?.nodePath || '').trim().toLowerCase();
+  if (nodePath !== 'events' && !Array.isArray(projection?.payload?.events)) return false;
   const coverage = projectionCoverage(projection);
   const targetCount = syncTargetCountForPolicy(policy);
   return coverage.materializedCount < Math.min(targetCount, Number(coverage.targetCount || targetCount));
 }
 
 function syncChannelsForPolicy(policy) {
-  const service = String(policy?.service || '').trim();
-  if (service === 'logging') return LOGGING_SYNC_CHANNELS;
-  return [String(policy?.channelId || '').trim()].filter(Boolean);
+  const explicit = String(policy?.channelId || '').trim();
+  if (explicit) return [explicit];
+  const resolved = serviceNodeForPolicy(policy);
+  const backingChannel = String(resolved?.node?.backingChannel || '').trim();
+  return backingChannel ? [backingChannel] : [];
 }
 
 function broadcastProjectionSyncDiagnostic(operation, detail = {}) {
+  recordRuntimeEvent(operation, {
+    ...(detail && typeof detail === 'object' ? detail : {}),
+    channelId: detail?.channelId,
+    requestId: detail?.requestId,
+    projectionKey: detail?.projectionKey,
+  });
   broadcast({
     type: 'projection.sync.diagnostic',
     operation,
@@ -535,24 +6793,39 @@ function scheduleProjectionSync(delayMs = 0) {
 }
 
 function startProjectionSync() {
-  const broker = brokerClientId ? endpoints.get(brokerClientId) : null;
-  if (!broker) {
-    if (projectionPolicies.size) {
-      broadcastProjectionSyncDiagnostic('projection.sync.waiting_for_broker', {
-        policyCount: projectionPolicies.size,
-      });
-      scheduleProjectionSync(PROJECTION_SYNC_RETRY_MS);
+  for (const record of hostedServiceRecords()) {
+    const descriptor = serviceDescriptorFromRecord(record);
+    if (!descriptor.surfaceChannel) continue;
+    queueProjectionSyncRequest({
+      service: descriptor.service,
+      channelId: descriptor.surfaceChannel,
+      nodePath: 'surface',
+      policyId: `${descriptor.service}.surface`,
+      syncDepthTarget: { mode: 'surface', targetCount: 1 },
+    }, descriptor.surfaceChannel);
+    const surface = retainedSurfaceForDescriptor(descriptor);
+    for (const node of normalizeArray(surface?.nodes)) {
+      const backingChannel = String(node?.backingChannel || '').trim();
+      if (!backingChannel || backingChannel === descriptor.surfaceChannel) continue;
+      const nodePath = String(node.path || node.nodePath || node.nodeId || '').trim();
+      queueProjectionSyncRequest({
+        service: descriptor.service,
+        channelId: backingChannel,
+        nodePath,
+        policyId: `${descriptor.service}.${nodePath || backingChannel}.snapshot`,
+        syncDepthTarget: { mode: 'snapshot', targetCount: 1 },
+      }, backingChannel);
     }
-    return;
   }
   for (const policy of projectionPolicies.values()) {
     for (const channelId of syncChannelsForPolicy(policy)) {
-      queueProjectionSyncRequest(policy, channelId, broker);
+      synthesizeRuntimeLoggingProjection(projectionPolicyForChannel(policy, channelId));
+      queueProjectionSyncRequest(policy, channelId);
     }
   }
 }
 
-function queueProjectionSyncRequest(policy, channelId, broker) {
+function queueProjectionSyncRequest(policy, channelId) {
   const channelPolicy = projectionPolicyForChannel(policy, channelId);
   const pendingKey = projectionPolicyStoreKey(channelPolicy);
   for (const pending of pendingProjectionSyncRequests.values()) {
@@ -561,13 +6834,15 @@ function queueProjectionSyncRequest(policy, channelId, broker) {
   const existing = projectionForPolicyChannel(policy, channelId);
   if (!projectionNeedsRuntimeSync(existing, channelPolicy, channelId)) return;
   const requestId = randomOpaqueId('projection');
-  const limit = channelId === PROJECTION.CHANNEL.LOGGING_EVENTS
+  const nodePath = String(channelPolicy.nodePath || policy?.nodePath || '').trim();
+  const limit = nodePath === 'events'
     ? syncTargetCountForPolicy(policy)
     : undefined;
   const payload = {
     requestId,
     channelId,
     service: String(channelPolicy.service || '').trim(),
+    ...(nodePath ? { nodePath } : {}),
     ...(limit ? { limit } : {}),
     filters: {},
     policy: channelPolicy,
@@ -591,15 +6866,23 @@ function queueProjectionSyncRequest(policy, channelId, broker) {
   });
   broadcastProjectionSyncDiagnostic('projection.sync.request.sent', {
     channelId,
+    nodePath,
     requestId,
     limit: limit || 0,
   });
-  endpointPost(broker, {
-    type: 'runtime.broker.request',
+  const queued = queueRuntimeAppIntent(RUNTIME_APP_INTENT.PROJECTION_OBSERVE, {
     requestId,
-    kind: BROKER.SERVICE_PROJECTION_REQUEST,
+    channelId,
+    service: String(channelPolicy.service || '').trim(),
+    nodeRef: nodePath || channelId,
     payload,
-    sourceClientId: 'runtime-projection-sync',
+    retryPolicy: { onReject: 'preserve' },
+  });
+  broadcastProjectionSyncDiagnostic('projection.sync.intent.queued', {
+    channelId,
+    nodePath,
+    requestId,
+    frameId: String(queued?.result?.frameId || '').trim(),
   });
 }
 
@@ -612,6 +6895,8 @@ function normalizeProjectionRecord(value) {
     service: String(source.service || '').trim(),
     servicePk: String(source.servicePk || source.service_pk || '').trim(),
   };
+  const nodePath = projectionNodePath(projection);
+  if (nodePath) projection.nodePath = nodePath;
   assertProjectionRecord(projection);
   return projection;
 }
@@ -634,12 +6919,25 @@ function storeProjectionRecord(value) {
       freshness: storedProjection.freshness || existing.freshness,
     };
     retainedProjections.set(key, refreshedProjection);
+    recordRuntimeEvent('projection.ignored', {
+      projectionKey: key,
+      channelId: refreshedProjection.channelId,
+      service: refreshedProjection.service,
+      reason: 'semantic-match',
+    });
     schedulePersist();
     return safeClone(refreshedProjection);
   }
   retainedProjections.set(key, storedProjection);
   const stored = retainedProjections.get(key);
   const changedCount = Math.max(0, projectionPayloadCount(stored) - existingCount);
+  recordRuntimeEvent('projection.applied', {
+    projectionKey: key,
+    channelId: stored.channelId,
+    service: stored.service,
+    changedCount,
+    coverage: projectionCoverage(stored),
+  });
   touchRuntime();
   schedulePersist();
   broadcast({
@@ -649,6 +6947,310 @@ function storeProjectionRecord(value) {
   });
   broadcastSnapshot();
   return safeClone(stored);
+}
+
+function projectionRecordFromSnapshot(snapshot) {
+  assertProjectionSnapshot(snapshot);
+  const state = snapshot.state && typeof snapshot.state === 'object' && !Array.isArray(snapshot.state)
+    ? snapshot.state
+    : {};
+  const stateLooksLikeProjection = Boolean(
+    state.channelId
+      || state.service
+      || state.servicePk
+      || state.payload
+      || state.safeFacts
+      || state.encryptedDetailRefs
+      || state.diagnostics,
+  );
+  if (stateLooksLikeProjection) {
+    return normalizeProjectionRecord({
+      ...safeClone(state),
+      channelId: String(state.channelId || snapshot.projectionId || '').trim(),
+      service: String(state.service || snapshot.policyId || '').trim(),
+      servicePk: String(state.servicePk || state.service_pk || '').trim(),
+      policyId: String(state.policyId || snapshot.policyId || '').trim(),
+      projectionId: String(state.projectionId || snapshot.projectionId || '').trim(),
+      revision: Number(state.revision ?? snapshot.revision),
+      freshness: state.freshness && typeof state.freshness === 'object' ? safeClone(state.freshness) : safeClone(snapshot.freshness),
+      retainedAt: nowMs(),
+      sourceRefs: safeClone(state.sourceRefs || snapshot.sourceRefs || []),
+    });
+  }
+  return normalizeProjectionRecord({
+    channelId: snapshot.projectionId,
+    service: snapshot.policyId,
+    servicePk: snapshot.projectionId,
+    policyId: snapshot.policyId,
+    projectionId: snapshot.projectionId,
+    revision: Number(snapshot.revision),
+    freshness: snapshot.freshness,
+    safeFacts: {},
+    encryptedDetailRefs: [],
+    diagnostics: [],
+    retainedAt: nowMs(),
+    sourceRefs: safeClone(snapshot.sourceRefs || []),
+    payload: {
+      ...safeClone(snapshot.state),
+      coverage: safeClone(snapshot.coverage),
+    },
+  });
+}
+
+function projectionKeyForProtocolRecord(value) {
+  const projectionId = String(value?.projectionId || '').trim();
+  const policyId = String(value?.policyId || '').trim();
+  if (projectionId && policyId) return [projectionId, projectionId, policyId].join('|');
+  if (projectionId) return projectionId;
+  return '';
+}
+
+function findProtocolProjection(value) {
+  const projectionId = String(value?.projectionId || '').trim();
+  const policyId = String(value?.policyId || '').trim();
+  for (const [key, projection] of retainedProjections.entries()) {
+    if (projectionId && String(projection?.projectionId || '').trim() !== projectionId) continue;
+    if (policyId && String(projection?.policyId || '').trim() !== policyId) continue;
+    return { key, projection };
+  }
+  return null;
+}
+
+function clearSatisfiedProjectionRepairs(projection) {
+  const projectionId = String(projection?.projectionId || '').trim();
+  const policyId = String(projection?.policyId || '').trim();
+  const revision = Number(projection?.revision || 0);
+  if (!projectionId || !revision) return 0;
+  const satisfied = [];
+  swarmEdge.repairRequests = swarmEdge.repairRequests.filter((entry) => {
+    const repair = entry?.repairRequest || entry?.repairPosture || {};
+    if (String(repair.projectionId || '').trim() !== projectionId) return true;
+    if (policyId && String(repair.policyId || '').trim() && String(repair.policyId || '').trim() !== policyId) return true;
+    if (revision < Number(repair.requiredRevision || 0)) return true;
+    satisfied.push(entry);
+    return false;
+  });
+  for (const entry of satisfied) {
+    const repair = entry?.repairRequest || entry?.repairPosture || {};
+    recordRuntimeEvent('projection.repair.satisfied', {
+      level: 'info',
+      repairId: String(entry?.repairId || entry?.repairPosture?.repairId || '').trim(),
+      projectionId,
+      policyId,
+      revision,
+      requiredRevision: Number(repair.requiredRevision || 0),
+      reason: String(repair.reason || '').trim(),
+    });
+  }
+  return satisfied.length;
+}
+
+function retainProtocolProjection(projection, { emit = true, changedCount = 1 } = {}) {
+  const key = projectionStoreKey(projection) || projectionKeyForProtocolRecord(projection);
+  if (!key) throw new Error('projection missing store key');
+  const existing = retainedProjections.get(key);
+  retainedProjections.set(key, safeClone(projection));
+  const projectionId = String(projection?.projectionId || '').trim();
+  const satisfiedRepairs = clearSatisfiedProjectionRepairs(projection);
+  recordRuntimeEvent('projection.applied', {
+    projectionKey: key,
+    channelId: projection.channelId,
+    service: projection.service,
+    projectionId,
+    changedCount,
+    satisfiedRepairs,
+    protocol: true,
+  });
+  if (projectionId === RUNTIME_DIRECTORY_OBSERVE_CHANNEL) {
+    queueRouteRepairsFromZoneBaseline('directory.baseline.applied');
+    void flushPendingRouteIntents('directory.baseline.applied');
+  }
+  touchRuntime();
+  schedulePersist();
+  if (emit && !projectionSemanticallyEqual(existing, projection)) {
+    broadcast({
+      type: 'projection.observer.update',
+      update: projectionObserverUpdate(projection, changedCount),
+      projection: safeClone(projection),
+    });
+    broadcastSnapshot();
+  }
+  return safeClone(projection);
+}
+
+function handleProjectionSnapshotApply(message) {
+  const snapshot = message.snapshot || message.projection || message.payload;
+  const projection = projectionRecordFromSnapshot(snapshot);
+  const found = findProtocolProjection(projection);
+  const existingRevision = Number(found?.projection?.revision || 0);
+  const snapshotRevision = Number(projection.revision || 0);
+  if (found?.projection && existingRevision > snapshotRevision) {
+    recordRuntimeEvent('projection.snapshot.ignored', {
+      level: 'info',
+      projectionKey: found.key,
+      projectionId: String(projection.projectionId || snapshot?.projectionId || '').trim(),
+      policyId: String(projection.policyId || snapshot?.policyId || '').trim(),
+      reason: 'staleProjectionSnapshot',
+      currentRevision: existingRevision,
+      snapshotRevision,
+    });
+    return {
+      ok: true,
+      ignored: true,
+      reason: 'staleProjectionSnapshot',
+      result: safeClone(found.projection),
+    };
+  }
+  return { ok: true, result: retainProtocolProjection(projection) };
+}
+
+function repairFrameForDelta(delta, repairRequest) {
+  return makeSwarmFrame({
+    kind: SWARM.FRAME_KIND.PROJECTION_REPAIR_REQUEST,
+    issuer: String(delta?.issuer || delta?.projectionId || 'runtime').trim(),
+    zoneScope: delta?.zoneScope || { zoneId: String(delta?.zoneId || 'local').trim() || 'local', ttl: 1, maxHops: 0 },
+    correlationId: String(delta?.correlationId || delta?.projectionId || '').trim(),
+    channelId: String(delta?.projectionId || '').trim(),
+    capability: SWARM.CORE_CAPABILITY.PROJECTION_DELTA_APPLY,
+    body: defaultSwarmBody(),
+    recordRef: {
+      kind: SWARM.FRAME_KIND.PROJECTION_REPAIR_REQUEST,
+      id: repairRequest.projectionId,
+      revision: repairRequest.currentRevision,
+    },
+  });
+}
+
+function projectionRepairReason(repairRequest) {
+  const currentRevision = Number(repairRequest?.currentRevision || 0);
+  const requiredRevision = Number(repairRequest?.requiredRevision || 0);
+  if (currentRevision === 0 && requiredRevision > 0) return 'missingProjectionBaseline';
+  return String(repairRequest?.reason || '').trim() || 'revisionGap';
+}
+
+function projectionRepairKey(repairRequest) {
+  return [
+    String(repairRequest?.projectionId || '').trim(),
+    String(repairRequest?.policyId || '').trim(),
+    projectionRepairReason(repairRequest),
+    Number(repairRequest?.currentRevision || 0),
+  ].join('|');
+}
+
+function upsertProjectionRepairRequest(entry) {
+  const repairRequest = entry?.repairRequest || {};
+  const repairPosture = entry?.repairPosture || {};
+  const key = projectionRepairKey(repairRequest);
+  const existing = swarmEdge.repairRequests.find((candidate) => candidate?.repairKey === key) || null;
+  if (existing) {
+    const requiredRevision = Math.max(
+      Number(existing.repairRequest?.requiredRevision || 0),
+      Number(repairRequest.requiredRevision || 0),
+    );
+    existing.repairRequest = {
+      ...safeClone(existing.repairRequest || {}),
+      requiredRevision,
+    };
+    existing.repairPosture = {
+      ...safeClone(existing.repairPosture || {}),
+      requiredRevision,
+      lastSeenAt: entry.queuedAt,
+    };
+    existing.lastSeenAt = entry.queuedAt;
+    existing.seenCount = Number(existing.seenCount || 1) + 1;
+    return { added: false, entry: safeClone(existing) };
+  }
+  const next = {
+    repairKey: key,
+    repairId: repairPosture.repairId,
+    repairRequest: safeClone(repairRequest),
+    repairPosture: safeClone(repairPosture),
+    queuedAt: entry.queuedAt,
+    lastSeenAt: entry.queuedAt,
+    seenCount: 1,
+  };
+  swarmEdge.repairRequests.push(next);
+  while (swarmEdge.repairRequests.length > PROJECTION_REPAIR_REQUEST_LIMIT) swarmEdge.repairRequests.shift();
+  return { added: true, entry: safeClone(next) };
+}
+
+function handleProjectionDeltaApply(message) {
+  const delta = assertProjectionDelta(message.delta || message.payload);
+  const found = findProtocolProjection(delta);
+  const existing = found?.projection || null;
+  const currentRevision = Number(existing?.revision || 0);
+  const currentState = existing?.payload && typeof existing.payload === 'object' ? safeClone(existing.payload) : {};
+  delete currentState.coverage;
+  const applied = applyProjectionDelta({ state: currentState, revision: currentRevision, delta });
+  if (applied.repairRequest) {
+    const repairRequest = makeProjectionRepairRequest(applied.repairRequest);
+    repairRequest.reason = projectionRepairReason(repairRequest);
+    const issuedAt = nowMs();
+    const repairPosture = assertProjectionRepairPosture({
+      kind: SWARM.RECORD_KIND.PROJECTION_REPAIR_POSTURE,
+      repairId: String(repairRequest.requestId || '').trim() || randomOpaqueId('projection-repair'),
+      projectionId: repairRequest.projectionId,
+      policyId: repairRequest.policyId,
+      state: SWARM.PROJECTION_REPAIR_STATE.PENDING,
+      currentRevision: repairRequest.currentRevision,
+      requiredRevision: repairRequest.requiredRevision,
+      reason: repairRequest.reason,
+      coverage: delta.coverage,
+      observerRef: 'runtime:browser',
+      issuedAt,
+      expiresAt: issuedAt + PROJECTION_SYNC_REQUEST_TIMEOUT_MS,
+    });
+    const repairUpsert = upsertProjectionRepairRequest({
+      repairRequest,
+      repairPosture,
+      queuedAt: issuedAt,
+    });
+    const effectiveRequest = repairUpsert.entry?.repairRequest || repairRequest;
+    const effectivePosture = repairUpsert.entry?.repairPosture || repairPosture;
+    if (repairUpsert.added) {
+      recordRuntimeEvent('projection.repair.request', {
+        level: 'info',
+        repairId: effectivePosture.repairId,
+        projectionId: effectiveRequest.projectionId,
+        requestId: effectiveRequest.requestId,
+        currentRevision: effectiveRequest.currentRevision,
+        requiredRevision: effectiveRequest.requiredRevision,
+        reason: effectiveRequest.reason,
+      });
+    }
+    touchRuntime();
+    schedulePersist();
+    broadcast({
+      type: 'projection.repair.request',
+      repairRequest: safeClone(effectiveRequest),
+      repairPosture: safeClone(effectivePosture),
+      deduped: repairUpsert.added === false,
+    });
+    broadcastSnapshot();
+    return { ok: false, error: 'projection revision mismatch', repairRequest: effectiveRequest, repairPosture: effectivePosture };
+  }
+  const nextProjection = normalizeProjectionRecord({
+    ...(existing || {}),
+    channelId: delta.projectionId,
+    service: delta.policyId,
+    servicePk: delta.projectionId,
+    policyId: delta.policyId,
+    projectionId: delta.projectionId,
+    revision: applied.revision,
+    freshness: delta.freshness,
+    sourceRefs: safeClone(delta.sourceRefs || []),
+    payload: {
+      ...safeClone(applied.state),
+      coverage: safeClone(delta.coverage),
+    },
+    safeFacts: {},
+    encryptedDetailRefs: [],
+    diagnostics: [],
+    retainedAt: nowMs(),
+  });
+  const stored = retainProtocolProjection(nextProjection, { emit: applied.changed, changedCount: applied.changed ? 1 : 0 });
+  if (!applied.changed) broadcastSnapshot();
+  return { ok: true, result: stored, changed: applied.changed };
 }
 
 function normalizeHostedServices(value) {
@@ -767,6 +7369,8 @@ function mergeGatewayHostedServiceRecord(actualRecord, hostedRecord, gatewayReco
     || '',
   ).trim();
   const hostedUpdatedAt = Number(hosted.updatedAt || hosted.updated_at || gateway.updatedAt || gateway.updated_at || 0);
+  const hostedFacts = hosted.facts && typeof hosted.facts === 'object' ? hosted.facts : null;
+  const actualFacts = actual.facts && typeof actual.facts === 'object' ? actual.facts : null;
   return {
     ...actual,
     devicePk: String(hosted.devicePk || hosted.device_pk || actual.devicePk || actual.pk || '').trim(),
@@ -777,10 +7381,15 @@ function mergeGatewayHostedServiceRecord(actualRecord, hostedRecord, gatewayReco
     service: String(hosted.service || actual.service || '').trim(),
     hostGatewayPk: gatewayPk,
     serviceVersion: String(hosted.serviceVersion || hosted.service_version || actual.serviceVersion || actual.service_version || '').trim(),
+    swarmEdge: hosted.swarmEdge || hosted.swarm_edge || actual.swarmEdge || actual.swarm_edge || undefined,
     updatedAt: hostedUpdatedAt,
     freshnessMs: Number(hosted.freshnessMs || hosted.freshness_ms || actual.freshnessMs || actual.freshness_ms || 0),
     status: String(hosted.status || actual.status || '').trim(),
     cameraCount: Number(hosted.cameraCount || hosted.camera_count || actual.cameraCount || actual.camera_count || 0),
+    facts: hostedFacts || actualFacts || undefined,
+    health: hosted.health || actual.health || hostedFacts?.health || actualFacts?.health || undefined,
+    sources: hosted.sources || hosted.sourceIds || actual.sources || actual.sourceIds || hostedFacts?.sources || hostedFacts?.sourceIds || actualFacts?.sources || actualFacts?.sourceIds || undefined,
+    cameraDevices: hosted.cameraDevices || hosted.cameras || actual.cameraDevices || actual.cameras || hostedFacts?.cameraDevices || hostedFacts?.cameras || actualFacts?.cameraDevices || actualFacts?.cameras || undefined,
     managedAvailabilityAuthority: 'gateway',
     managedAvailabilityUpdatedAt: hostedUpdatedAt,
     managedAvailabilityGatewayPk: gatewayPk,
@@ -940,26 +7549,9 @@ function rebuildManagedApplianceSnapshot() {
   managedState.managedServiceIssue = source.managedServiceIssue ? safeClone(source.managedServiceIssue) : null;
 }
 
-function cleanupServiceAccessContexts() {
-  const now = nowMs();
-  let changed = false;
-  for (const [contextId, context] of serviceAccessContexts.entries()) {
-    const expiresAt = Number(context?.expiresAt || 0) || (Number(context?.createdAt || 0) + CONTEXT_TTL_FALLBACK_MS);
-    if (expiresAt && expiresAt <= now) {
-      serviceAccessContexts.delete(contextId);
-      changed = true;
-    }
-  }
-  return changed;
-}
-
 function runtimeSnapshot() {
-  if (cleanupServiceAccessContexts()) {
-    touchRuntime();
-    schedulePersist();
-  }
   const brokerEndpoint = brokerClientId ? endpoints.get(brokerClientId) : null;
-  return {
+  const snapshot = {
     buildId: RUNTIME_WORKER_BUILD_ID,
     updatedAt: runtimeUpdatedAt || nowMs(),
     broker: {
@@ -971,11 +7563,21 @@ function runtimeSnapshot() {
     managedAppliances: safeClone(managedState.applianceSnapshot),
     resourceNames: safeClone(managedState.resourceNames),
     managedServiceIssue: safeClone(managedState.managedServiceIssue),
+    serviceCatalog: serviceCatalog(),
+    edge: edgeSnapshot(),
+    swarmQueue: swarmQueueObject(),
+    activationResolutions: activationResolutionObject(),
+    authority: safeClone(runtimeAuthorityPostureState),
+    diagnostics: diagnosticSnapshot(),
+    runtimeEvents: runtimeEvents.slice(-RUNTIME_DIAGNOSTIC_SNAPSHOT_LIMIT).map((entry) => safeClone(entry)),
+    mediaFulfillment: mediaFulfillmentObject(),
+    streamRecovery: streamRecoveryObject(),
     projections: retainedProjectionObject(),
     projectionCoverage: retainedProjectionCoverageObject(),
     projectionPolicies: projectionPolicyObject(),
-    serviceAccessContextCount: serviceAccessContexts.size,
   };
+  snapshot.productShellState = deriveRuntimeShellState(snapshot);
+  return snapshot;
 }
 
 function endpointPost(endpoint, message) {
@@ -992,11 +7594,16 @@ function broadcast(message) {
 
 function broadcastSnapshot() {
   const snapshot = runtimeSnapshot();
-  broadcast({
-    type: 'runtime.snapshot',
-    buildId: RUNTIME_WORKER_BUILD_ID,
-    snapshot,
-  });
+  for (const endpoint of endpoints.values()) {
+    const materializationBudget = refreshRuntimeSnapshotMaterialization(endpoint);
+    endpointPost(endpoint, {
+      type: 'runtime.snapshot',
+      buildId: RUNTIME_WORKER_BUILD_ID,
+      snapshot,
+      materializationBudget: safeClone(materializationBudget),
+      consumerFloor: safeClone(materializationBudget?.consumerFloor || null),
+    });
+  }
 }
 
 function ensureEndpoint(clientId, endpoint, meta = {}) {
@@ -1009,6 +7616,13 @@ function ensureEndpoint(clientId, endpoint, meta = {}) {
   endpoint.clientId = key;
   endpoint.surface = String(meta.surface || '').trim();
   endpoint.broker = meta.broker === true;
+  endpoint.snapshotSubscription = meta.snapshotSubscription && typeof meta.snapshotSubscription === 'object'
+    ? safeClone(meta.snapshotSubscription)
+    : {};
+  endpoint.attachContext = meta.attachContext && typeof meta.attachContext === 'object'
+    ? safeClone(meta.attachContext)
+    : {};
+  refreshRuntimeSnapshotMaterialization(endpoint);
   endpoints.set(key, endpoint);
   if (endpoint.broker) brokerClientId = key;
   return endpoint;
@@ -1017,6 +7631,7 @@ function ensureEndpoint(clientId, endpoint, meta = {}) {
 function deleteEndpoint(clientId) {
   const key = String(clientId || '').trim();
   if (!key) return;
+  disableDiagnosticLoggingSink(key);
   endpoints.delete(key);
   if (brokerClientId === key) {
     brokerClientId = '';
@@ -1040,7 +7655,16 @@ function serializedRuntimeState() {
     resourceNames: safeClone(managedState.resourceNames),
     managedServiceIssue: safeClone(managedState.managedServiceIssue),
     hostedGatewaySnapshots: safeClone(managedState.hostedGatewaySnapshots),
-    serviceAccessContexts: managedServiceAccessContextObject(),
+    edgeObservations: {
+      routeObservations: swarmEdge.routeObservations.map((entry) => safeClone(entry)),
+      rejections: swarmEdge.rejections.map((entry) => safeClone(entry)),
+      repairRequests: swarmEdge.repairRequests.map((entry) => safeClone(entry)),
+      contributionLifecycles: swarmEdge.contributionLifecycles.map((entry) => safeClone(entry)),
+    },
+    diagnostics: diagnosticSnapshot(),
+    runtimeEvents: runtimeEvents.map((entry) => safeClone(entry)),
+    mediaFulfillment: mediaFulfillmentObject(),
+    swarmQueue: swarmQueueObject(),
     projections: retainedProjectionStoreObject(),
     projectionCoverage: retainedProjectionCoverageObject(),
     projectionPolicies: projectionPolicyObject(),
@@ -1077,6 +7701,8 @@ function schedulePersist() {
 async function hydrateRuntimeState() {
   const meta = await kvGet(RUNTIME_META_KEY).catch(() => null);
   const schemaVersion = Number(meta?.schemaVersion || RUNTIME_VERSION.major);
+  const persistedBuildId = String(meta?.buildId || '').trim();
+  const sameRuntimeBuild = !persistedBuildId || persistedBuildId === RUNTIME_WORKER_BUILD_ID;
   if (isLocalhostRuntime() && String(meta?.buildId || '').trim() && schemaVersion !== RUNTIME_VERSION.major) {
     await clearPersistedState();
   }
@@ -1105,14 +7731,93 @@ async function hydrateRuntimeState() {
     managedState.hostedGatewaySnapshots = payload.hostedGatewaySnapshots && typeof payload.hostedGatewaySnapshots === 'object'
       ? safeClone(payload.hostedGatewaySnapshots)
       : {};
-    serviceAccessContexts.clear();
-    const persistedContexts = payload.serviceAccessContexts && typeof payload.serviceAccessContexts === 'object'
-      ? payload.serviceAccessContexts
+    const edgeObservations = payload.edgeObservations && typeof payload.edgeObservations === 'object'
+      ? payload.edgeObservations
       : {};
-    for (const [contextId, context] of Object.entries(persistedContexts)) {
-      const key = String(contextId || '').trim();
-      if (!key || !context || typeof context !== 'object') continue;
-      serviceAccessContexts.set(key, safeClone(context));
+    swarmEdge.routeObservations = normalizeArray(edgeObservations.routeObservations)
+      .map((entry) => safeClone(entry))
+      .slice(-100);
+    swarmEdge.rejections = normalizeArray(edgeObservations.rejections)
+      .map((entry) => safeClone(entry))
+      .slice(-100);
+    swarmEdge.repairRequests = normalizeArray(edgeObservations.repairRequests)
+      .map((entry) => safeClone(entry))
+      .slice(-100);
+    swarmEdge.contributionLifecycles = normalizeArray(edgeObservations.contributionLifecycles)
+      .map((entry) => safeClone(entry))
+      .slice(-CONTRIBUTION_LIFECYCLE_LIMIT);
+    if (sameRuntimeBuild) {
+      runtimeEvents.splice(
+        0,
+        runtimeEvents.length,
+        ...normalizeArray(payload.runtimeEvents).map((entry) => safeClone(entry)).slice(-RUNTIME_DIAGNOSTIC_RING_LIMIT),
+      );
+    }
+    for (const timer of serviceAdmissionTimeoutTimers.values()) self.clearTimeout(timer);
+    serviceAdmissionTimeoutTimers.clear();
+    outboundSwarmFrames.clear();
+    if (sameRuntimeBuild) {
+      const persistedSwarmQueue = payload.swarmQueue && typeof payload.swarmQueue === 'object'
+        ? payload.swarmQueue
+        : {};
+      for (const entry of Object.values(persistedSwarmQueue)) {
+        try {
+          if (!entry || typeof entry !== 'object') continue;
+          const frame = assertSwarmFrame(entry.frame);
+          outboundSwarmFrames.set(frame.frameId, {
+            frameId: frame.frameId,
+            frame: safeClone(frame),
+            status: String(entry.status || 'queued').trim() || 'queued',
+            queuedAt: Number(entry.queuedAt || nowMs()),
+            sentAt: Number(entry.sentAt || 0) || undefined,
+            attempts: Number(entry.attempts || 0),
+            retryPolicy: normalizeSwarmRetryPolicy(entry.retryPolicy),
+            ...(entry.retrySuppressed ? { retrySuppressed: true } : {}),
+            ...(entry.routeObservation ? { routeObservation: safeClone(entry.routeObservation) } : {}),
+            ...(entry.routeObservedAt ? { routeObservedAt: Number(entry.routeObservedAt || 0) } : {}),
+            ...(entry.ackedAt ? { ackedAt: Number(entry.ackedAt || 0) } : {}),
+            ...(entry.ack ? { ack: safeClone(entry.ack) } : {}),
+            ...(entry.lastError ? { lastError: safeClone(entry.lastError) } : {}),
+            ...(entry.repairRequest ? { repairRequest: safeClone(entry.repairRequest) } : {}),
+          });
+        } catch {}
+      }
+      for (const entry of outboundSwarmFrames.values()) {
+        scheduleServiceAdmissionTimeout(entry);
+      }
+    }
+    mediaFulfillmentPostures.clear();
+    const persistedMediaFulfillment = payload.mediaFulfillment && typeof payload.mediaFulfillment === 'object'
+      ? payload.mediaFulfillment
+      : {};
+    for (const [key, posture] of Object.entries(persistedMediaFulfillment)) {
+      if (!posture || typeof posture !== 'object') continue;
+      const evidenceByKind = new Map();
+      const persistedEvidence = posture.evidenceByKind && typeof posture.evidenceByKind === 'object'
+        ? posture.evidenceByKind
+        : {};
+      for (const [evidenceKind, evidence] of Object.entries(persistedEvidence)) {
+        if (evidence && typeof evidence === 'object') evidenceByKind.set(evidenceKind, safeClone(evidence));
+      }
+      mediaFulfillmentPostures.set(String(key || '').trim(), {
+        postureId: String(posture.postureId || `media-fulfillment:${key}`).trim(),
+        sessionId: String(posture.sessionId || '').trim(),
+        activationId: String(posture.activationId || '').trim(),
+        interactionId: String(posture.interactionId || '').trim(),
+        correlationId: String(posture.correlationId || '').trim(),
+        sourceRef: String(posture.sourceRef || '').trim(),
+        adapterRef: String(posture.adapterRef || '').trim(),
+        serviceRef: String(posture.serviceRef || '').trim(),
+        state: String(posture.state || SWARM.MEDIA_FULFILLMENT_STATE.PENDING).trim(),
+        blockedReasons: normalizeArray(posture.blockedReasons).map((entry) => String(entry || '').trim()).filter(Boolean),
+        visibleFrame: posture.visibleFrame === true,
+        trackLive: posture.trackLive === true,
+        transportUsable: posture.transportUsable === true,
+        updatedAt: Number(posture.updatedAt || 0) || nowMs(),
+        expiresAt: Number(posture.expiresAt || 0) || 0,
+        latestEvidence: posture.latestEvidence ? safeClone(posture.latestEvidence) : null,
+        evidenceByKind,
+      });
     }
     retainedProjections.clear();
     const persistedProjections = payload.projections && typeof payload.projections === 'object'
@@ -1144,10 +7849,6 @@ async function hydrateRuntimeState() {
     }
   }
   rebuildManagedApplianceSnapshot();
-  if (cleanupServiceAccessContexts()) {
-    touchRuntime();
-    schedulePersist();
-  }
 }
 
 function ensureHydrated() {
@@ -1211,37 +7912,6 @@ function handleStatusPut(message, endpoint) {
   return { ok: true, result: runtimeSnapshot() };
 }
 
-function handleServiceAccessContextPut(message) {
-  const context = message.context && typeof message.context === 'object' ? message.context : null;
-  const contextId = String(context?.contextId || '').trim();
-  if (!contextId) return { ok: false, error: 'missing contextId' };
-  serviceAccessContexts.set(contextId, safeClone(context));
-  cleanupServiceAccessContexts();
-  touchRuntime();
-  schedulePersist();
-  broadcastSnapshot();
-  return { ok: true, result: safeClone(serviceAccessContexts.get(contextId) || null) };
-}
-
-function handleServiceAccessContextGet(message) {
-  cleanupServiceAccessContexts();
-  const contextId = String(message.contextId || '').trim();
-  if (!contextId) return { ok: false, error: 'missing contextId' };
-  return { ok: true, result: safeClone(serviceAccessContexts.get(contextId) || null) };
-}
-
-function handleServiceAccessContextDelete(message) {
-  const contextId = String(message.contextId || '').trim();
-  if (!contextId) return { ok: false, error: 'missing contextId' };
-  const existed = serviceAccessContexts.delete(contextId);
-  if (existed) {
-    touchRuntime();
-    schedulePersist();
-    broadcastSnapshot();
-  }
-  return { ok: true, result: { deleted: existed } };
-}
-
 function handleProjectionPut(message) {
   try {
     const projection = storeProjectionRecord(message.projection || message.result || message.payload);
@@ -1290,8 +7960,10 @@ function handleProjectionPolicyPut(message) {
     broadcastProjectionSyncDiagnostic('projection.policy.applied', {
       policyId: policy.policyId,
       service: policy.service,
-      channelId: policy.channelId,
+      nodePath: String(policy.nodePath || '').trim(),
+      channelId: String(policy.channelId || '').trim(),
     });
+    synthesizeRuntimeLoggingProjection(policy);
     if (stableJson(existing) !== stableJson(policy)) {
       scheduleProjectionSync(0);
     }
@@ -1337,30 +8009,6 @@ function handleRuntimeProjectionSyncResponse(message) {
     scheduleProjectionSync(PROJECTION_SYNC_RETRY_MS);
     return { ok: false, error: String(error?.message || error || 'invalid service projection response') };
   }
-}
-
-function handleServiceProjectionResponse(message) {
-  const runtimeSyncResult = handleRuntimeProjectionSyncResponse(message);
-  if (runtimeSyncResult) return runtimeSyncResult;
-  const source = message?.result?.projection || message?.result || null;
-  let stored = null;
-  if (message.ok !== false && source && typeof source === 'object') {
-    try {
-      stored = storeProjectionRecord(source);
-    } catch (error) {
-      return { ok: false, error: String(error?.message || error || 'invalid service projection response') };
-    }
-  }
-  const responseMessage = stored
-    ? {
-        ...message,
-        result: {
-          ...(message.result && typeof message.result === 'object' ? message.result : {}),
-          projection: stored,
-        },
-      }
-    : message;
-  return handleBrokerResponse(BROKER.SERVICE_PROJECTION_REQUEST, responseMessage);
 }
 
 function handleManagedSourceSnapshotPut(message) {
@@ -1420,6 +8068,618 @@ function handleBrokerResponse(kind, message) {
   return { ok: true };
 }
 
+function mediaFulfillmentKey(record) {
+  return String(record.sessionId || record.activationId || record.interactionId || record.correlationId || '').trim();
+}
+
+function mediaFulfillmentEntrySnapshot(entry) {
+  const evidenceByKind = {};
+  for (const [kind, evidence] of entry.evidenceByKind.entries()) {
+    evidenceByKind[kind] = safeClone(evidence);
+  }
+  return {
+    kind: 'media.fulfillment.posture',
+    postureId: entry.postureId,
+    sessionId: entry.sessionId,
+    activationId: entry.activationId,
+    interactionId: entry.interactionId,
+    correlationId: entry.correlationId,
+    sourceRef: entry.sourceRef,
+    adapterRef: entry.adapterRef,
+    serviceRef: entry.serviceRef,
+    routePromiseId: entry.routePromiseId,
+    state: entry.state,
+    blockedReasons: entry.blockedReasons.slice(),
+    visibleFrame: entry.visibleFrame === true,
+    trackLive: entry.trackLive === true,
+    transportUsable: entry.transportUsable === true,
+    updatedAt: entry.updatedAt,
+    expiresAt: entry.expiresAt || undefined,
+    latestEvidence: safeClone(entry.latestEvidence || null),
+    evidenceByKind,
+  };
+}
+
+function mediaFulfillmentObject() {
+  return Object.fromEntries(
+    Array.from(mediaFulfillmentPostures.entries()).map(([key, entry]) => [key, mediaFulfillmentEntrySnapshot(entry)]),
+  );
+}
+
+function streamRecoveryObject() {
+  return Object.fromEntries(
+    Array.from(streamRecoveryPostures.entries()).map(([key, entry]) => [key, safeClone(entry)]),
+  );
+}
+
+function reduceMediaFulfillmentState(entry) {
+  const evidence = Array.from(entry.evidenceByKind.values());
+  const latestRelease = evidence.find((record) => record.evidenceKind === SWARM.MEDIA_FULFILLMENT_EVIDENCE_KIND.RELEASE);
+  const blockedReasons = [...new Set(evidence
+    .filter((record) => record.state === SWARM.MEDIA_FULFILLMENT_STATE.BLOCKED)
+    .map((record) => String(record.blockedReason || '').trim())
+    .filter(Boolean))];
+  const render = entry.evidenceByKind.get(SWARM.MEDIA_FULFILLMENT_EVIDENCE_KIND.RENDER_STATE);
+  const track = entry.evidenceByKind.get(SWARM.MEDIA_FULFILLMENT_EVIDENCE_KIND.TRACK_STATE);
+  const transport = entry.evidenceByKind.get(SWARM.MEDIA_FULFILLMENT_EVIDENCE_KIND.TRANSPORT_STATE);
+  const renderFacts = render?.safeFacts && typeof render.safeFacts === 'object' ? render.safeFacts : {};
+  entry.blockedReasons = blockedReasons;
+  entry.visibleFrame = render?.state === SWARM.MEDIA_FULFILLMENT_STATE.USABLE
+    && renderFacts.visibleFrame === true
+    && Number(renderFacts.videoWidth || 0) > 0
+    && Number(renderFacts.videoHeight || 0) > 0;
+  entry.trackLive = track?.state === SWARM.MEDIA_FULFILLMENT_STATE.USABLE;
+  entry.transportUsable = transport?.state === SWARM.MEDIA_FULFILLMENT_STATE.USABLE;
+  if (latestRelease || entry.latestEvidence?.state === SWARM.MEDIA_FULFILLMENT_STATE.RELEASED) {
+    entry.state = SWARM.MEDIA_FULFILLMENT_STATE.RELEASED;
+  } else if (blockedReasons.length > 0) {
+    entry.state = SWARM.MEDIA_FULFILLMENT_STATE.BLOCKED;
+  } else if (entry.visibleFrame) {
+    entry.state = SWARM.MEDIA_FULFILLMENT_STATE.USABLE;
+  } else {
+    entry.state = SWARM.MEDIA_FULFILLMENT_STATE.PENDING;
+  }
+  return entry;
+}
+
+function reduceMediaFulfillmentEvidence(record) {
+  const key = mediaFulfillmentKey(record);
+  const previous = mediaFulfillmentPostures.get(key);
+  const entry = previous || {
+    postureId: `media-fulfillment:${key}`,
+    sessionId: '',
+    activationId: '',
+    interactionId: '',
+    correlationId: '',
+    sourceRef: '',
+    adapterRef: '',
+    serviceRef: '',
+    routePromiseId: '',
+    state: SWARM.MEDIA_FULFILLMENT_STATE.PENDING,
+    blockedReasons: [],
+    visibleFrame: false,
+    trackLive: false,
+    transportUsable: false,
+    updatedAt: 0,
+    expiresAt: 0,
+    latestEvidence: null,
+    evidenceByKind: new Map(),
+  };
+  entry.sessionId = String(record.sessionId || entry.sessionId || '').trim();
+  entry.activationId = String(record.activationId || entry.activationId || '').trim();
+  entry.interactionId = String(record.interactionId || entry.interactionId || '').trim();
+  entry.correlationId = String(record.correlationId || entry.correlationId || '').trim();
+  entry.sourceRef = String(record.sourceRef || entry.sourceRef || '').trim();
+  entry.adapterRef = String(record.adapterRef || entry.adapterRef || '').trim();
+  entry.serviceRef = String(record.serviceRef || entry.serviceRef || '').trim();
+  entry.routePromiseId = String(record.routePromiseId || entry.routePromiseId || '').trim();
+  entry.updatedAt = Math.max(entry.updatedAt || 0, Number(record.observedAt || 0) || nowMs());
+  entry.expiresAt = Math.max(entry.expiresAt || 0, Number(record.expiresAt || 0) || 0);
+  entry.latestEvidence = safeClone(record);
+  entry.evidenceByKind.set(record.evidenceKind, safeClone(record));
+  reduceMediaFulfillmentState(entry);
+  mediaFulfillmentPostures.set(key, entry);
+  const posture = mediaFulfillmentEntrySnapshot(entry);
+  applyMediaFulfillmentPostureToQueuedFrame(posture);
+  return posture;
+}
+
+function findQueuedFrameForMediaFulfillmentPosture(posture = {}) {
+  const latestEvidence = posture?.latestEvidence && typeof posture.latestEvidence === 'object'
+    ? posture.latestEvidence
+    : {};
+  const candidates = [
+    posture?.sessionId,
+    posture?.activationId,
+    posture?.interactionId,
+    posture?.correlationId,
+    posture?.routePromiseId,
+    latestEvidence.sessionId,
+    latestEvidence.activationId,
+    latestEvidence.interactionId,
+    latestEvidence.correlationId,
+    latestEvidence.routePromiseId,
+  ].map((value) => String(value || '').trim()).filter(Boolean);
+  for (const candidate of candidates) {
+    const entry = findQueuedFrame(candidate);
+    if (entry) return entry;
+  }
+  for (const entry of outboundSwarmFrames.values()) {
+    const ids = queueCorrelationIds(entry);
+    if (candidates.some((candidate) => ids.includes(candidate))) return entry;
+  }
+  return null;
+}
+
+function applyMediaFulfillmentPostureToQueuedFrame(posture = {}) {
+  const entry = findQueuedFrameForMediaFulfillmentPosture(posture);
+  if (!entry) return false;
+  const state = String(posture.state || '').trim();
+  entry.mediaFulfillment = safeClone(posture);
+  entry.mediaFulfillmentAt = Number(posture.updatedAt || 0) || nowMs();
+  if (state === SWARM.MEDIA_FULFILLMENT_STATE.BLOCKED) {
+    entry.status = 'mediaBlocked';
+    entry.lastError = {
+      code: 'media.blocked',
+      message: posture.blockedReasons?.[0] || 'media transport blocked',
+      retryable: true,
+    };
+  } else if (state === SWARM.MEDIA_FULFILLMENT_STATE.USABLE) {
+    if (!queuedSwarmFrameTerminal(entry)) {
+      entry.status = 'adapterLive';
+      entry.lastError = undefined;
+    }
+  } else if (state === SWARM.MEDIA_FULFILLMENT_STATE.RELEASED) {
+    entry.status = 'released';
+    clearServiceAdmissionTimeout(entry);
+  }
+  recordRuntimeEvent('activation.media.fulfillment.applied', {
+    frameId: String(entry.frameId || '').trim(),
+    correlationId: String(entry.frame?.correlationId || posture.correlationId || '').trim(),
+    activationId: String(entry.activationId || posture.activationId || '').trim(),
+    routePromiseId: String(entry.routePromiseId || posture.routePromiseId || '').trim(),
+    sessionId: String(posture.sessionId || '').trim(),
+    state,
+    blockedReason: String(posture.blockedReasons?.[0] || '').trim(),
+  });
+  return true;
+}
+
+function streamRecoveryKey(source = {}) {
+  return String(
+    source.parentIntentId
+      || source.intentId
+      || source.activationId
+      || source.sessionId
+      || source.correlationId
+      || normalizeArray(source.sourceIds || source.sources).join(',')
+      || 'stream:default',
+  ).trim();
+}
+
+function streamRecoveryPostureSnapshot(key, source = {}, action = 'schedule') {
+  const now = nowMs();
+  if (action === 'reset') {
+    const previous = streamRecoveryPostures.get(key) || {};
+    streamRecoveryPostures.delete(key);
+    const posture = {
+      kind: 'runtime.stream.recovery.posture',
+      parentIntentId: key,
+      state: 'reset',
+      attempt: 0,
+      delayMs: 0,
+      nextRetryAt: 0,
+      previousAttempt: Number(previous.attempt || 0),
+      reason: String(source.reason || 'reset').trim(),
+      issuedAt: now,
+    };
+    recordRuntimeEvent('stream.recovery.reset', {
+      parentIntentId: key,
+      previousAttempt: posture.previousAttempt,
+      reason: posture.reason,
+    });
+    return posture;
+  }
+  const previous = streamRecoveryPostures.get(key) || {};
+  const attemptHint = Number(source.attemptHint || source.attempt || 0) || 0;
+  const attempt = Math.max(Number(previous.attempt || 0) + 1, attemptHint, 1);
+  const baseMs = positiveNumber(source.baseMs || source.base_ms, 3_000);
+  const maxMs = positiveNumber(source.maxMs || source.max_ms, 90_000);
+  const step = Math.min(8, Math.max(0, attempt - 1));
+  const jitterMax = Math.min(1_000, baseMs);
+  const jitterMs = Math.floor(Math.random() * jitterMax);
+  const delayMs = Math.min(maxMs, (baseMs * (2 ** step)) + jitterMs);
+  const posture = {
+    kind: 'runtime.stream.recovery.posture',
+    parentIntentId: key,
+    state: 'scheduled',
+    attempt,
+    delayMs,
+    nextRetryAt: now + delayMs,
+    reason: String(source.reason || 'mediaPathRecovery').trim(),
+    sourceIds: normalizeArray(source.sourceIds || source.sources).map((entry) => String(entry || '').trim()).filter(Boolean),
+    sessionCount: Number(source.sessionCount || source.session_count || 0) || 0,
+    issuedAt: now,
+    expiresAt: now + Math.max(delayMs, baseMs),
+  };
+  streamRecoveryPostures.set(key, posture);
+  recordRuntimeEvent('stream.recovery.scheduled', {
+    parentIntentId: key,
+    attempt,
+    delayMs,
+    reason: posture.reason,
+    sessionCount: posture.sessionCount,
+  });
+  return posture;
+}
+
+function handleRuntimeStreamRecoveryRequest(message) {
+  const source = normalizeObject(message?.payload || message);
+  const key = streamRecoveryKey(source);
+  if (!key) return { ok: false, error: 'missingStreamRecoveryKey' };
+  const action = String(source.action || 'schedule').trim();
+  const posture = streamRecoveryPostureSnapshot(key, source, action);
+  touchRuntime();
+  schedulePersist();
+  broadcastSnapshot();
+  return { ok: true, result: safeClone(posture) };
+}
+
+function handleMediaFulfillmentEvidencePut(message) {
+  const source = message?.evidence || message?.record || message?.payload || message;
+  const record = assertMediaFulfillmentEvidence(source);
+  const posture = reduceMediaFulfillmentEvidence(record);
+  recordRuntimeEvent('media.fulfillment.updated', {
+    level: posture.state === SWARM.MEDIA_FULFILLMENT_STATE.BLOCKED ? 'warn' : 'info',
+    sessionId: posture.sessionId,
+    activationId: posture.activationId,
+    correlationId: posture.correlationId,
+    sourceRef: posture.sourceRef,
+    adapterRef: posture.adapterRef,
+    evidenceKind: record.evidenceKind,
+    state: posture.state,
+    blockedReason: String(record.blockedReason || '').trim(),
+    visibleFrame: posture.visibleFrame,
+    trackLive: posture.trackLive,
+    transportUsable: posture.transportUsable,
+  });
+  touchRuntime();
+  schedulePersist();
+  broadcastSnapshot();
+  return { ok: true, result: posture };
+}
+
+function handleMediaTransportObservationPut(message) {
+  const source = message?.observation || message?.record || message?.payload || message;
+  const observation = assertMediaTransportObservation(source);
+  const posture = reduceMediaTransportObservationRecord(observation, {
+    frameId: String(message?.frameId || '').trim(),
+    correlationId: String(message?.correlationId || observation.sessionId || '').trim(),
+  });
+  return { ok: true, result: posture };
+}
+
+function runtimeMediaTransportProfile() {
+  const issuedAt = nowMs();
+  return {
+    kind: 'runtime.mediaTransport.profile',
+    profileId: RUNTIME_MEDIA_TRANSPORT_PROFILE_ID,
+    transport: 'webrtc',
+    role: 'browserOfferer',
+    selectedBy: 'runtime',
+    iceServers: safeClone(RUNTIME_MEDIA_TRANSPORT_ICE_SERVERS),
+    candidatePolicy: {
+      browser: 'fullIce',
+      service: 'iceLiteAnswerer',
+    },
+    issuedAt,
+    expiresAt: issuedAt + 10 * 60_000,
+  };
+}
+
+function handleDiagnosticsSubscribe(message, endpoint) {
+  const clientId = String(message.clientId || endpoint?.clientId || '').trim() || randomOpaqueId('diagnostic-client');
+  const entry = ensureEndpoint(clientId, endpoint, {
+    surface: message.surface || endpoint?.surface,
+    broker: endpoint?.broker === true,
+  }) || endpoint;
+  entry.diagnostics = true;
+  entry.diagnosticSurface = String(message.surface || entry.surface || '').trim();
+  entry.diagnosticClientId = clientId;
+  entry.diagnosticSubscription = normalizeDiagnosticSubscription(message, entry);
+  if (message.logging === true || message.loggingSink === true) {
+    enableDiagnosticLoggingSink(clientId);
+  } else {
+    disableDiagnosticLoggingSink(clientId);
+  }
+  const limit = Math.min(
+    RUNTIME_DIAGNOSTIC_RING_LIMIT,
+    Math.max(0, Number(entry.diagnosticSubscription?.window?.replayLimit ?? message.limit ?? RUNTIME_DIAGNOSTIC_REPLAY_LIMIT)),
+  );
+  const replayFilteredBefore = diagnosticAdmissionCounters.replayFiltered;
+  const events = limit > 0
+    ? diagnosticEventsForSubscription(entry.diagnosticSubscription, limit)
+    : [];
+  const replayFiltered = Math.max(0, diagnosticAdmissionCounters.replayFiltered - replayFilteredBefore);
+  const materializationBudget = diagnosticReplayMaterializationBudget(
+    entry.diagnosticSubscription,
+    events,
+    replayFiltered,
+  );
+  entry.diagnosticMaterializationBudget = materializationBudget;
+  endpointPost(entry, {
+    type: 'runtime.diagnostics.events',
+    buildId: RUNTIME_WORKER_BUILD_ID,
+    runtimeSessionId,
+    events,
+    delivery: {
+      mode: SWARM.EVENT_DELIVERY_MODE.REPLAY,
+      replayedCount: events.length,
+      filteredCount: replayFiltered,
+    },
+    subscription: safeClone(entry.diagnosticSubscription),
+    materializationBudget: safeClone(materializationBudget),
+    consumerFloor: safeClone(materializationBudget.consumerFloor),
+    diagnostics: diagnosticSnapshot(),
+  });
+  recordRuntimeEvent('runtime.diagnostics.subscribe', {
+    clientId,
+    surface: entry.diagnosticSurface,
+    subscriptionId: entry.diagnosticSubscription.subscriptionId,
+    planes: safeClone(entry.diagnosticSubscription.planes),
+    materializationId: materializationBudget.budgetId,
+    loggingSink: diagnosticLoggingEnabled,
+  });
+  return {
+    ok: true,
+    result: {
+      buildId: RUNTIME_WORKER_BUILD_ID,
+      runtimeSessionId,
+      replayedCount: events.length,
+      subscription: safeClone(entry.diagnosticSubscription),
+      materializationBudget: safeClone(materializationBudget),
+      consumerFloor: safeClone(materializationBudget.consumerFloor),
+      diagnostics: diagnosticSnapshot(),
+    },
+  };
+}
+
+function handleDiagnosticsUnsubscribe(message, endpoint) {
+  const key = String(message.clientId || endpoint?.clientId || '').trim();
+  const entry = key ? endpoints.get(key) || endpoint : endpoint;
+  if (entry) {
+    entry.diagnostics = false;
+    entry.diagnosticSurface = '';
+    entry.diagnosticSubscription = null;
+    entry.diagnosticMaterializationBudget = null;
+  }
+  disableDiagnosticLoggingSink(key);
+  recordRuntimeEvent('runtime.diagnostics.unsubscribe', {
+    clientId: key,
+  });
+  return { ok: true, result: diagnosticSnapshot() };
+}
+
+function diagnosticCommandFailure(command, code, message, extra = {}) {
+  return {
+    ok: false,
+    error: String(message || code || 'diagnostic command failed'),
+    result: {
+      recordKind: 'runtime.diagnostic.command.result',
+      command,
+      ok: false,
+      code,
+      ...safeClone(extra),
+    },
+  };
+}
+
+function recentDiagnosticEvents(args = {}) {
+  return materializeRecentDiagnosticEvents(args).events;
+}
+
+function routeExplain(args = {}) {
+  const target = String(args.frameId || args.correlationId || args.activationId || args.routePromiseId || '').trim();
+  const observations = swarmEdge.routeObservations
+    .filter((entry) => !target || [
+      entry.frameId,
+      entry.correlationId,
+      entry.activationId,
+      entry.routePromiseId,
+    ].map((value) => String(value || '').trim()).includes(target))
+    .map((entry) => safeClone(entry));
+  const queue = Array.from(outboundSwarmFrames.values())
+    .filter((entry) => !target || queueCorrelationIds(entry).includes(target))
+    .map((entry) => ({
+      frameId: entry.frameId,
+      status: entry.status,
+      attempts: entry.attempts,
+      channelId: String(entry.frame?.channelId || '').trim(),
+      capability: String(entry.frame?.capability || '').trim(),
+      correlationId: String(entry.frame?.correlationId || '').trim(),
+      lastError: safeClone(entry.lastError || null),
+      routeObservation: safeClone(entry.routeObservation || null),
+      routeDelivery: routeDeliveryPosture(entry),
+    }));
+  return {
+    target,
+    observations,
+    queue,
+    edge: edgeSnapshot(),
+  };
+}
+
+function projectionExplain(args = {}) {
+  const target = String(args.projectionKey || args.channelId || args.service || '').trim();
+  const projections = {};
+  for (const [key, projection] of retainedProjections.entries()) {
+    if (target && key !== target && String(projection?.channelId || '').trim() !== target && String(projection?.service || '').trim() !== target) continue;
+    projections[key] = {
+      projectionKey: key,
+      channelId: projection.channelId,
+      service: projection.service,
+      servicePk: projection.servicePk,
+      policyId: projection.policyId,
+      revision: projection.revision,
+      freshness: safeClone(projection.freshness || null),
+      coverage: projectionCoverage(projection),
+      retainedAt: projection.retainedAt,
+    };
+  }
+  return {
+    target,
+    projections,
+    policies: projectionPolicyObject(),
+    pending: Object.fromEntries(Array.from(pendingProjectionSyncRequests.entries()).map(([key, value]) => [key, {
+      pendingKey: value.pendingKey,
+      channelId: value.channelId,
+      policyId: value.policyId,
+      service: value.service,
+      createdAt: value.createdAt,
+    }])),
+  };
+}
+
+function activationExplain(args = {}) {
+  const target = String(args.activationId || args.frameId || args.correlationId || '').trim();
+  const all = activationResolutionObject();
+  if (!target) return all;
+  return Object.fromEntries(Object.entries(all).filter(([key, value]) => (
+    key === target
+    || String(value?.frameId || '').trim() === target
+    || String(value?.activationId || '').trim() === target
+  )));
+}
+
+async function executeDiagnosticCommand(command, args = {}, endpoint = null) {
+  switch (command) {
+    case 'dumpRecentEvents': {
+      const materialized = materializeRecentDiagnosticEvents(args, endpoint, command);
+      return { ...materialized, diagnostics: diagnosticSnapshot() };
+    }
+    case 'routeExplain':
+      return routeExplain(args);
+    case 'projectionExplain':
+      return projectionExplain(args);
+    case 'activationExplain':
+      return activationExplain(args);
+    case 'resourceSample':
+      return runtimeResourceSample();
+    case 'requestProjectionRepair':
+      scheduleProjectionSync(0);
+      recordRuntimeEvent('projection.repair.requested', {
+        projectionKey: args.projectionKey,
+        channelId: args.channelId,
+        requestId: args.requestId,
+      });
+      return { scheduled: true, projection: projectionExplain(args) };
+    case 'flushDiagnosticsToLogging': {
+      enableDiagnosticLoggingSink();
+      const materialized = materializeRecentDiagnosticEvents(
+        { ...args, limit: Math.min(Number(args.limit || 8), RUNTIME_DIAGNOSTIC_LOG_RATE_LIMIT) },
+        endpoint,
+        command,
+      );
+      const events = materialized.events;
+      for (const event of events) {
+        enqueueDiagnosticLoggingBacklog(event);
+      }
+      flushDiagnosticLoggingEvents();
+      return {
+        enabled: true,
+        backlogCount: diagnosticLoggingBacklog.length,
+        attemptedCount: events.length,
+        materializationBudget: materialized.materializationBudget,
+        consumerFloor: materialized.consumerFloor,
+        diagnostics: diagnosticSnapshot(),
+      };
+    }
+    case 'openTestActivation':
+    case 'closeTestActivation':
+      recordRuntimeEvent(`runtime.diagnostics.${command}`, {
+        args: sanitizeDiagnosticValue(args),
+        diagnosticOnly: true,
+      });
+      return { state: 'diagnosticOnly', command };
+    default:
+      throw new Error(`unsupported diagnostic command: ${command}`);
+  }
+}
+
+async function handleDiagnosticsCommand(message, endpoint) {
+  const command = String(message.command || message.name || '').trim();
+  const args = normalizeObject(message.args || message.payload);
+  const remote = message.remote === true;
+  if (!endpoint?.diagnostics) {
+    return diagnosticCommandFailure(command, 'debug.disabled', 'diagnostic command requires an enabled debug subscriber');
+  }
+  if (!runtimeDiagnosticCommands.has(command)) {
+    return diagnosticCommandFailure(command, 'command.unknown', 'diagnostic command is not allowlisted');
+  }
+  const nonce = String(message.nonce || message.commandId || '').trim();
+  if (!nonce) return diagnosticCommandFailure(command, 'nonce.missing', 'diagnostic command missing nonce');
+  if (diagnosticCommandNonces.has(nonce)) {
+    return diagnosticCommandFailure(command, 'nonce.replay', 'diagnostic command replayed');
+  }
+  const expiresAt = Number(message.expiresAt || 0);
+  if (!expiresAt || expiresAt <= nowMs()) {
+    return diagnosticCommandFailure(command, 'command.expired', 'diagnostic command expired');
+  }
+  const audienceRuntimeSessionId = String(message.audienceRuntimeSessionId || '').trim();
+  if (remote && !audienceRuntimeSessionId) {
+    return diagnosticCommandFailure(command, 'audience.missing', 'remote diagnostic command missing runtime audience');
+  }
+  if (audienceRuntimeSessionId && audienceRuntimeSessionId !== runtimeSessionId) {
+    return diagnosticCommandFailure(command, 'audience.mismatch', 'diagnostic command targeted another runtime session');
+  }
+  if (remote && message.caacValidated !== true) {
+    return diagnosticCommandFailure(command, 'authority.invalid', 'remote diagnostic command requires CAAC validation');
+  }
+  diagnosticCommandNonces.add(nonce);
+  if (diagnosticCommandNonces.size > 300) {
+    const first = diagnosticCommandNonces.values().next().value;
+    diagnosticCommandNonces.delete(first);
+  }
+  recordRuntimeEvent('runtime.diagnostic.command', {
+    command,
+    requestId: message.requestId,
+    clientId: endpoint.clientId,
+    surface: endpoint.surface,
+    remote,
+  });
+  try {
+    const result = await executeDiagnosticCommand(command, args, endpoint);
+    const event = recordRuntimeEvent('runtime.diagnostic.command.result', {
+      command,
+      requestId: message.requestId,
+      clientId: endpoint.clientId,
+      surface: endpoint.surface,
+      ok: true,
+    });
+    return {
+      ok: true,
+      result: {
+        recordKind: 'runtime.diagnostic.command.result',
+        command,
+        ok: true,
+        eventId: event.eventId,
+        result,
+      },
+    };
+  } catch (error) {
+    const failure = diagnosticCommandFailure(command, 'command.failed', String(error?.message || error || 'diagnostic command failed'));
+    recordRuntimeEvent('runtime.diagnostic.command.result', {
+      command,
+      requestId: message.requestId,
+      clientId: endpoint.clientId,
+      surface: endpoint.surface,
+      ok: false,
+      error: failure.error,
+    });
+    return failure;
+  }
+}
+
 async function handleControlMessage(message, endpoint) {
   const type = String(message?.type || '').trim();
   if (!type) return;
@@ -1430,6 +8690,8 @@ async function handleControlMessage(message, endpoint) {
     const entry = ensureEndpoint(clientId, endpoint, {
       surface: message.surface,
       broker: message.broker === true,
+      snapshotSubscription: message.snapshotSubscription,
+      attachContext: message.attachContext,
     });
     startHydrationInBackground();
     endpointPost(endpoint, {
@@ -1437,6 +8699,14 @@ async function handleControlMessage(message, endpoint) {
       buildId: RUNTIME_WORKER_BUILD_ID,
       clientId: entry?.clientId || '',
       snapshot: runtimeSnapshot(),
+      materializationBudget: safeClone(entry?.runtimeSnapshotMaterializationBudget || null),
+      consumerFloor: safeClone(entry?.runtimeSnapshotMaterializationBudget?.consumerFloor || null),
+    });
+    recordRuntimeEvent('runtime.attach', {
+      clientId: entry?.clientId || '',
+      surface: entry?.surface || '',
+      broker: entry?.broker === true,
+      materializationId: String(entry?.runtimeSnapshotMaterializationBudget?.budgetId || '').trim(),
     });
     const brokerIsAvailable = Boolean(brokerClientId && endpoints.get(brokerClientId));
     if (brokerWasAvailable !== brokerIsAvailable || entry?.broker) {
@@ -1447,7 +8717,7 @@ async function handleControlMessage(message, endpoint) {
   }
 
   // Hydration repairs retained state, but it must not gate runtime writes,
-  // broker forwarding, or projection repair. A slow gateway/relay path should
+  // local broker requests, or projection repair. A slow bootstrap path should
   // never make local runtime put/get messages time out.
   startHydrationInBackground();
 
@@ -1455,10 +8725,40 @@ async function handleControlMessage(message, endpoint) {
 
   switch (type) {
     case 'runtime.detach': {
+      recordRuntimeEvent('runtime.detach', {
+        clientId: String(message.clientId || endpoint?.clientId || '').trim(),
+      });
       deleteEndpoint(message.clientId);
       response = {
         type: 'runtime.detached',
         buildId: RUNTIME_WORKER_BUILD_ID,
+      };
+      break;
+    }
+    case RUNTIME_DIAGNOSTICS_SUBSCRIBE: {
+      response = {
+        type: 'runtime.response',
+        requestId: String(message.requestId || '').trim(),
+        kind: RUNTIME_DIAGNOSTICS_SUBSCRIBE,
+        ...handleDiagnosticsSubscribe(message, endpoint),
+      };
+      break;
+    }
+    case RUNTIME_DIAGNOSTICS_UNSUBSCRIBE: {
+      response = {
+        type: 'runtime.response',
+        requestId: String(message.requestId || '').trim(),
+        kind: RUNTIME_DIAGNOSTICS_UNSUBSCRIBE,
+        ...handleDiagnosticsUnsubscribe(message, endpoint),
+      };
+      break;
+    }
+    case RUNTIME_DIAGNOSTICS_COMMAND: {
+      response = {
+        type: 'runtime.response',
+        requestId: String(message.requestId || '').trim(),
+        kind: RUNTIME_DIAGNOSTICS_COMMAND,
+        ...(await handleDiagnosticsCommand(message, endpoint)),
       };
       break;
     }
@@ -1481,47 +8781,57 @@ async function handleControlMessage(message, endpoint) {
       };
       break;
     }
-    case BROKER.SERVICE_ACCESS_CONTEXT_PUT: {
+    case RUNTIME_MEDIA_TRANSPORT_PROFILE_GET: {
       response = {
         type: 'runtime.response',
         requestId: String(message.requestId || '').trim(),
-        kind: BROKER.SERVICE_ACCESS_CONTEXT_PUT,
-        ...handleServiceAccessContextPut(message),
+        kind: RUNTIME_MEDIA_TRANSPORT_PROFILE_GET,
+        ok: true,
+        result: runtimeMediaTransportProfile(),
       };
       break;
     }
-    case BROKER.SERVICE_ACCESS_CONTEXT_GET: {
+    case RUNTIME_MEDIA_TRANSPORT_OBSERVATION_PUT: {
       response = {
         type: 'runtime.response',
         requestId: String(message.requestId || '').trim(),
-        kind: BROKER.SERVICE_ACCESS_CONTEXT_GET,
-        ...handleServiceAccessContextGet(message),
+        kind: RUNTIME_MEDIA_TRANSPORT_OBSERVATION_PUT,
+        ...handleMediaTransportObservationPut(message),
       };
       break;
     }
-    case BROKER.SERVICE_ACCESS_CONTEXT_DELETE: {
+    case RUNTIME_MEDIA_FULFILLMENT_EVIDENCE_PUT: {
       response = {
         type: 'runtime.response',
         requestId: String(message.requestId || '').trim(),
-        kind: BROKER.SERVICE_ACCESS_CONTEXT_DELETE,
-        ...handleServiceAccessContextDelete(message),
+        kind: RUNTIME_MEDIA_FULFILLMENT_EVIDENCE_PUT,
+        ...handleMediaFulfillmentEvidencePut(message),
       };
       break;
     }
-    case BROKER.PROJECTION_PUT: {
+    case RUNTIME_APP_INTENT.STREAM_RECOVERY_REQUEST: {
       response = {
         type: 'runtime.response',
         requestId: String(message.requestId || '').trim(),
-        kind: BROKER.PROJECTION_PUT,
+        kind: RUNTIME_APP_INTENT.STREAM_RECOVERY_REQUEST,
+        ...handleRuntimeStreamRecoveryRequest(message),
+      };
+      break;
+    }
+    case PROJECTION_PUT: {
+      response = {
+        type: 'runtime.response',
+        requestId: String(message.requestId || '').trim(),
+        kind: PROJECTION_PUT,
         ...handleProjectionPut(message),
       };
       break;
     }
-    case BROKER.PROJECTION_GET: {
+    case PROJECTION_GET: {
       response = {
         type: 'runtime.response',
         requestId: String(message.requestId || '').trim(),
-        kind: BROKER.PROJECTION_GET,
+        kind: PROJECTION_GET,
         ...handleProjectionGet(message),
       };
       break;
@@ -1535,6 +8845,255 @@ async function handleControlMessage(message, endpoint) {
       };
       break;
     }
+    case RUNTIME_AUTHORITY_DEVICE_PUT: {
+      response = {
+        type: 'runtime.response',
+        requestId: String(message.requestId || '').trim(),
+        kind: RUNTIME_AUTHORITY_DEVICE_PUT,
+        ...(await handleRuntimeAuthorityDevicePut(message)),
+      };
+      break;
+    }
+    case RUNTIME_AUTHORITY_POSTURE_GET: {
+      response = {
+        type: 'runtime.response',
+        requestId: String(message.requestId || '').trim(),
+        kind: RUNTIME_AUTHORITY_POSTURE_GET,
+        ok: true,
+        result: await runtimeAuthorityPosture(),
+      };
+      break;
+    }
+    case RUNTIME_RESOURCE_PROFILE_GET: {
+      response = {
+        type: 'runtime.response',
+        requestId: String(message.requestId || '').trim(),
+        kind: RUNTIME_RESOURCE_PROFILE_GET,
+        ok: true,
+        result: runtimeResourceProfile(),
+      };
+      break;
+    }
+    case RUNTIME_RESOURCE_PROFILE_PUT: {
+      const profile = setRuntimeResourceProfile(message);
+      recordRuntimeEvent('runtime.resource.profile.updated', {
+        profileId: profile.id,
+        label: profile.label,
+      });
+      response = {
+        type: 'runtime.response',
+        requestId: String(message.requestId || '').trim(),
+        kind: RUNTIME_RESOURCE_PROFILE_PUT,
+        ok: true,
+        result: profile,
+      };
+      break;
+    }
+    case RUNTIME_RESOURCE_SAMPLE_GET: {
+      const debugEnabled = endpoint?.diagnostics === true;
+      response = {
+        type: 'runtime.response',
+        requestId: String(message.requestId || '').trim(),
+        kind: RUNTIME_RESOURCE_SAMPLE_GET,
+        ...(debugEnabled
+          ? { ok: true, result: runtimeResourceSample() }
+          : { ok: false, error: 'resource sample requires an enabled debug subscriber' }),
+      };
+      break;
+    }
+    case RUNTIME_RETENTION_RELEASE_EVALUATE: {
+      response = {
+        type: 'runtime.response',
+        requestId: String(message.requestId || '').trim(),
+        kind: RUNTIME_RETENTION_RELEASE_EVALUATE,
+        ok: true,
+        result: retentionReleaseEvaluation(message),
+      };
+      break;
+    }
+    case SERVICE_CATALOG_GET: {
+      response = {
+        type: 'runtime.response',
+        requestId: String(message.requestId || '').trim(),
+        kind: SERVICE_CATALOG_GET,
+        ok: true,
+        result: serviceCatalog(),
+      };
+      break;
+    }
+    case SERVICE_NODE_GET: {
+      response = {
+        type: 'runtime.response',
+        requestId: String(message.requestId || '').trim(),
+        kind: SERVICE_NODE_GET,
+        ok: true,
+        result: nodeProjectionForRequest(message),
+      };
+      break;
+    }
+    case SWARM_FRAME_QUEUE: {
+      response = {
+        type: 'runtime.response',
+        requestId: String(message.requestId || '').trim(),
+        kind: SWARM_FRAME_QUEUE,
+        ...queueSwarmFrame(message),
+      };
+      break;
+    }
+    case SWARM_QUEUE_GET: {
+      await ensureHydrated().catch(() => false);
+      response = {
+        type: 'runtime.response',
+        requestId: String(message.requestId || '').trim(),
+        kind: SWARM_QUEUE_GET,
+        ok: true,
+        result: swarmQueueObject(),
+      };
+      break;
+    }
+    case SWARM_EDGE_ATTACH: {
+      response = {
+        type: 'runtime.response',
+        requestId: String(message.requestId || '').trim(),
+        kind: SWARM_EDGE_ATTACH,
+        ...await attachLiveSwarmEdge(message),
+      };
+      break;
+    }
+    case SWARM_EDGE_DISCONNECT: {
+      closeSwarmEdgeSocket();
+      swarmEdge.mode = 'detached';
+      swarmEdge.connected = false;
+      swarmEdge.endpoint = '';
+      swarmEdge.sessionId = '';
+      swarmEdge.memberRef = '';
+      swarmEdge.zoneScope = null;
+      touchRuntime();
+      broadcastSnapshot();
+      response = {
+        type: 'runtime.response',
+        requestId: String(message.requestId || '').trim(),
+        kind: SWARM_EDGE_DISCONNECT,
+        ok: true,
+        result: edgeSnapshot(),
+      };
+      break;
+    }
+    case SWARM_EDGE_TEST_CONNECT: {
+      await ensureHydrated().catch(() => false);
+      closeSwarmEdgeSocket();
+      swarmEdge.mode = 'test';
+      swarmEdge.connected = true;
+      swarmEdge.endpoint = '';
+          swarmEdge.sessionId = String(message.sessionId || 'test-session').trim();
+          swarmEdge.zoneScope = safeClone(message.zoneScope || message?.payload?.zoneScope || null);
+          sendQueuedSwarmFrames();
+          requestRuntimeDirectoryObserve('edge.test.connect');
+          void flushPendingRouteIntents('edge.test.connect');
+          response = {
+        type: 'runtime.response',
+        requestId: String(message.requestId || '').trim(),
+        kind: SWARM_EDGE_TEST_CONNECT,
+        ok: true,
+        result: edgeSnapshot(),
+      };
+      break;
+    }
+    case SWARM_EDGE_TEST_DISCONNECT: {
+      swarmEdge.connected = false;
+      swarmEdge.sessionId = '';
+      swarmEdge.zoneScope = null;
+      touchRuntime();
+      broadcastSnapshot();
+      response = {
+        type: 'runtime.response',
+        requestId: String(message.requestId || '').trim(),
+        kind: SWARM_EDGE_TEST_DISCONNECT,
+        ok: true,
+        result: edgeSnapshot(),
+      };
+      break;
+    }
+    case SWARM_EDGE_TEST_RECEIVE: {
+      await handleEdgeWireMessage(message.record || message.payload || message);
+      response = {
+        type: 'runtime.response',
+        requestId: String(message.requestId || '').trim(),
+        kind: SWARM_EDGE_TEST_RECEIVE,
+        ok: true,
+        result: runtimeSnapshot(),
+      };
+      break;
+    }
+    case SWARM_EDGE_SENT_GET: {
+      response = {
+        type: 'runtime.response',
+        requestId: String(message.requestId || '').trim(),
+        kind: SWARM_EDGE_SENT_GET,
+        ok: true,
+        result: swarmEdge.sentFrames.map((entry) => safeClone(entry)),
+      };
+      break;
+    }
+    case SWARM_EDGE_ACK: {
+      response = {
+        type: 'runtime.response',
+        requestId: String(message.requestId || '').trim(),
+        kind: SWARM_EDGE_ACK,
+        ...handleSwarmEdgeAck(message),
+      };
+      break;
+    }
+    case SWARM_EDGE_REJECT: {
+      response = {
+        type: 'runtime.response',
+        requestId: String(message.requestId || '').trim(),
+        kind: SWARM_EDGE_REJECT,
+        ...handleSwarmEdgeReject(message),
+      };
+      break;
+    }
+    case PROJECTION_SNAPSHOT_APPLY: {
+      response = {
+        type: 'runtime.response',
+        requestId: String(message.requestId || '').trim(),
+        kind: PROJECTION_SNAPSHOT_APPLY,
+        ...handleProjectionSnapshotApply(message),
+      };
+      break;
+    }
+    case PROJECTION_DELTA_APPLY: {
+      response = {
+        type: 'runtime.response',
+        requestId: String(message.requestId || '').trim(),
+        kind: PROJECTION_DELTA_APPLY,
+        ...handleProjectionDeltaApply(message),
+      };
+      break;
+    }
+    case RUNTIME_APP_INTENT.CHANNEL_RESOLVE:
+    case RUNTIME_APP_INTENT.PROJECTION_OBSERVE:
+    case RUNTIME_APP_INTENT.STREAM_OPEN:
+    case RUNTIME_APP_INTENT.STREAM_CONTROL:
+    case RUNTIME_APP_INTENT.STREAM_CLOSE:
+    case RUNTIME_APP_INTENT.STORAGE_PIN: {
+      response = {
+        type: 'runtime.response',
+        requestId: String(message.requestId || '').trim(),
+        kind: type,
+        ...(await queueRuntimeAppIntent(type, message)),
+      };
+      break;
+    }
+    case RUNTIME_APP_INTENT.CAPABILITY_RESOLVE: {
+      response = {
+        type: 'runtime.response',
+        requestId: String(message.requestId || '').trim(),
+        kind: type,
+        ...(await resolveRuntimeCapability(message)),
+      };
+      break;
+    }
     case 'managedAppliances.sourceSnapshot.put': {
       response = {
         type: 'runtime.response',
@@ -1544,9 +9103,6 @@ async function handleControlMessage(message, endpoint) {
       };
       break;
     }
-    case BROKER.SERVICE_SIGNAL_REQUEST:
-    case BROKER.SERVICE_ACCESS_REQUEST:
-    case BROKER.SERVICE_PROJECTION_REQUEST:
     case 'gateway.grant.request':
     case 'gateway.service.install.request':
     case 'gateway.zones.sync.request': {
@@ -1559,30 +9115,6 @@ async function handleControlMessage(message, endpoint) {
           ...result,
         };
       }
-      break;
-    }
-    case BROKER.SERVICE_SIGNAL_RESPONSE: {
-      response = {
-        type: 'runtime.ack',
-        kind: BROKER.SERVICE_SIGNAL_RESPONSE,
-        ...handleBrokerResponse(BROKER.SERVICE_SIGNAL_REQUEST, message),
-      };
-      break;
-    }
-    case BROKER.SERVICE_PROJECTION_RESPONSE: {
-      response = {
-        type: 'runtime.ack',
-        kind: BROKER.SERVICE_PROJECTION_RESPONSE,
-        ...handleServiceProjectionResponse(message),
-      };
-      break;
-    }
-    case BROKER.SERVICE_ACCESS_RESPONSE: {
-      response = {
-        type: 'runtime.ack',
-        kind: BROKER.SERVICE_ACCESS_RESPONSE,
-        ...handleBrokerResponse(BROKER.SERVICE_ACCESS_REQUEST, message),
-      };
       break;
     }
     case 'gateway.grant.response': {

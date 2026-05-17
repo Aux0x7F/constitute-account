@@ -1,11 +1,39 @@
+import {
+  relayRxIngressClassification,
+  relayRxIngressLanePosture,
+} from './runtime-relay-admission.js';
+
 const RELAY_WORKER_BUILD_ID = '2026-04-06-runtime-stage3';
 const MAX_RECENT_EVENT_IDS = 2048;
+const RELAY_INGRESS_STATUS_INTERVAL_MS = 5_000;
 
 const endpoints = new Set();
 const relays = new Map();
 const recentEventIds = new Map();
+const relayIngressCounters = {
+  accepted: 0,
+  forwarded: 0,
+  filtered: 0,
+  duplicate: 0,
+  invalid: 0,
+  staleReplay: 0,
+  futureReplay: 0,
+  irrelevant: 0,
+  nonEvent: 0,
+  directory: 0,
+  account: 0,
+  authority: 0,
+  route: 0,
+  projection: 0,
+  acceptedByLane: {},
+  acceptedByReason: {},
+  filteredByReason: {},
+};
 let desiredRelayUrls = [];
 let dedicatedEndpoint = null;
+let relayIngressLastStatusAt = 0;
+let relayIngressDirty = false;
+let relayAdmissionContext = { surface: 'constitute-account' };
 
 function endpointPost(endpoint, msg) {
   try {
@@ -35,6 +63,116 @@ function relaySnapshot() {
   return out;
 }
 
+function relayIngressSnapshot() {
+  const observedAt = Date.now();
+  const laneCounts = (lane) => {
+    const total = Number(relayIngressCounters[lane] || 0);
+    const accepted = Number(relayIngressCounters.acceptedByLane?.[lane] || 0);
+    return {
+      total,
+      accepted,
+      filtered: Math.max(0, total - accepted),
+    };
+  };
+  const filteredCounts = () => ({
+    total: Number(relayIngressCounters.filtered || 0),
+    invalid: Number(relayIngressCounters.invalid || 0),
+    staleReplay: Number(relayIngressCounters.staleReplay || 0),
+    futureReplay: Number(relayIngressCounters.futureReplay || 0),
+    irrelevant: Number(relayIngressCounters.irrelevant || 0),
+    duplicate: Number(relayIngressCounters.duplicate || 0),
+  });
+  return {
+    kind: 'relay.ingress.snapshot',
+    observedAt,
+    counters: { ...relayIngressCounters },
+    lanes: {
+      'relay.directory': relayRxIngressLanePosture({
+        lane: 'directory',
+        laneKind: 'control',
+        counts: laneCounts('directory'),
+        limits: { recentEventIds: MAX_RECENT_EVENT_IDS },
+        relevanceRefs: ['relay.tag:swarm_discovery'],
+        sampledAt: observedAt,
+      }),
+      'relay.account': relayRxIngressLanePosture({
+        lane: 'account',
+        laneKind: 'app',
+        counts: laneCounts('account'),
+        limits: { statusIntervalMs: RELAY_INGRESS_STATUS_INTERVAL_MS },
+        relevanceRefs: ['relay.tag:constitute'],
+        sampledAt: observedAt,
+      }),
+      'relay.authority': relayRxIngressLanePosture({
+        lane: 'authority',
+        laneKind: 'control',
+        counts: laneCounts('authority'),
+        limits: { statusIntervalMs: RELAY_INGRESS_STATUS_INTERVAL_MS },
+        relevanceRefs: ['relay.payload:pair_*'],
+        sampledAt: observedAt,
+      }),
+      'relay.route': relayRxIngressLanePosture({
+        lane: 'route',
+        laneKind: 'control',
+        counts: laneCounts('route'),
+        limits: { statusIntervalMs: RELAY_INGRESS_STATUS_INTERVAL_MS },
+        relevanceRefs: ['relay.payload:swarm_signal'],
+        sampledAt: observedAt,
+      }),
+      'relay.projection': relayRxIngressLanePosture({
+        lane: 'projection',
+        laneKind: 'projection',
+        counts: laneCounts('projection'),
+        limits: { statusIntervalMs: RELAY_INGRESS_STATUS_INTERVAL_MS },
+        relevanceRefs: ['relay.payload:swarm_*'],
+        sampledAt: observedAt,
+      }),
+      'relay.filtered': relayRxIngressLanePosture({
+        lane: 'irrelevant',
+        laneKind: 'drop-before-app',
+        counts: filteredCounts(),
+        limits: {
+          recentEventIds: MAX_RECENT_EVENT_IDS,
+          statusIntervalMs: RELAY_INGRESS_STATUS_INTERVAL_MS,
+        },
+        relevanceRefs: ['relay.filter:pre-sw'],
+        sampledAt: observedAt,
+      }),
+    },
+  };
+}
+
+function emitIngressStatus({ force = false } = {}) {
+  const now = Date.now();
+  if (!force && (!relayIngressDirty || now - relayIngressLastStatusAt < RELAY_INGRESS_STATUS_INTERVAL_MS)) return;
+  relayIngressDirty = false;
+  relayIngressLastStatusAt = now;
+  broadcast({
+    type: 'relay.ingress.status',
+    version: RELAY_WORKER_BUILD_ID,
+    ingress: relayIngressSnapshot(),
+  });
+}
+
+function incrementIngressCounter(classification) {
+  const lane = String(classification?.lane || 'invalid');
+  const reason = String(classification?.reason || 'unknown');
+  if (classification?.accepted) relayIngressCounters.accepted += 1;
+  else relayIngressCounters.filtered += 1;
+  if (Object.prototype.hasOwnProperty.call(relayIngressCounters, lane)) {
+    relayIngressCounters[lane] += 1;
+  } else if (!classification?.accepted) {
+    relayIngressCounters.irrelevant += 1;
+  }
+  if (classification?.accepted) {
+    relayIngressCounters.acceptedByLane[lane] = (relayIngressCounters.acceptedByLane[lane] || 0) + 1;
+    relayIngressCounters.acceptedByReason[reason] = (relayIngressCounters.acceptedByReason[reason] || 0) + 1;
+  } else {
+    relayIngressCounters.filteredByReason[reason] = (relayIngressCounters.filteredByReason[reason] || 0) + 1;
+  }
+  relayIngressDirty = true;
+}
+
 function aggregateRelayState() {
   if (relays.size === 0) return { state: 'offline', code: null, reason: 'no relays configured' };
   const snapshot = Array.from(relays.values());
@@ -60,6 +198,7 @@ function emitStatus() {
     reason: aggregate.reason,
     urls: currentRelayUrls(),
     relays: relaySnapshot(),
+    ingress: relayIngressSnapshot(),
   });
 }
 
@@ -83,15 +222,32 @@ function rememberEventId(id) {
   return true;
 }
 
-function extractEventId(frame) {
-  try {
-    const parsed = JSON.parse(String(frame || ''));
-    if (!Array.isArray(parsed) || parsed[0] !== 'EVENT') return '';
-    const event = parsed.length >= 3 ? parsed[2] : parsed[1];
-    return event && typeof event === 'object' ? String(event.id || '').trim() : '';
-  } catch {
-    return '';
-  }
+function normalizeRelayAdmissionContext(input = {}) {
+  const source = input && typeof input === 'object' ? input : {};
+  const zoneKeys = [
+    ...(Array.isArray(source.zoneKeys) ? source.zoneKeys : []),
+    ...(Array.isArray(source.zones) ? source.zones : []),
+  ].map((value) => String(value?.key || value || '').trim()).filter(Boolean);
+  return {
+    surface: String(source.surface || 'constitute-account').trim(),
+    memberRef: String(source.memberRef || '').trim(),
+    subscriberRef: String(source.subscriberRef || source.memberRef || '').trim(),
+    identity: String(source.identity || source.identityLabel || '').trim(),
+    ownerId: String(source.ownerId || '').trim(),
+    zoneKeys: Array.from(new Set(zoneKeys)),
+  };
+}
+
+function classifyRelayWorkerFrame(frame, observedAt = Date.now()) {
+  const classification = relayRxIngressClassification(frame, {
+    observedAt,
+    context: relayAdmissionContext,
+  });
+  const eventId = String(classification?.admission?.subject?.relayEventId || '').trim();
+  return {
+    ...classification,
+    eventId,
+  };
 }
 
 function scheduleReconnect(relay) {
@@ -145,9 +301,17 @@ function connectRelay(relay, { isRetry = false } = {}) {
 
   ws.onmessage = (event) => {
     const data = String(event.data || '');
-    const eventId = extractEventId(data);
-    if (!rememberEventId(eventId)) return;
-    broadcast({ type: 'relay.rx', data, url: relay.url });
+    const classification = classifyRelayWorkerFrame(data);
+    if (classification.accepted && !rememberEventId(classification.eventId)) {
+      incrementIngressCounter({ accepted: false, lane: 'duplicate', reason: 'duplicateEvent' });
+      emitIngressStatus();
+      return;
+    }
+    incrementIngressCounter(classification);
+    if (classification.accepted) relayIngressCounters.forwarded += 1;
+    emitIngressStatus();
+    if (!classification.accepted) return;
+    broadcast({ type: 'relay.rx', data, url: relay.url, workerAdmission: classification });
   };
 }
 
@@ -210,8 +374,14 @@ function send(frame) {
 function handleControlMessage(msg, endpoint) {
   try {
     if (msg.type === 'relay.connect') {
+      relayAdmissionContext = normalizeRelayAdmissionContext(msg.context || relayAdmissionContext);
       const urls = Array.isArray(msg.urls) ? msg.urls : (msg.url ? [msg.url] : []);
       updateRelayTargets(urls);
+      endpointPost(endpoint, { type: 'relay.ack', ok: true });
+      return;
+    }
+    if (msg.type === 'relay.context') {
+      relayAdmissionContext = normalizeRelayAdmissionContext(msg.context || {});
       endpointPost(endpoint, { type: 'relay.ack', ok: true });
       return;
     }
@@ -230,6 +400,7 @@ function handleControlMessage(msg, endpoint) {
         reason: aggregate.reason,
         urls: currentRelayUrls(),
         relays: relaySnapshot(),
+        ingress: relayIngressSnapshot(),
       });
       return;
     }
@@ -257,6 +428,7 @@ function attachSharedPort(port) {
     reason: aggregateRelayState().reason,
     urls: currentRelayUrls(),
     relays: relaySnapshot(),
+    ingress: relayIngressSnapshot(),
   });
 }
 
@@ -272,6 +444,7 @@ function ensureDedicatedEndpoint() {
     reason: aggregateRelayState().reason,
     urls: currentRelayUrls(),
     relays: relaySnapshot(),
+    ingress: relayIngressSnapshot(),
   });
   return dedicatedEndpoint;
 }
