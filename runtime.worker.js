@@ -1,4 +1,6 @@
 import {
+  PROJECTION,
+  SERVICE_REGISTRY,
   SWARM,
   STREAM_SESSION_LIFECYCLE_PHASE,
   applyProjectionDelta,
@@ -9,6 +11,8 @@ import {
   assertProjectionPolicy,
   assertProjectionRecord,
   assertProjectionSnapshot,
+  assertServiceRegistryClaim,
+  assertServiceRegistryMaterialization,
   assertResolvedMemberRef,
   assertProjectionRepairPosture,
   assertResourcePosture,
@@ -6192,6 +6196,130 @@ function serviceDescriptorFromRecord(record) {
   };
 }
 
+function serviceRegistryClaimFromDescriptor(descriptor, issuedAt = nowMs()) {
+  if (!descriptor || typeof descriptor !== 'object') return null;
+  const service = String(descriptor.service || '').trim();
+  const servicePk = String(descriptor.servicePk || '').trim();
+  const hostGatewayPk = String(descriptor.hostGatewayPk || '').trim();
+  if (!service || !servicePk || !hostGatewayPk) return null;
+  const serviceRef = String(descriptor.serviceRef || `service:${service}:${servicePk}`).trim();
+  const zoneScope = normalizeServiceZoneScope(descriptor.zoneScope);
+  const scopeRef = zoneScope?.zoneId ? `zone:${zoneScope.zoneId}` : 'scope:runtime-retained-services';
+  const channelRefs = uniqueTrimmedStrings([
+    descriptor.surfaceChannel,
+    ...normalizeArray(descriptor.nodes).map((node) => node?.channelId || node?.backingChannel),
+  ]);
+  const nodeRefs = uniqueTrimmedStrings(normalizeArray(descriptor.nodes).map((node) => node?.nodeId || node?.path));
+  const capabilityRefs = uniqueTrimmedStrings(normalizeArray(descriptor.nodes).flatMap((node) => normalizeArray(node?.capabilities)));
+  try {
+    return assertServiceRegistryClaim({
+      kind: SWARM.RECORD_KIND.SERVICE_REGISTRY_CLAIM,
+      claimId: `service-registry-claim:${service}:${servicePk}`,
+      schemaVersion: SERVICE_REGISTRY.SCHEMA_VERSION,
+      claimKind: SERVICE_REGISTRY.CLAIM_KIND.SERVICE,
+      state: SERVICE_REGISTRY.CLAIM_STATE.CLAIMED,
+      ownerRef: serviceRef,
+      writerRef: `gateway:${hostGatewayPk}`,
+      subjectRef: serviceRef,
+      scopeRef,
+      service,
+      servicePk,
+      serviceRef,
+      memberRef: descriptor.serviceMemberRef || descriptor.routeMemberRef || servicePk,
+      hostGatewayPk,
+      capabilityRefs,
+      channelRefs,
+      nodeRefs,
+      surfaceRefs: descriptor.surfaceChannel ? [descriptor.surfaceChannel] : [],
+      evidenceRefs: uniqueTrimmedStrings([
+        descriptor.liveEdgeRoute?.memberRef ? `swarm.directory:${descriptor.liveEdgeRoute.memberRef}` : '',
+        descriptor.surfaceChannel ? `projection:${descriptor.surfaceChannel}` : '',
+      ]),
+      safeFacts: { service, surfaceChannel: descriptor.surfaceChannel || '' },
+      issuedAt,
+      expiresAt: issuedAt + 90_000,
+    });
+  } catch (error) {
+    recordRuntimeEvent('service.registry.claim.ignored', {
+      level: 'warn',
+      service,
+      servicePk,
+      error: { message: String(error?.message || error) },
+    });
+    return null;
+  }
+}
+
+function directoryEntriesForServiceRegistry(issuedAt = nowMs()) {
+  const out = [];
+  const seen = new Set();
+  for (const directory of liveDirectoryPayloads()) {
+    for (const entry of normalizeArray(directory.entries)) {
+      const memberRef = String(entry?.memberRef || entry?.member_ref || '').trim();
+      const channelId = String(entry?.channelId || entry?.channel_id || '').trim();
+      const capabilityRef = String(entry?.capabilityRef || entry?.capability || '').trim();
+      const serviceRef = String(entry?.serviceRef || entry?.service_ref || '').trim();
+      const subjectRef = serviceRef || (memberRef ? `member:${memberRef}` : '');
+      if (!subjectRef || !channelId) continue;
+      const entryId = String(entry?.entryId || entry?.entry_id || `directory-entry:${memberRef}:${capabilityRef}:${channelId}`).trim();
+      if (seen.has(entryId)) continue;
+      seen.add(entryId);
+      try {
+        out.push(assertDirectoryEntry({
+          kind: SWARM.RECORD_KIND.DIRECTORY_ENTRY,
+          entryId,
+          subjectRef,
+          source: 'memberRecord',
+          ...(capabilityRef ? { capabilityRef } : {}),
+          channelId,
+          issuedAt: Number(entry?.issuedAt || entry?.issued_at || issuedAt),
+        }));
+      } catch {
+        // Directory entries are an optimization for materialization coverage; invalid
+        // edge claims should not block retained service descriptors.
+      }
+    }
+  }
+  return out;
+}
+
+function serviceRegistryMaterializationFromServices(services, issuedAt = nowMs()) {
+  const registryServices = normalizeArray(services).filter((descriptor) => (
+    String(descriptor?.service || '').trim()
+    && String(descriptor?.servicePk || '').trim()
+    && String(descriptor?.hostGatewayPk || '').trim()
+    && String(descriptor?.surfaceChannel || '').trim()
+  ));
+  const claims = registryServices
+    .map((descriptor) => serviceRegistryClaimFromDescriptor(descriptor, issuedAt))
+    .filter(Boolean);
+  const entries = directoryEntriesForServiceRegistry(issuedAt);
+  const registry = {
+    kind: SWARM.RECORD_KIND.SERVICE_REGISTRY_MATERIALIZATION,
+    registryId: 'service-registry:runtime',
+    schemaVersion: SERVICE_REGISTRY.SCHEMA_VERSION,
+    scopeRef: 'runtime:local',
+    state: claims.length || entries.length
+      ? SERVICE_REGISTRY.MATERIALIZATION_STATE.READY
+      : SERVICE_REGISTRY.MATERIALIZATION_STATE.PARTIAL,
+    revision: issuedAt,
+    claimRefs: claims.map((claim) => claim.claimId),
+    participantRefs: uniqueTrimmedStrings(claims.map((claim) => claim.writerRef)),
+    serviceRefs: uniqueTrimmedStrings(claims.map((claim) => claim.serviceRef)),
+    services: registryServices,
+    entries,
+    coverage: {
+      materializedCount: claims.length,
+      targetCount: claims.length,
+      completionRatio: 1,
+      syncState: PROJECTION.SYNC_STATE.COMPLETE_ENOUGH,
+    },
+    freshness: { state: PROJECTION.FRESHNESS.FRESH, updatedAt: issuedAt },
+    issuedAt,
+  };
+  return assertServiceRegistryMaterialization(registry);
+}
+
 function surfaceFromProjection(projection) {
   const surface = projection?.payload?.surface && typeof projection.payload.surface === 'object'
     ? projection.payload.surface
@@ -6217,6 +6345,7 @@ function retainedSurfaceForDescriptor(descriptor) {
 }
 
 function serviceCatalog() {
+  const updatedAt = runtimeUpdatedAt || nowMs();
   const services = hostedServiceRecords().map((record) => {
     const descriptor = serviceDescriptorFromRecord(record);
     const surface = retainedSurfaceForDescriptor(descriptor);
@@ -6242,8 +6371,9 @@ function serviceCatalog() {
     };
   });
   return {
-    updatedAt: runtimeUpdatedAt || nowMs(),
+    updatedAt,
     services,
+    registry: serviceRegistryMaterializationFromServices(services, updatedAt),
   };
 }
 
