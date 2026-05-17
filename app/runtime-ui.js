@@ -1,3 +1,5 @@
+import { preparedServiceRegistry } from '../../constitute-ui/src/service-registry-model.js';
+
 function normalizeArray(value) {
   return Array.isArray(value) ? value : [];
 }
@@ -39,10 +41,8 @@ function serviceHealthLabel(service) {
 }
 
 export function preparedRuntimeServiceCatalog(snapshot = {}) {
-  const catalog = snapshot?.serviceCatalog && typeof snapshot.serviceCatalog === 'object'
-    ? snapshot.serviceCatalog
-    : {};
-  return normalizeArray(catalog.services)
+  const registry = preparedServiceRegistry(snapshot);
+  return normalizeArray(registry.services)
     .filter((service) => service && typeof service === 'object')
     .map((service) => {
       const nodes = normalizeArray(service.nodes)
@@ -126,12 +126,14 @@ export function preparedRuntimeProjectionStatus(snapshot = {}) {
 }
 
 export function buildRuntimeSnapshotView(snapshot = {}) {
+  const serviceRegistry = preparedServiceRegistry(snapshot);
   const catalog = preparedRuntimeServiceCatalog(snapshot);
   const edge = preparedSwarmEdgeStatus(snapshot);
   const projections = preparedRuntimeProjectionStatus(snapshot);
   return {
     catalog,
     catalogLabel: catalog.length === 1 ? '1 service' : `${catalog.length} services`,
+    serviceRegistry,
     edge,
     projections,
   };

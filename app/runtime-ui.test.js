@@ -69,18 +69,31 @@ test('runtime service catalog view renders retained snapshot services', () => {
   const snapshot = {
     serviceCatalog: {
       updatedAt: 1710000000000,
+      registry: {
+        kind: 'service.registry.materialization',
+        registryId: 'service-registry:runtime',
+        state: 'ready',
+        issuedAt: 1710000000100,
+        claimRefs: ['claim:logging'],
+        services: [
+          {
+            service: 'logging',
+            servicePk: 'abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789',
+            hostGatewayPk: 'gateway-pk',
+            summary: 'Event projection retained.',
+            health: { state: 'ready' },
+            surfaceChannel: 'service.logging.surface',
+            nodes: [
+              { path: 'events', label: 'Events', capabilities: ['projection.observe'] },
+              { path: 'health', label: 'Health', capabilities: ['projection.observe'] },
+            ],
+          },
+        ],
+      },
       services: [
         {
-          service: 'logging',
-          servicePk: 'abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789',
-          hostGatewayPk: 'gateway-pk',
-          summary: 'Event projection retained.',
-          health: { state: 'ready' },
-          surfaceChannel: 'service.logging.surface',
-          nodes: [
-            { path: 'events', label: 'Events', capabilities: ['projection.observe'] },
-            { path: 'health', label: 'Health', capabilities: ['projection.observe'] },
-          ],
+          service: 'legacy',
+          servicePk: 'legacy-pk',
         },
       ],
     },
@@ -90,6 +103,8 @@ test('runtime service catalog view renders retained snapshot services', () => {
   const view = renderRuntimeSnapshotView(elements, snapshot, fakeDocument());
 
   assert.equal(view.catalogLabel, '1 service');
+  assert.equal(view.serviceRegistry.source, 'serviceRegistry');
+  assert.equal(view.serviceRegistry.claimCount, 1);
   assert.equal(elements.catalogStatusEl.textContent, '1 service');
   assert.match(elements.catalogListEl.textContent, /Logging - ready/);
   assert.match(elements.catalogListEl.textContent, /Nodes: Events, Health/);
