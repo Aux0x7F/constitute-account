@@ -1,5 +1,10 @@
 import { SURFACE_APP, assertSurfaceAppContract } from "../constitute-protocol/src/index.js";
-import { defineSurfaceAppContract } from "../constitute-ui/src/surface-app-contract.js";
+import {
+  defineSurfaceAppContract,
+  surfaceAppBootstrapPosture,
+  surfaceServiceManagerOperationPosture,
+  surfaceServiceManagerProofDigest,
+} from "../constitute-ui/src/surface-app-contract.js";
 import { createRuntimeSurfaceClient } from "../constitute-ui/src/runtime-surface-client.js";
 import {
   createSurfaceModuleRegistry,
@@ -86,6 +91,23 @@ export const accountSurfaceAppContract = assertSurfaceAppContract({
     state: SURFACE_APP.UPDATE_POSTURE.STATIC,
     checkedAt: ISSUED_AT,
   },
+  serviceManagerPosture: {
+    managerId: "manager:manual:account-ui",
+    subjectRef: "app:account-ui",
+    managerRef: "manager:manual:account-ui",
+    state: SURFACE_APP.SERVICE_MANAGER_POSTURE.MANUAL,
+    serviceRefs: ["app:account-ui"],
+    capabilityRefs: ["service.manage"],
+    evidenceRefs: ["build:account-ui:local"],
+    issuedAt: ISSUED_AT,
+  },
+  secretBoundary: {
+    state: SURFACE_APP.SECRET_BOUNDARY.NOT_REQUIRED,
+  },
+  releasePosture: {
+    state: SURFACE_APP.RELEASE_POSTURE.STATIC,
+    evidenceRefs: ["build:account-ui:local"],
+  },
   issuedAt: ISSUED_AT,
 });
 
@@ -132,6 +154,22 @@ export const accountSurfaceModules = surfaceAppModuleImplementations(
   accountSurfaceApp,
 );
 
+export const accountSurfaceBootstrapPosture = surfaceAppBootstrapPosture(accountSurfaceApp, {
+  issuedAt: ISSUED_AT,
+});
+
+export const accountServiceManagerOperationPosture = surfaceServiceManagerOperationPosture(accountSurfaceApp, {
+  operation: SURFACE_APP.SERVICE_MANAGER_OPERATION.HEALTH_CHECK,
+  operationId: "operation:account-ui:bootstrap-health",
+  requestedAt: ISSUED_AT,
+});
+
+export const accountServiceManagerProofDigest = surfaceServiceManagerProofDigest(accountSurfaceApp, {
+  operationPosture: accountServiceManagerOperationPosture,
+  digestId: "proof-digest:account-ui:bootstrap",
+  observedAt: ISSUED_AT,
+});
+
 export const accountRuntimeClientModule = accountSurfaceModuleRegistry.require(
   accountSurfaceApp,
   SURFACE_APP.MODULE_ROLE.RUNTIME_CLIENT,
@@ -149,4 +187,7 @@ export const accountPlatformAdapterModule = accountSurfaceModuleRegistry.require
 
 export const accountSurfaceAttachContext = accountSurfaceApp.attachContext({
   productSurface: "constitute-account",
+  bootstrapPosture: accountSurfaceBootstrapPosture,
+  serviceManagerOperationPosture: accountServiceManagerOperationPosture,
+  serviceManagerProofDigest: accountServiceManagerProofDigest,
 });

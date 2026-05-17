@@ -2,8 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   accountRuntimeClientModule,
+  accountServiceManagerOperationPosture,
+  accountServiceManagerProofDigest,
   accountSurfaceApp,
   accountSurfaceAttachContext,
+  accountSurfaceBootstrapPosture,
   accountSurfaceModuleRegistry,
   accountSurfaceModules,
 } from "../surface-app-contract.js";
@@ -20,4 +23,9 @@ test("account ui declares its surface app modules before runtime attach", () => 
   assert.equal(accountSurfaceAttachContext.kind, "surface.app.attachContext");
   assert.equal(accountSurfaceAttachContext.appId, "constitute-account");
   assert.equal(accountSurfaceAttachContext.moduleRefs.length, 4);
+  assert.equal(accountSurfaceBootstrapPosture.state, "ready");
+  assert.equal(accountServiceManagerOperationPosture.kind, "service.manager.operation.posture");
+  assert.equal(accountServiceManagerOperationPosture.state, "requested");
+  assert.equal(accountServiceManagerProofDigest.kind, "service.manager.proof.digest");
+  assert.equal(accountSurfaceAttachContext.serviceManagerOperationPosture, accountServiceManagerOperationPosture);
 });
