@@ -2213,6 +2213,7 @@ function activationResolutionObject() {
       ? entry.mediaFulfillment
       : null;
     const mediaState = String(mediaFulfillment?.state || '').trim();
+    const mediaPostureState = String(mediaFulfillment?.postureState || '').trim();
     const recordKind = queuedSwarmFrameRecordKind(entry);
     const rawState = String(routeObservation?.state || entry.status || 'queued').trim() || 'queued';
     const admissionTimedOut = String(entry.status || '').trim() === 'serviceAdmissionTimedOut';
@@ -2220,12 +2221,14 @@ function activationResolutionObject() {
     const state = entry.serviceRejected
       ? 'serviceRejected'
       : mediaState === SWARM.MEDIA_FULFILLMENT_STATE.BLOCKED
-        ? 'mediaBlocked'
+        ? mediaPostureState || 'mediaBlocked'
         : mediaState === SWARM.MEDIA_FULFILLMENT_STATE.RELEASED
           ? 'released'
           : mediaState === SWARM.MEDIA_FULFILLMENT_STATE.USABLE
             ? 'adapterLive'
-            : entry.serviceAnswer
+            : mediaState === SWARM.MEDIA_FULFILLMENT_STATE.PENDING && mediaPostureState === 'waitingRender'
+              ? 'waitingRender'
+              : entry.serviceAnswer
               ? 'answerMaterialized'
             : entry.serviceAccepted
               ? 'waitingServiceAnswer'
@@ -2262,6 +2265,7 @@ function activationResolutionObject() {
       contributionWitnessedAt: Number(entry.contributionWitnessedAt || 0) || 0,
       mediaFulfillment: mediaFulfillment ? safeClone(mediaFulfillment) : null,
       mediaState,
+      mediaPostureState,
       responseState: signalDeliveryState ? 'notRequired' : entry.serviceRejected ? 'rejected' : entry.serviceAnswer ? 'materialized' : entry.serviceAccepted ? 'waitingServiceAnswer' : admissionTimedOut ? 'serviceAdmissionTimedOut' : '',
       lastError: entry.lastError ? safeClone(entry.lastError) : null,
       updatedAt: Number(entry.mediaFulfillmentAt || entry.contributionWitnessedAt || entry.serviceAnswerAt || entry.serviceAcceptedAt || entry.serviceAdmissionTimedOutAt || entry.routeObservedAt || entry.rejectedAt || entry.ackedAt || entry.sentAt || entry.queuedAt || 0),
@@ -3247,6 +3251,10 @@ function fulfillmentEvidenceFromTransportObservation(record, openedFrame) {
     participantRole: String(record.participantRole || '').trim(),
     observationState: String(record.state || '').trim(),
     connectionState: String(record.connectionState || '').trim(),
+    iceConnectionState: String(record.iceConnectionState || '').trim(),
+    selectedPairState: String(record.selectedPairState || '').trim(),
+    inboundRtpState: String(record.inboundRtpState || '').trim(),
+    renderState: String(record.renderState || '').trim(),
     reason: String(record.reason || '').trim(),
   };
   const evidence = {
@@ -8219,10 +8227,16 @@ function mediaFulfillmentEntrySnapshot(entry) {
     serviceRef: entry.serviceRef,
     routePromiseId: entry.routePromiseId,
     state: entry.state,
+    postureState: entry.postureState,
+    blockedCategory: entry.blockedCategory || '',
     blockedReasons: entry.blockedReasons.slice(),
     visibleFrame: entry.visibleFrame === true,
     trackLive: entry.trackLive === true,
     transportUsable: entry.transportUsable === true,
+    renderReadinessState: entry.renderReadinessState || '',
+    selectedPairState: entry.selectedPairState || '',
+    inboundRtpState: entry.inboundRtpState || '',
+    renderState: entry.renderState || '',
     updatedAt: entry.updatedAt,
     expiresAt: entry.expiresAt || undefined,
     latestEvidence: safeClone(entry.latestEvidence || null),
@@ -8234,6 +8248,85 @@ function mediaFulfillmentObject() {
   return Object.fromEntries(
     Array.from(mediaFulfillmentPostures.entries()).map(([key, entry]) => [key, mediaFulfillmentEntrySnapshot(entry)]),
   );
+}
+
+function mediaEvidenceSafeFacts(record) {
+  return record?.safeFacts && typeof record.safeFacts === 'object' ? record.safeFacts : {};
+}
+
+function mediaBlockedCategory(reason, evidenceKind, facts = {}) {
+  const normalizedReason = String(reason || '').trim();
+  const readinessState = String(facts.readinessState || '').trim();
+  if (
+    evidenceKind === SWARM.MEDIA_FULFILLMENT_EVIDENCE_KIND.RENDER_STATE
+    || readinessState === 'renderBlocked'
+    || [
+      'renderPlaybackStalled',
+      'renderDimensionsMissing',
+      'videoElementError',
+    ].includes(normalizedReason)
+  ) {
+    return 'render';
+  }
+  if (
+    evidenceKind === SWARM.MEDIA_FULFILLMENT_EVIDENCE_KIND.TRANSPORT_STATE
+    || evidenceKind === SWARM.MEDIA_FULFILLMENT_EVIDENCE_KIND.SELECTED_CANDIDATE_PAIR
+    || evidenceKind === SWARM.MEDIA_FULFILLMENT_EVIDENCE_KIND.INBOUND_STATS
+    || [
+      'iceFailed',
+      'peerConnectionFailed',
+      'inboundRtpStalled',
+      'mediaTransportBlocked',
+      'missingBrowserCandidate',
+      'missingServiceCandidate',
+    ].includes(normalizedReason)
+  ) {
+    return 'mediaPath';
+  }
+  if (evidenceKind === SWARM.MEDIA_FULFILLMENT_EVIDENCE_KIND.TRACK_STATE) return 'track';
+  return normalizedReason ? 'media' : '';
+}
+
+function mediaRuntimePostureState(entry) {
+  const latestEvidence = entry.latestEvidence || {};
+  const latestFacts = mediaEvidenceSafeFacts(latestEvidence);
+  const latestKind = String(latestEvidence.evidenceKind || '').trim();
+  const render = entry.evidenceByKind.get(SWARM.MEDIA_FULFILLMENT_EVIDENCE_KIND.RENDER_STATE);
+  const renderFacts = mediaEvidenceSafeFacts(render);
+  const inbound = entry.evidenceByKind.get(SWARM.MEDIA_FULFILLMENT_EVIDENCE_KIND.INBOUND_STATS);
+  const selectedPair = entry.evidenceByKind.get(SWARM.MEDIA_FULFILLMENT_EVIDENCE_KIND.SELECTED_CANDIDATE_PAIR);
+  entry.blockedCategory = '';
+  entry.renderReadinessState = String(renderFacts.readinessState || latestFacts.readinessState || '').trim();
+  entry.selectedPairState = String(selectedPair?.safeFacts?.pairState || latestFacts.selectedPairState || '').trim();
+  entry.inboundRtpState = inbound?.state === SWARM.MEDIA_FULFILLMENT_STATE.BLOCKED
+    ? 'stalled'
+    : inbound?.state === SWARM.MEDIA_FULFILLMENT_STATE.USABLE
+      ? 'flowing'
+      : String(latestFacts.inboundRtpState || '').trim();
+  entry.renderState = render?.state === SWARM.MEDIA_FULFILLMENT_STATE.BLOCKED
+    ? 'blocked'
+    : render?.state === SWARM.MEDIA_FULFILLMENT_STATE.USABLE
+      ? 'visible'
+      : String(latestFacts.renderState || '').trim();
+  if (entry.state === SWARM.MEDIA_FULFILLMENT_STATE.RELEASED) return 'released';
+  if (entry.state === SWARM.MEDIA_FULFILLMENT_STATE.USABLE) return 'adapterLive';
+  if (entry.state === SWARM.MEDIA_FULFILLMENT_STATE.BLOCKED) {
+    const reason = entry.blockedReasons[0] || String(latestEvidence.blockedReason || '').trim();
+    const category = mediaBlockedCategory(reason, latestKind, latestFacts);
+    entry.blockedCategory = category;
+    if (category === 'render') return 'renderBlocked';
+    if (category === 'mediaPath') return 'mediaPathBlocked';
+    return 'mediaBlocked';
+  }
+  if (
+    entry.renderReadinessState === 'waitingRender'
+    || entry.renderReadinessState === 'pendingRender'
+    || entry.trackLive
+    || entry.transportUsable
+  ) {
+    return 'waitingRender';
+  }
+  return 'waitingMediaEvidence';
 }
 
 function streamRecoveryObject() {
@@ -8269,6 +8362,7 @@ function reduceMediaFulfillmentState(entry) {
   } else {
     entry.state = SWARM.MEDIA_FULFILLMENT_STATE.PENDING;
   }
+  entry.postureState = mediaRuntimePostureState(entry);
   return entry;
 }
 
@@ -8286,10 +8380,16 @@ function reduceMediaFulfillmentEvidence(record) {
     serviceRef: '',
     routePromiseId: '',
     state: SWARM.MEDIA_FULFILLMENT_STATE.PENDING,
+    postureState: 'waitingMediaEvidence',
+    blockedCategory: '',
     blockedReasons: [],
     visibleFrame: false,
     trackLive: false,
     transportUsable: false,
+    renderReadinessState: '',
+    selectedPairState: '',
+    inboundRtpState: '',
+    renderState: '',
     updatedAt: 0,
     expiresAt: 0,
     latestEvidence: null,
@@ -8345,15 +8445,26 @@ function applyMediaFulfillmentPostureToQueuedFrame(posture = {}) {
   const entry = findQueuedFrameForMediaFulfillmentPosture(posture);
   if (!entry) return false;
   const state = String(posture.state || '').trim();
+  const postureState = String(posture.postureState || '').trim();
   entry.mediaFulfillment = safeClone(posture);
   entry.mediaFulfillmentAt = Number(posture.updatedAt || 0) || nowMs();
   if (state === SWARM.MEDIA_FULFILLMENT_STATE.BLOCKED) {
-    entry.status = 'mediaBlocked';
+    entry.status = postureState || 'mediaBlocked';
+    const errorCode = postureState === 'renderBlocked'
+      ? 'media.renderBlocked'
+      : postureState === 'mediaPathBlocked'
+        ? 'media.pathBlocked'
+        : 'media.blocked';
     entry.lastError = {
-      code: 'media.blocked',
+      code: errorCode,
       message: posture.blockedReasons?.[0] || 'media transport blocked',
       retryable: true,
     };
+  } else if (state === SWARM.MEDIA_FULFILLMENT_STATE.PENDING && postureState === 'waitingRender') {
+    if (!queuedSwarmFrameTerminal(entry)) {
+      entry.status = 'waitingRender';
+      entry.lastError = undefined;
+    }
   } else if (state === SWARM.MEDIA_FULFILLMENT_STATE.USABLE) {
     if (!queuedSwarmFrameTerminal(entry)) {
       entry.status = 'adapterLive';
@@ -8370,6 +8481,7 @@ function applyMediaFulfillmentPostureToQueuedFrame(posture = {}) {
     routePromiseId: String(entry.routePromiseId || posture.routePromiseId || '').trim(),
     sessionId: String(posture.sessionId || '').trim(),
     state,
+    postureState,
     blockedReason: String(posture.blockedReasons?.[0] || '').trim(),
   });
   return true;
