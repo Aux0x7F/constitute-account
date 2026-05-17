@@ -1437,6 +1437,34 @@ function runtimeResourceSample() {
   };
 }
 
+function runtimeResourcePostureSummary() {
+  const sample = runtimeResourceSample();
+  const posture = normalizeObject(sample.posture);
+  const state = String(posture.state || RESOURCE_POSTURE_STATES.WITHIN_BUDGET).trim() || RESOURCE_POSTURE_STATES.WITHIN_BUDGET;
+  const reasons = normalizeArray(posture.reasons).map((entry) => String(entry || '').trim()).filter(Boolean);
+  return {
+    kind: 'runtime.resource.postureSummary',
+    state,
+    reason: reasons.join(', '),
+    profileId: String(sample.activeProfile?.id || 'balanced').trim() || 'balanced',
+    cleanupAllowed: false,
+    cleanupReason: 'retention posture must allow release before sweeping',
+    evidenceRefs: [`resource.sample:${sample.observedAt}`],
+    protocolRef: sample.protocol?.posture?.postureId || '',
+    sampledAt: sample.observedAt,
+  };
+}
+
+function runtimeRetentionPostureSummary() {
+  return {
+    kind: 'runtime.retention.postureSummary',
+    state: 'releaseRequired',
+    reason: 'local release requires explicit retention release posture',
+    releaseRequired: true,
+    destructiveAction: false,
+  };
+}
+
 function retentionRank(retentionClass) {
   const normalized = String(retentionClass || '').trim();
   const ranks = {
@@ -7706,6 +7734,8 @@ function runtimeSnapshot() {
     swarmQueue: swarmQueueObject(),
     activationResolutions: activationResolutionObject(),
     authority: safeClone(runtimeAuthorityPostureState),
+    resource: safeClone(runtimeResourcePostureSummary()),
+    retention: safeClone(runtimeRetentionPostureSummary()),
     diagnostics: diagnosticSnapshot(),
     runtimeEvents: runtimeEvents.slice(-RUNTIME_DIAGNOSTIC_SNAPSHOT_LIMIT).map((entry) => safeClone(entry)),
     mediaFulfillment: mediaFulfillmentObject(),

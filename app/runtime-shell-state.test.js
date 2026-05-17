@@ -29,6 +29,18 @@ test("shell state derives online service posture from edge and retained projecti
     buildId: "runtime-test",
     broker: { available: true },
     edge: { connected: true },
+    resource: {
+      state: "withinBudget",
+      profileId: "balanced",
+      cleanupAllowed: false,
+      cleanupReason: "retention posture must allow release before sweeping",
+    },
+    retention: {
+      state: "releaseRequired",
+      reason: "local release requires explicit retention release posture",
+      releaseRequired: true,
+      destructiveAction: false,
+    },
     shell: {
       identity: { linked: true, identityId: "identity-001", label: "operator" },
     },
@@ -46,6 +58,10 @@ test("shell state derives online service posture from edge and retained projecti
   assert.equal(state.gateway.state, "connected");
   assert.equal(state.services.state, "available");
   assert.equal(state.projections.materialized, true);
+  assert.equal(state.resource.state, "withinBudget");
+  assert.equal(state.resource.cleanupAllowed, false);
+  assert.equal(state.retention.state, "releaseRequired");
+  assert.equal(state.retention.releaseRequired, true);
 });
 
 test("shell state keeps route delivery distinct from adapter live", () => {

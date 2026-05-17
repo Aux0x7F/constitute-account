@@ -654,6 +654,10 @@ test('runtime attach declares snapshot materialization budget per surface', asyn
     entry.budgetId === attached.materializationBudget.budgetId
       && entry.clientId === 'surface-materialization-test'
   )), true);
+  assert.equal(snapshot.result.resource.kind, 'runtime.resource.postureSummary');
+  assert.equal(snapshot.result.resource.cleanupAllowed, false);
+  assert.equal(snapshot.result.retention.kind, 'runtime.retention.postureSummary');
+  assert.equal(snapshot.result.retention.releaseRequired, true);
 });
 
 test('runtime diagnostics subscription filters by event plane before replay and delivery', async () => {
