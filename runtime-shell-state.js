@@ -201,6 +201,7 @@ export function deriveRuntimeShellState(snapshot = {}, options = {}) {
   const authority = record(snap.authority);
   const resource = record(snap.resource);
   const retention = record(snap.retention);
+  const materialization = record(snap.materialization);
 
   const identityId = firstText(
     identity.identityId,
@@ -359,6 +360,14 @@ export function deriveRuntimeShellState(snapshot = {}, options = {}) {
       profileId: firstText(resource.profileId),
       cleanupAllowed: resource.cleanupAllowed === true,
       cleanupReason: firstText(resource.cleanupReason),
+    }),
+    materialization: Object.freeze({
+      state: firstText(materialization.state, "unknown"),
+      reason: firstText(materialization.reason),
+      budgetCount: Array.isArray(materialization.budgets) ? materialization.budgets.length : 0,
+      fanout: Number(materialization.fanout || 0) || 0,
+      projectionCount: Number(materialization.projectionCount || 0) || 0,
+      runtimeEventCount: Number(materialization.runtimeEventCount || 0) || 0,
     }),
     retention: Object.freeze({
       state: firstText(retention.state, "unknown"),

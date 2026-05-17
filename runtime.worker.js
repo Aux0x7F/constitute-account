@@ -752,6 +752,219 @@ function diagnosticMaterializationSnapshot() {
   return summaries;
 }
 
+function materializationStateRank(state) {
+  const normalized = String(state || '').trim();
+  const ranks = {
+    [SWARM.RESOURCE_POSTURE_STATE.WITHIN_BUDGET]: 0,
+    [SWARM.RESOURCE_POSTURE_STATE.PRESSURE]: 1,
+    [SWARM.RESOURCE_POSTURE_STATE.OVER_BUDGET]: 2,
+    [SWARM.RESOURCE_POSTURE_STATE.SWEEPING]: 2,
+    [SWARM.RESOURCE_POSTURE_STATE.BLOCKED]: 3,
+    [SWARM.RESOURCE_POSTURE_STATE.UNAVAILABLE]: 3,
+  };
+  return Object.prototype.hasOwnProperty.call(ranks, normalized) ? ranks[normalized] : 3;
+}
+
+function materializationWorstState(budgets) {
+  let state = SWARM.RESOURCE_POSTURE_STATE.WITHIN_BUDGET;
+  for (const budget of normalizeArray(budgets)) {
+    const nextState = String(budget?.state || SWARM.RESOURCE_POSTURE_STATE.WITHIN_BUDGET).trim();
+    if (materializationStateRank(nextState) > materializationStateRank(state)) state = nextState;
+  }
+  return state;
+}
+
+function materializationBudgetSummary(budget) {
+  if (!budget) return null;
+  return {
+    budgetId: String(budget.budgetId || '').trim(),
+    consumerRef: String(budget.consumerRef || '').trim(),
+    payloadClass: String(budget.payloadClass || '').trim(),
+    copyRole: String(budget.copyRole || '').trim(),
+    transferMode: String(budget.transferMode || '').trim(),
+    privacyTier: String(budget.privacyTier || '').trim(),
+    state: String(budget.state || SWARM.RESOURCE_POSTURE_STATE.WITHIN_BUDGET).trim(),
+    blockedReasons: normalizeArray(budget.blockedReasons).map((entry) => String(entry || '').trim()).filter(Boolean),
+    retentionClass: String(budget.retentionClass || '').trim(),
+    referenceRefs: normalizeArray(budget.referenceRefs).map((entry) => String(entry || '').trim()).filter(Boolean),
+    consumerFloor: budget.consumerFloor ? {
+      floorId: String(budget.consumerFloor.floorId || '').trim(),
+      lagState: String(budget.consumerFloor.lagState || '').trim(),
+      ackFloor: String(budget.consumerFloor.ackFloor || '').trim(),
+      witnessFloor: String(budget.consumerFloor.witnessFloor || '').trim(),
+      compactionFloor: String(budget.consumerFloor.compactionFloor || '').trim(),
+    } : null,
+  };
+}
+
+function runtimeProjectionStoreConsumerFloor(sampledAt = nowMs()) {
+  const materializationId = 'runtime.projections.retained';
+  const currentRevision = Array.from(retainedProjections.values()).reduce((max, projection) => {
+    const coverage = projectionCoverage(projection);
+    return Math.max(max, Number(coverage.revision || 0) || 0);
+  }, 0);
+  const cursor = String(currentRevision || retainedProjections.size);
+  return assertConsumerFloor({
+    kind: SWARM.RECORD_KIND.CONSUMER_FLOOR,
+    floorId: `floor:${materializationId}`,
+    consumerRef: 'runtime.read-model',
+    materializationId,
+    subjectRef: 'runtime.projections',
+    lagState: SWARM.MATERIALIZATION_LAG_STATE.CAUGHT_UP,
+    cursor,
+    ackFloor: cursor,
+    witnessFloor: cursor,
+    compactionFloor: cursor,
+    eventTimeFloor: sampledAt,
+    observedTimeFloor: sampledAt,
+    replay: { mode: 'projection-store', projectionCount: retainedProjections.size },
+    redelivery: { mode: 'snapshot-repair', duplicatePolicy: 'projectionKey' },
+    sampledAt,
+    expiresAt: sampledAt + 60_000,
+  });
+}
+
+function runtimeProjectionStoreMaterializationBudget(sampledAt = nowMs()) {
+  const profile = runtimeResourceProfile();
+  const projectionLimit = Math.max(1, Number(profile?.caps?.projections || 256) || 256);
+  const projectionCountValue = retainedProjections.size;
+  const state = projectionCountValue > projectionLimit
+    ? SWARM.RESOURCE_POSTURE_STATE.OVER_BUDGET
+    : projectionCountValue >= projectionLimit * 0.8
+      ? SWARM.RESOURCE_POSTURE_STATE.PRESSURE
+      : SWARM.RESOURCE_POSTURE_STATE.WITHIN_BUDGET;
+  const blockedReasons = state === SWARM.RESOURCE_POSTURE_STATE.WITHIN_BUDGET
+    ? []
+    : ['projectionStoreMaterializationPressure'];
+  return assertMaterializationBudget({
+    kind: SWARM.RECORD_KIND.MATERIALIZATION_BUDGET,
+    budgetId: 'runtime.projections.retained',
+    sourceAuthority: `runtime:${runtimeSessionId}`,
+    consumerRef: 'runtime.read-model',
+    payloadClass: SWARM.MATERIALIZATION_PAYLOAD_CLASS.PROJECTION,
+    copyRole: SWARM.MATERIALIZATION_COPY_ROLE.CACHE,
+    transferMode: SWARM.MATERIALIZATION_TRANSFER_MODE.REFERENCE_ONLY,
+    privacyTier: SWARM.MATERIALIZATION_PRIVACY_TIER.SAFE_PROJECTION,
+    state,
+    limits: {
+      projectionCount: projectionCountValue,
+      projectionPolicyCount: projectionPolicies.size,
+      maxProjectionCount: projectionLimit,
+    },
+    snapshotPolicy: { mode: 'retained-projection-store' },
+    deltaPolicy: { mode: 'projection-delta-apply' },
+    coalescing: { key: 'projectionKey', duplicatePolicy: 'replaceLatest' },
+    cardinality: {
+      maxProjectionCount: projectionLimit,
+      keySpace: 'projectionId|channelId|scope',
+    },
+    schema: {
+      state: SWARM.MATERIALIZATION_SCHEMA_STATE.CURRENT,
+      version: 'runtime.projections.retained.v1',
+    },
+    consumerFloor: runtimeProjectionStoreConsumerFloor(sampledAt),
+    referenceRefs: ['runtime.projections.retained'],
+    blockedReasons,
+    retentionClass: 'ephemeral.runtime-projection-cache',
+    issuedAt: sampledAt,
+    releaseAfter: sampledAt + 60_000,
+    expiresAt: sampledAt + 5 * 60_000,
+  });
+}
+
+function runtimeEventRingConsumerFloor(sampledAt = nowMs()) {
+  const materializationId = 'runtime.events.ring';
+  const last = runtimeEvents[runtimeEvents.length - 1] || null;
+  const cursor = String(last?.eventId || runtimeEvents.length);
+  return assertConsumerFloor({
+    kind: SWARM.RECORD_KIND.CONSUMER_FLOOR,
+    floorId: `floor:${materializationId}`,
+    consumerRef: 'runtime.diagnostics.read-model',
+    materializationId,
+    subjectRef: RUNTIME_DIAGNOSTICS_CHANNEL,
+    lagState: SWARM.MATERIALIZATION_LAG_STATE.CAUGHT_UP,
+    cursor,
+    ackFloor: String(runtimeEvents.length),
+    witnessFloor: String(runtimeEvents.length),
+    compactionFloor: String(Math.max(0, runtimeEvents.length - RUNTIME_DIAGNOSTIC_SNAPSHOT_LIMIT)),
+    eventTimeFloor: Number(last?.observedAt || 0) || sampledAt,
+    observedTimeFloor: sampledAt,
+    replay: { mode: SWARM.EVENT_DELIVERY_MODE.REPLAY, replayLimit: RUNTIME_DIAGNOSTIC_SNAPSHOT_LIMIT },
+    redelivery: { mode: 'ring-snapshot', duplicatePolicy: 'eventId' },
+    sampledAt,
+    expiresAt: sampledAt + 60_000,
+  });
+}
+
+function runtimeEventRingMaterializationBudget(sampledAt = nowMs()) {
+  const state = runtimeEvents.length >= RUNTIME_DIAGNOSTIC_RING_LIMIT
+    ? SWARM.RESOURCE_POSTURE_STATE.PRESSURE
+    : SWARM.RESOURCE_POSTURE_STATE.WITHIN_BUDGET;
+  return assertMaterializationBudget({
+    kind: SWARM.RECORD_KIND.MATERIALIZATION_BUDGET,
+    budgetId: 'runtime.events.ring',
+    sourceAuthority: `runtime:${runtimeSessionId}`,
+    consumerRef: 'runtime.diagnostics.read-model',
+    payloadClass: SWARM.MATERIALIZATION_PAYLOAD_CLASS.EVIDENCE,
+    copyRole: SWARM.MATERIALIZATION_COPY_ROLE.BUFFER,
+    transferMode: SWARM.MATERIALIZATION_TRANSFER_MODE.CLONE,
+    privacyTier: SWARM.MATERIALIZATION_PRIVACY_TIER.SAFE_FACTS,
+    state,
+    limits: {
+      eventCount: runtimeEvents.length,
+      snapshotEventCount: Math.min(runtimeEvents.length, RUNTIME_DIAGNOSTIC_SNAPSHOT_LIMIT),
+      ringLimit: RUNTIME_DIAGNOSTIC_RING_LIMIT,
+    },
+    snapshotPolicy: { mode: 'bounded-ring-tail' },
+    deltaPolicy: { mode: 'append-only-coalesced' },
+    coalescing: { key: 'eventId' },
+    cardinality: {
+      maxEventCount: RUNTIME_DIAGNOSTIC_RING_LIMIT,
+      highCardinalityOverflow: 'dropOldest',
+    },
+    schema: {
+      state: SWARM.MATERIALIZATION_SCHEMA_STATE.CURRENT,
+      version: 'runtime.events.ring.v1',
+    },
+    consumerFloor: runtimeEventRingConsumerFloor(sampledAt),
+    blockedReasons: state === SWARM.RESOURCE_POSTURE_STATE.WITHIN_BUDGET ? [] : ['runtimeEventRingPressure'],
+    retentionClass: 'ephemeral.runtime-diagnostics',
+    issuedAt: sampledAt,
+    releaseAfter: sampledAt + 60_000,
+    expiresAt: sampledAt + 5 * 60_000,
+  });
+}
+
+function runtimeMaterializationSummary(sampledAt = nowMs()) {
+  const budgets = [
+    runtimeProjectionStoreMaterializationBudget(sampledAt),
+    runtimeEventRingMaterializationBudget(sampledAt),
+    diagnosticLoggingBacklogMaterializationBudget(sampledAt),
+    ...Array.from(endpoints.values())
+      .map((endpoint) => endpoint?.runtimeSnapshotMaterializationBudget)
+      .filter(Boolean),
+  ];
+  const state = materializationWorstState(budgets);
+  const budgetSummaries = budgets.map((budget) => materializationBudgetSummary(budget)).filter(Boolean);
+  return {
+    kind: 'runtime.materialization.summary',
+    state,
+    reason: state === SWARM.RESOURCE_POSTURE_STATE.WITHIN_BUDGET
+      ? ''
+      : budgetSummaries
+        .flatMap((budget) => budget.blockedReasons)
+        .filter(Boolean)
+        .join(', '),
+    budgets: budgetSummaries,
+    fanout: endpoints.size,
+    projectionCount: retainedProjections.size,
+    projectionPolicyCount: projectionPolicies.size,
+    runtimeEventCount: runtimeEvents.length,
+    diagnosticLoggingBacklogCount: diagnosticLoggingBacklog.length,
+    sampledAt,
+  };
+}
+
 function runtimeSnapshotConsumerFloor(endpoint, sampledAt = nowMs()) {
   const clientId = String(endpoint?.clientId || 'runtime-surface').trim() || 'runtime-surface';
   const materializationId = `materialization:${clientId}:runtime-snapshot`;
@@ -7736,6 +7949,7 @@ function runtimeSnapshot() {
     authority: safeClone(runtimeAuthorityPostureState),
     resource: safeClone(runtimeResourcePostureSummary()),
     retention: safeClone(runtimeRetentionPostureSummary()),
+    materialization: safeClone(runtimeMaterializationSummary()),
     diagnostics: diagnosticSnapshot(),
     runtimeEvents: runtimeEvents.slice(-RUNTIME_DIAGNOSTIC_SNAPSHOT_LIMIT).map((entry) => safeClone(entry)),
     mediaFulfillment: mediaFulfillmentObject(),
