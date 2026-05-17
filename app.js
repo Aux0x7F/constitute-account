@@ -35,6 +35,7 @@ import {
   browserStorageShellContext,
   deriveRuntimeShellState,
 } from './runtime-shell-state.js';
+import { accountSurfaceAttachContext } from './surface-app-contract.js';
 
 const ACCOUNT_MAIN_HTML = `
   <section id="viewHome" class="activity hidden">
@@ -2084,6 +2085,7 @@ function startPlatformRuntimeBridge() {
     workerName: runtimeSharedWorkerName(),
     attachTimeoutMs: RUNTIME_ATTACH_TIMEOUT_MS,
     callTimeoutMs: RUNTIME_WRITE_TIMEOUT_MS,
+    attachContext: accountSurfaceAttachContext,
     onPort: (port) => {
       bridge.port = port;
       runtimeDiagnosticsAgent = attachRuntimeDiagnostics({
