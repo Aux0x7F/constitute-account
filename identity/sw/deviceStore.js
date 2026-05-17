@@ -2,6 +2,8 @@
 
 import { kvGet, kvSet } from './idb.js';
 import { randomBytes, b64url } from './crypto.js';
+// Nostr keys are retained as bootstrap/fallback identity material; product
+// activation and service coordination use swarm edge frames.
 import { ensureNostrKeys } from './nostr.js';
 
 export async function ensureDevice() {

@@ -1,0 +1,176 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {
+  buildRuntimeSnapshotView,
+  renderRuntimeSnapshotView,
+} from './runtime-ui.js';
+
+class FakeElement {
+  constructor(tagName = 'div') {
+    this.tagName = tagName;
+    this.className = '';
+    this.children = [];
+    this.parentNode = null;
+    this._textContent = '';
+    this.value = '';
+  }
+
+  get firstChild() {
+    return this.children[0] || null;
+  }
+
+  get textContent() {
+    return [
+      this._textContent,
+      ...this.children.map((child) => child.textContent),
+    ].join('');
+  }
+
+  set textContent(value) {
+    this._textContent = String(value || '');
+    this.children = [];
+  }
+
+  appendChild(child) {
+    child.parentNode = this;
+    this.children.push(child);
+    return child;
+  }
+
+  removeChild(child) {
+    const index = this.children.indexOf(child);
+    if (index >= 0) this.children.splice(index, 1);
+    child.parentNode = null;
+    return child;
+  }
+}
+
+function fakeDocument() {
+  return {
+    activeElement: null,
+    createElement(tagName) {
+      return new FakeElement(tagName);
+    },
+  };
+}
+
+function runtimeElements() {
+  return {
+    catalogStatusEl: new FakeElement(),
+    catalogListEl: new FakeElement(),
+    edgeStatusEl: new FakeElement(),
+    queueStatusEl: new FakeElement(),
+    projectionStatusEl: new FakeElement(),
+    runtimeStatusDetailEl: new FakeElement(),
+  };
+}
+
+test('runtime service catalog view renders retained snapshot services', () => {
+  const snapshot = {
+    serviceCatalog: {
+      updatedAt: 1710000000000,
+      services: [
+        {
+          service: 'logging',
+          servicePk: 'abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789',
+          hostGatewayPk: 'gateway-pk',
+          summary: 'Event projection retained.',
+          health: { state: 'ready' },
+          surfaceChannel: 'service.logging.surface',
+          nodes: [
+            { path: 'events', label: 'Events', capabilities: ['projection.observe'] },
+            { path: 'health', label: 'Health', capabilities: ['projection.observe'] },
+          ],
+        },
+      ],
+    },
+  };
+  const elements = runtimeElements();
+
+  const view = renderRuntimeSnapshotView(elements, snapshot, fakeDocument());
+
+  assert.equal(view.catalogLabel, '1 service');
+  assert.equal(elements.catalogStatusEl.textContent, '1 service');
+  assert.match(elements.catalogListEl.textContent, /Logging - ready/);
+  assert.match(elements.catalogListEl.textContent, /Nodes: Events, Health/);
+});
+
+test('runtime service catalog omits missing health posture from service title', () => {
+  const snapshot = {
+    serviceCatalog: {
+      services: [
+        {
+          service: 'nvr',
+          servicePk: 'nvr-pk',
+          hostGatewayPk: 'gateway-pk',
+          nodes: [{ path: 'streams', label: 'Streams' }],
+        },
+      ],
+    },
+  };
+  const elements = runtimeElements();
+
+  const view = renderRuntimeSnapshotView(elements, snapshot, fakeDocument());
+
+  assert.equal(view.catalog[0].health, '');
+  assert.match(elements.catalogListEl.textContent, /Nvr/);
+  assert.doesNotMatch(elements.catalogListEl.textContent, /unknown/);
+  assert.doesNotMatch(elements.catalogListEl.textContent, /Nvr -/);
+});
+
+test('swarm edge queue reject and repair status renders from snapshot', () => {
+  const snapshot = {
+    edge: {
+      mode: 'fixture',
+      connected: false,
+      queuedCount: 2,
+      sentCount: 1,
+      rejections: [
+        { error: { code: 'bad_revision', message: 'revision gap' } },
+      ],
+      repairRequests: [
+        { repairRequest: { projectionId: 'logging.events' } },
+      ],
+    },
+    swarmQueue: {
+      frameA: { status: 'queued' },
+      frameB: {
+        status: 'rejected',
+        repairRequest: { projectionId: 'logging.events' },
+        lastError: { message: 'revision gap' },
+      },
+    },
+    projections: {
+      'logging.events': { freshness: { state: 'live' } },
+    },
+    projectionCoverage: {
+      'logging.events': { materializedCount: 42 },
+    },
+  };
+  const view = buildRuntimeSnapshotView(snapshot);
+  const elements = runtimeElements();
+
+  renderRuntimeSnapshotView(elements, snapshot, fakeDocument());
+
+  assert.equal(view.edge.edgeLabel, 'fixture offline');
+  assert.equal(elements.edgeStatusEl.textContent, 'fixture offline');
+  assert.equal(elements.queueStatusEl.textContent, '2 queued / 1 rejected / 1 repair');
+  assert.equal(elements.projectionStatusEl.textContent, '1 retained / 42 records');
+  assert.equal(elements.runtimeStatusDetailEl.textContent, 'Last reject: revision gap');
+});
+
+test('active form input survives background runtime snapshot render', () => {
+  const doc = fakeDocument();
+  const activeInput = new FakeElement('input');
+  activeInput.value = '123456';
+  doc.activeElement = activeInput;
+  const elements = runtimeElements();
+
+  renderRuntimeSnapshotView(elements, {
+    serviceCatalog: { services: [] },
+    edge: { mode: 'fixture', connected: true, queuedCount: 0 },
+  }, doc);
+
+  assert.equal(doc.activeElement, activeInput);
+  assert.equal(activeInput.value, '123456');
+});

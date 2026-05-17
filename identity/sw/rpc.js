@@ -11,7 +11,6 @@ import { relaySend, subscribeOnRelayOpen as subOpen, publishAppEvent } from './r
 import { nip04Encrypt } from './nostr.js';
 import { revokeDeviceAndRotate } from './revoke.js';
 import { handleRelayFrame } from './relayIn.js';
-import { BROKER, SERVICE_ACCESS_EVENTS, SERVICE_ACCESS_KINDS, sealEnvelope } from "constitute-protocol";
 import { blockedList, blockedRemove } from './blocklist.js';
 import { directoryList } from './directory.js';
 import { listZones, addZone, joinZone, publishZonePresence, publishZoneProbe, publishZoneList, publishZoneListRequest, publishZoneMeta, publishZoneMetaRequest, addSelfToZoneList, getZoneList, getZoneName, getPendingZoneKey, setPendingZoneKey, clearPendingZoneKey } from './zone.js';
@@ -56,14 +55,96 @@ function pairingTags(identityLabel, zones = [], toPk = '') {
 
 const PAIR_OFFER_KEY = 'pairOffer';
 const PAIR_CLAIM_ACTIVE_KEY = 'pairClaimActive';
+const PAIR_CLAIM_STATUS_KEY = 'pairClaimStatus';
 const PAIR_OFFER_TTL_MS = 10 * 60 * 1000;
 const PAIR_CLAIM_TTL_MS = 2 * 60 * 1000;
 const PAIR_CLAIM_MAX_TTL_MS = 10 * 60 * 1000;
+let pairClaimExpiryTimer = null;
 
 async function pairCodeHash(identityLabel, code) {
   return await sha256B64Url(`${String(identityLabel || '').trim()}|${String(code || '').trim()}`);
 }
 
+async function expireActivePairClaim(sw, reason = 'expired') {
+  const claim = (await kvGet(PAIR_CLAIM_ACTIVE_KEY)) || null;
+  if (!claim) return null;
+  const now = Date.now();
+  const expiresAt = Number(claim.expiresAt || 0);
+  if (expiresAt && now < expiresAt && reason === 'expired') return claim;
+  await kvSet(PAIR_CLAIM_ACTIVE_KEY, null);
+  const projected = {
+    state: reason,
+    identityLabel: String(claim.identityLabel || '').trim(),
+    claimId: String(claim.claimId || '').trim(),
+    codeHash: String(claim.codeHash || '').trim(),
+    expiresAt,
+    updatedAt: now,
+  };
+  await kvSet(PAIR_CLAIM_STATUS_KEY, projected);
+  status(sw, reason === 'matched' ? 'pair request received' : 'pair claim expired');
+  pokeUi(sw);
+  return projected;
+}
+
+async function projectPairClaimFailure(sw, ident) {
+  await kvSet(PAIR_CLAIM_ACTIVE_KEY, null);
+  const projected = {
+    state: 'failed',
+    identityLabel: String(ident?.label || '').trim(),
+    message: 'Pairing claim failed. Check relay connectivity and try again.',
+    updatedAt: Date.now(),
+  };
+  await kvSet(PAIR_CLAIM_STATUS_KEY, projected);
+  status(sw, 'pair claim failed');
+  pokeUi(sw);
+  return projected;
+}
+
+function schedulePairClaimExpiry(sw, claim) {
+  if (pairClaimExpiryTimer) clearTimeout(pairClaimExpiryTimer);
+  pairClaimExpiryTimer = null;
+  const expiresAt = Number(claim?.expiresAt || 0);
+  if (!expiresAt) return;
+  const delayMs = Math.max(0, expiresAt - Date.now() + 50);
+  pairClaimExpiryTimer = setTimeout(() => {
+    pairClaimExpiryTimer = null;
+    expireActivePairClaim(sw, 'expired').catch((err) => log(sw, `pair claim expiry degraded: ${String(err?.message || err)}`));
+  }, delayMs);
+}
+
+async function projectPairClaimStatus({ consumeExpired = false } = {}) {
+  const claim = (await kvGet(PAIR_CLAIM_ACTIVE_KEY)) || null;
+  const now = Date.now();
+  if (claim) {
+    const expiresAt = Number(claim.expiresAt || 0);
+    if (expiresAt && now > expiresAt) {
+      await kvSet(PAIR_CLAIM_ACTIVE_KEY, null);
+      const projected = {
+        state: 'expired',
+        identityLabel: String(claim.identityLabel || '').trim(),
+        claimId: String(claim.claimId || '').trim(),
+        codeHash: String(claim.codeHash || '').trim(),
+        expiresAt,
+        updatedAt: now,
+      };
+      await kvSet(PAIR_CLAIM_STATUS_KEY, consumeExpired ? null : projected);
+      return projected;
+    }
+    return {
+      state: 'active',
+      identityLabel: String(claim.identityLabel || '').trim(),
+      claimId: String(claim.claimId || '').trim(),
+      codeHash: String(claim.codeHash || '').trim(),
+      autoApprove: !!claim.autoApprove,
+      createdAt: Number(claim.createdAt || 0),
+      expiresAt,
+      updatedAt: now,
+    };
+  }
+  const last = (await kvGet(PAIR_CLAIM_STATUS_KEY)) || null;
+  if (last && consumeExpired) await kvSet(PAIR_CLAIM_STATUS_KEY, null);
+  return last || { state: 'idle', updatedAt: now };
+}
 
 function clampPairClaimTtl(ttlMs) {
   const raw = Number(ttlMs || PAIR_CLAIM_TTL_MS);
@@ -89,6 +170,8 @@ async function activatePairClaim(sw, ident, code, options = {}) {
     createdAt: now,
     expiresAt: now + ttlMs,
   });
+  await kvSet(PAIR_CLAIM_STATUS_KEY, null);
+  schedulePairClaimExpiry(sw, { expiresAt: now + ttlMs });
 
   if (publishClaim) {
     const zones = await listZones(ident || {}).catch(() => []);
@@ -552,8 +635,8 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
       zoneKeys,
       authorizedDevicePks,
       swarmPeers,
-      publicWsUrl: String(params?.publicWsUrl || '').trim(),
-      allowUnsignedDebugHello: params?.allowUnsignedDebugHello !== false,
+      swarmEdgeEndpoint: String(params?.swarmEdgeEndpoint || '').trim(),
+      allowUnsignedDebugHello: params?.allowUnsignedDebugHello === true,
       reolinkAutoprovision: params?.reolinkAutoprovision !== false,
       reolinkUsername: String(params?.reolinkUsername || '').trim(),
       reolinkPassword: String(params?.reolinkPassword || '').trim(),
@@ -618,105 +701,6 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
     const tagZones = zoneKeys.map((key) => ({ key }));
     await publishAppEvent(sw, payload, pairingTags(ident.label, tagZones, targetGatewayPk));
     return { ok: true, requestId, targetGatewayPk, zoneKeys, extraZoneKeys };
-  }
-
-  if (method === BROKER.SERVICE_ACCESS_REQUEST) {
-    const ident = await getIdentity();
-    if (!ident?.linked || !ident?.id || !ident?.label) throw new Error('no linked identity');
-
-    const dev = await ensureDevice();
-    const targetGatewayPk = String(params?.gatewayPk || params?.gatewayDevicePk || params?.toDevicePk || '').trim();
-    const servicePk = String(params?.servicePk || '').trim();
-    const service = String(params?.service || 'nvr').trim() || 'nvr';
-    const capability = String(params?.capability || `${service}.view`).trim() || `${service}.view`;
-    if (!targetGatewayPk) throw new Error('missing gatewayPk');
-    if (!servicePk) throw new Error('missing servicePk');
-
-    const requestId = String(params?.requestId || '').trim() || makeSwarmRequestId('gw-service-access');
-    const issuedAt = Date.now();
-    const requestEnvelope = sealEnvelope({
-      kind: SERVICE_ACCESS_KINDS.REQUEST,
-      issuerSecretKey: dev.nostr.skHex,
-      recipientPks: [targetGatewayPk],
-      issuedAt,
-      expiresAt: issuedAt + 90_000,
-      claims: {
-        requestId,
-        toDevicePk: targetGatewayPk,
-        identityId: String(ident.id || '').trim(),
-        devicePk: String(dev?.nostr?.pk || '').trim(),
-        servicePk,
-        service,
-        capability,
-        appRepo: String(params?.appRepo || '').trim(),
-        display: params?.display && typeof params.display === 'object' ? params.display : {},
-        ts: issuedAt,
-        ttl: 90,
-      },
-    });
-    const payload = {
-      type: SERVICE_ACCESS_EVENTS.REQUEST,
-      requestId,
-      toDevicePk: targetGatewayPk,
-      requestEnvelope,
-      ts: issuedAt,
-      ttl: 90,
-    };
-
-    const zones = await listZones(ident || {}).catch(() => []);
-    await publishAppEvent(sw, payload, pairingTags(ident.label, zones, targetGatewayPk));
-    return { ok: true, requestId, gatewayPk: targetGatewayPk, servicePk, service, capability };
-  }
-
-  if (method === BROKER.SERVICE_SIGNAL_REQUEST) {
-    const ident = await getIdentity();
-    if (!ident?.linked || !ident?.id || !ident?.label) throw new Error('no linked identity');
-
-    const dev = await ensureDevice();
-    const targetGatewayPk = String(params?.gatewayPk || params?.gatewayDevicePk || params?.toDevicePk || '').trim();
-    const servicePk = String(params?.servicePk || '').trim();
-    const service = String(params?.service || 'nvr').trim() || 'nvr';
-    const signalType = String(params?.signalType || '').trim().toLowerCase();
-    const serviceCapability = String(params?.serviceCapability || '').trim();
-    if (!targetGatewayPk) throw new Error('missing gatewayPk');
-    if (!servicePk) throw new Error('missing servicePk');
-    if (!signalType) throw new Error('missing signalType');
-    if (!serviceCapability) throw new Error('missing serviceCapability');
-
-    const requestId = String(params?.requestId || '').trim() || makeSwarmRequestId('gw-signal');
-    const issuedAt = Date.now();
-    const requestEnvelope = sealEnvelope({
-      kind: SERVICE_ACCESS_KINDS.SIGNAL,
-      issuerSecretKey: dev.nostr.skHex,
-      recipientPks: [targetGatewayPk],
-      issuedAt,
-      expiresAt: issuedAt + 90_000,
-      claims: {
-        requestId,
-        toDevicePk: targetGatewayPk,
-        identityId: String(ident.id || '').trim(),
-        devicePk: String(dev?.nostr?.pk || '').trim(),
-        servicePk,
-        service,
-        signalType,
-        payload: params?.payload ?? {},
-        serviceCapability,
-        ts: issuedAt,
-        ttl: 90,
-      },
-    });
-    const payload = {
-      type: SERVICE_ACCESS_EVENTS.SIGNAL_REQUEST,
-      requestId,
-      toDevicePk: targetGatewayPk,
-      requestEnvelope,
-      ts: issuedAt,
-      ttl: 90,
-    };
-
-    const zones = await listZones(ident || {}).catch(() => []);
-    await publishAppEvent(sw, payload, pairingTags(ident.label, zones, targetGatewayPk));
-    return { ok: true, requestId, gatewayPk: targetGatewayPk, servicePk, service, signalType };
   }
 
   if (method === 'gateway.grants.request') {
@@ -878,15 +862,27 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
     const code = String(params?.code || '').trim();
     if (!code) throw new Error('code required');
 
-    const claim = await activatePairClaim(sw, ident, code, {
-      ttlMs: params?.ttlMs,
-      autoApprove: !!params?.autoApprove,
-      publishClaim: params?.publishClaim !== false,
-    });
+    let claim;
+    try {
+      claim = await activatePairClaim(sw, ident, code, {
+        ttlMs: params?.ttlMs,
+        autoApprove: !!params?.autoApprove,
+        publishClaim: params?.publishClaim !== false,
+      });
+    } catch (err) {
+      await projectPairClaimFailure(sw, ident);
+      throw err;
+    }
 
     status(sw, claim.autoApprove ? 'pair claim sent (auto-approve armed)' : 'pair claim sent');
     pokeUi(sw);
     return { ok: true, ...claim };
+  }
+
+  if (method === 'pairing.claimStatus') {
+    const projected = await projectPairClaimStatus({ consumeExpired: params?.consumeExpired !== false });
+    if (projected?.state === 'active') schedulePairClaimExpiry(sw, projected);
+    return projected;
   }
 
   if (method === 'pairing.prepareInstall') {
@@ -962,9 +958,9 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
 
   async function refreshRelayScopedSubscriptions(ident, openRelayUrls) {
     const dev = await ensureDevice();
-    await subOpen(sw, ident, (m) => log(sw, m));
-    for (const relayUrl of openRelayUrls) openRelaySubscriptionUrls.add(relayUrl);
     const nbs = await listZones(ident || {});
+    await subOpen(sw, ident, (m) => log(sw, m), nbs);
+    for (const relayUrl of openRelayUrls) openRelaySubscriptionUrls.add(relayUrl);
     for (const n of nbs) {
       await addSelfToZoneList(dev, n.key).catch(() => {});
       await publishZonePresence(sw, ident, dev, n.key).catch(() => {});
@@ -1008,7 +1004,7 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
 
   if (method === 'relay.rx') {
     try {
-      await handleRelayFrame(sw, params?.data || '');
+      await handleRelayFrame(sw, params?.data || '', params?.admission || null);
     } catch (err) {
       log(sw, `relay rx degraded: ${String(err?.message || err)}`);
     }
@@ -1056,6 +1052,7 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
 
     await pendingRemove(rid);
     await notifRemove(`n-pair-${rid}`);
+    await kvSet(PAIR_CLAIM_STATUS_KEY, null);
     status(sw, 'rejected');
     pokeUi(sw);
     return { ok: true };
@@ -1113,6 +1110,7 @@ export async function handleRpc(sw, method, params, getRelayState, setRelayState
 
     await pendingRemove(rid);
     await notifRemove(`n-pair-${rid}`);
+    await kvSet(PAIR_CLAIM_STATUS_KEY, null);
 
     status(sw, 'approved');
     pokeUi(sw);

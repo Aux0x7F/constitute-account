@@ -8,20 +8,20 @@ import { getIdentity, setIdentity } from './identityStore.js';
 import { notifAdd, notifClear, notifRemove } from './notifs.js';
 import { pendingAdd, pendingRemove } from './pending.js';
 import { getSubId, getAppTag } from './relayOut.js';
-import { emit, log, pokeUi } from './uiBus.js';
+import { emit, log, pokeUi, status } from './uiBus.js';
 import { blockedAdd, blockedIs, blockedRemove } from './blocklist.js';
 import { kvGet, kvSet } from './idb.js';
 import { directoryUpsert } from './directory.js';
 import { isZoneJoined, joinZone, addSelfToZoneList, publishZonePresence, publishZoneList, publishZoneListRequest, publishZoneMeta, publishZoneMetaRequest, publishZoneProbe, setZoneList, getZoneList, updateZoneName, listZones } from './zone.js';
 import { putIdentityRecord, putDeviceRecord, putDhtRecord, getDhtRecord, validateRecord, makeIdentityRecord, makeDeviceRecord, makeDhtRecord } from './swarm/index.js';
 import { publishAppEvent } from './relayOut.js';
-import { openEnvelope, SERVICE_ACCESS_EVENTS, SERVICE_ACCESS_KINDS } from "constitute-protocol";
 
 const REPLAY_WINDOW_SEC = 10 * 60;
 const REPLAY_SKEW_SEC = 2 * 60;
 const REPLAY_CAP = 400;
 const PAIR_OFFER_KEY = 'pairOffer';
 const PAIR_CLAIM_ACTIVE_KEY = 'pairClaimActive';
+const PAIR_CLAIM_STATUS_KEY = 'pairClaimStatus';
 
 
 function pairingTags(identityLabel, zones = [], toPk = '') {
@@ -160,8 +160,20 @@ function zoneTagsFromEvent(ev) {
   return out;
 }
 
+function admissionAllowsRelayEvent(admission, ev) {
+  if (!admission || typeof admission !== 'object') return true;
+  const decision = String(admission.decision || '').trim();
+  if (decision && decision !== 'forward') return false;
+  const expiresAt = Number(admission.expiresAt || 0);
+  if (expiresAt && expiresAt <= Date.now()) return false;
+  const admittedId = String(admission?.subject?.relayEventId || '').trim();
+  if (admittedId && admittedId !== String(ev?.id || '').trim()) return false;
+  const relayKind = Number(admission?.subject?.relayKind || 0);
+  if (relayKind && relayKind !== Number(ev?.kind || 0)) return false;
+  return true;
+}
 
-export async function handleRelayFrame(sw, raw) {
+export async function handleRelayFrame(sw, raw, admission = null) {
   const s = String(raw || '');
   if (!s) return;
 
@@ -176,6 +188,7 @@ export async function handleRelayFrame(sw, raw) {
   const subId = msg[1];
   const ev = msg[2];
   if (subId !== getSubId() || !ev) return;
+  if (!admissionAllowsRelayEvent(admission, ev)) return;
 
   const tags = Array.isArray(ev.tags) ? ev.tags : [];
   const hasAppTag = tags.some(t => Array.isArray(t) && t[0] === 't' && t[1] === getAppTag());
@@ -522,6 +535,14 @@ export async function handleRelayFrame(sw, raw) {
       }
       autoApprove = !!activeClaim?.autoApprove;
       await kvSet(PAIR_CLAIM_ACTIVE_KEY, null);
+      await kvSet(PAIR_CLAIM_STATUS_KEY, {
+        state: 'matched',
+        identityLabel: String(payload.identity || '').trim(),
+        claimId: String(activeClaim.claimId || '').trim(),
+        codeHash,
+        matchedAt: nowMs,
+      });
+      status(sw, 'pair request received');
     }
 
     const reqId = String(payload.requestId || '').trim()
@@ -841,107 +862,6 @@ export async function handleRelayFrame(sw, raw) {
       extraZoneKeys: Array.isArray(payload.extraZoneKeys) ? payload.extraZoneKeys.map((z) => String(z || '').trim()).filter(Boolean) : [],
       restartRequired: payload.restartRequired === true,
       ts: Number(payload.ts || Date.now()),
-    });
-    return;
-  }
-
-  if (payload.type === SERVICE_ACCESS_EVENTS.STATUS) {
-    const toDevicePk = String(payload.toDevicePk || '').trim();
-    const localPk = String(dev?.nostr?.pk || '').trim();
-    if (localPk && toDevicePk && toDevicePk !== localPk) return;
-    const envelope = payload.statusEnvelope && typeof payload.statusEnvelope === 'object'
-      ? payload.statusEnvelope
-      : null;
-    if (!envelope) return;
-    if (String(envelope.kind || '') !== SERVICE_ACCESS_KINDS.STATUS) return;
-    let statusClaims = null;
-    try {
-      statusClaims = openEnvelope(envelope, dev.nostr.skHex, { now: Date.now() });
-    } catch (err) {
-      log(sw, `service access status rejected: ${err?.message || err}`);
-      return;
-    }
-    emit(sw, {
-      type: SERVICE_ACCESS_EVENTS.STATUS,
-      requestId: String(statusClaims.requestId || '').trim(),
-      status: String(statusClaims.status || '').trim(),
-      gatewayPk: String(statusClaims.gatewayPk || payload.gatewayPk || '').trim(),
-      toDevicePk,
-      identityId: String(statusClaims.identityId || '').trim(),
-      devicePk: String(statusClaims.devicePk || '').trim(),
-      servicePk: String(statusClaims.servicePk || '').trim(),
-      service: String(statusClaims.service || '').trim(),
-      capability: String(statusClaims.capability || '').trim(),
-      serviceCapability: String(statusClaims.serviceCapability || '').trim(),
-      expiresAt: Number(statusClaims.expiresAt || 0),
-      display: statusClaims.display ?? null,
-      reason: String(statusClaims.reason || '').trim(),
-      detail: String(statusClaims.detail || '').trim(),
-      ts: Number(statusClaims.ts || payload.ts || Date.now()),
-    });
-    return;
-  }
-
-  if (payload.type === SERVICE_ACCESS_EVENTS.SIGNAL_STATUS) {
-    const toDevicePk = String(payload.toDevicePk || '').trim();
-    const localPk = String(dev?.nostr?.pk || '').trim();
-    if (localPk && toDevicePk && toDevicePk !== localPk) return;
-    const envelope = payload.statusEnvelope && typeof payload.statusEnvelope === 'object'
-      ? payload.statusEnvelope
-      : null;
-    if (!envelope) return;
-    if (String(envelope.kind || '') !== SERVICE_ACCESS_KINDS.STATUS) return;
-    let statusClaims = null;
-    try {
-      statusClaims = openEnvelope(envelope, dev.nostr.skHex, { now: Date.now() });
-    } catch (err) {
-      log(sw, `service signal status rejected: ${err?.message || err}`);
-      return;
-    }
-    emit(sw, {
-      type: SERVICE_ACCESS_EVENTS.SIGNAL_STATUS,
-      requestId: String(statusClaims.requestId || '').trim(),
-      status: String(statusClaims.status || '').trim(),
-      gatewayPk: String(statusClaims.gatewayPk || payload.gatewayPk || '').trim(),
-      identityId: String(statusClaims.identityId || '').trim(),
-      devicePk: String(statusClaims.devicePk || '').trim(),
-      servicePk: String(statusClaims.servicePk || '').trim(),
-      service: String(statusClaims.service || '').trim(),
-      signalType: String(statusClaims.signalType || '').trim(),
-      reason: String(statusClaims.reason || '').trim(),
-      detail: String(statusClaims.detail || '').trim(),
-      ts: Number(statusClaims.ts || payload.ts || Date.now()),
-    });
-    return;
-  }
-
-  if (payload.type === SERVICE_ACCESS_EVENTS.SIGNAL) {
-    const toDevicePk = String(payload.toDevicePk || '').trim();
-    const localPk = String(dev?.nostr?.pk || '').trim();
-    if (localPk && toDevicePk && toDevicePk !== localPk) return;
-    const envelope = payload.signalEnvelope && typeof payload.signalEnvelope === 'object'
-      ? payload.signalEnvelope
-      : null;
-    if (!envelope) return;
-    if (String(envelope.kind || '') !== SERVICE_ACCESS_KINDS.SIGNAL) return;
-    let signalClaims = null;
-    try {
-      signalClaims = openEnvelope(envelope, dev.nostr.skHex, { now: Date.now() });
-    } catch (err) {
-      log(sw, `service signal payload rejected: ${err?.message || err}`);
-      return;
-    }
-    emit(sw, {
-      type: SERVICE_ACCESS_EVENTS.SIGNAL,
-      requestId: String(signalClaims.requestId || '').trim(),
-      gatewayPk: String(signalClaims.gatewayPk || payload.gatewayPk || '').trim(),
-      identityId: String(signalClaims.identityId || '').trim(),
-      devicePk: String(signalClaims.devicePk || '').trim(),
-      servicePk: String(signalClaims.servicePk || '').trim(),
-      service: String(signalClaims.service || '').trim(),
-      signalType: String(signalClaims.signalType || '').trim(),
-      payload: signalClaims.payload ?? null,
-      ts: Number(signalClaims.ts || payload.ts || Date.now()),
     });
     return;
   }
