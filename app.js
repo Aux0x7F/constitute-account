@@ -150,6 +150,14 @@ const ACCOUNT_MAIN_HTML = `
           <div class="k">Projection</div>
           <div class="v" id="runtimeProjectionStatus">unknown</div>
         </div>
+        <div class="kv">
+          <div class="k">Resource</div>
+          <div class="v" id="runtimeResourceStatus">unknown</div>
+        </div>
+        <div class="kv">
+          <div class="k">Retention</div>
+          <div class="v" id="runtimeRetentionStatus">unknown</div>
+        </div>
         <div class="small muted" id="runtimeStatusDetail">Runtime snapshot updates automatically.</div>
         <div id="runtimeServiceCatalogList" class="list u-mt-sm"></div>
       </div>
@@ -307,6 +315,8 @@ const runtimeServiceCatalogListEl = document.getElementById('runtimeServiceCatal
 const runtimeEdgeStatusEl = document.getElementById('runtimeEdgeStatus');
 const runtimeQueueStatusEl = document.getElementById('runtimeQueueStatus');
 const runtimeProjectionStatusEl = document.getElementById('runtimeProjectionStatus');
+const runtimeResourceStatusEl = document.getElementById('runtimeResourceStatus');
+const runtimeRetentionStatusEl = document.getElementById('runtimeRetentionStatus');
 const runtimeStatusDetailEl = document.getElementById('runtimeStatusDetail');
 
 const joinDeviceLabelEl = document.getElementById('joinDeviceLabel');
@@ -744,6 +754,8 @@ function renderRuntimeStatusSnapshot() {
     edgeStatusEl: runtimeEdgeStatusEl,
     queueStatusEl: runtimeQueueStatusEl,
     projectionStatusEl: runtimeProjectionStatusEl,
+    resourceStatusEl: runtimeResourceStatusEl,
+    retentionStatusEl: runtimeRetentionStatusEl,
     runtimeStatusDetailEl,
   }, runtimeStatusSnapshot, document);
 }

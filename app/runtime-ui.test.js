@@ -61,6 +61,8 @@ function runtimeElements() {
     edgeStatusEl: new FakeElement(),
     queueStatusEl: new FakeElement(),
     projectionStatusEl: new FakeElement(),
+    resourceStatusEl: new FakeElement(),
+    retentionStatusEl: new FakeElement(),
     runtimeStatusDetailEl: new FakeElement(),
   };
 }
@@ -161,6 +163,16 @@ test('swarm edge queue reject and repair status renders from snapshot', () => {
     projectionCoverage: {
       'logging.events': { materializedCount: 42 },
     },
+    resource: {
+      state: 'withinBudget',
+      cleanupAllowed: false,
+      cleanupReason: 'retention posture must allow release before sweeping',
+    },
+    retention: {
+      state: 'releaseRequired',
+      releaseRequired: true,
+      reason: 'retention blockers active',
+    },
   };
   const view = buildRuntimeSnapshotView(snapshot);
   const elements = runtimeElements();
@@ -171,7 +183,12 @@ test('swarm edge queue reject and repair status renders from snapshot', () => {
   assert.equal(elements.edgeStatusEl.textContent, 'fixture offline');
   assert.equal(elements.queueStatusEl.textContent, '2 queued / 1 rejected / 1 repair');
   assert.equal(elements.projectionStatusEl.textContent, '1 retained / 42 records');
-  assert.equal(elements.runtimeStatusDetailEl.textContent, 'Last reject: revision gap');
+  assert.equal(elements.resourceStatusEl.textContent, 'withinBudget / retention posture must allow release before sweeping');
+  assert.equal(elements.retentionStatusEl.textContent, 'releaseRequired / retention blockers active');
+  assert.equal(
+    elements.runtimeStatusDetailEl.textContent,
+    'Last reject: revision gap / Resource: retention posture must allow release before sweeping / Retention: retention blockers active',
+  );
 });
 
 test('active form input survives background runtime snapshot render', () => {

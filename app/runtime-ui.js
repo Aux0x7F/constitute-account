@@ -125,17 +125,33 @@ export function preparedRuntimeProjectionStatus(snapshot = {}) {
   };
 }
 
+function preparedPostureStatus(posture = {}, fallbackState = 'unknown') {
+  const state = text(posture?.state || fallbackState) || fallbackState;
+  const reason = text(posture?.cleanupReason || posture?.reason || posture?.blockedReason);
+  return {
+    state,
+    label: reason ? `${state} / ${reason}` : state,
+    reason,
+    cleanupAllowed: posture?.cleanupAllowed === true,
+    releaseRequired: posture?.releaseRequired === true,
+  };
+}
+
 export function buildRuntimeSnapshotView(snapshot = {}) {
   const serviceRegistry = preparedServiceRegistry(snapshot);
   const catalog = preparedRuntimeServiceCatalog(snapshot);
   const edge = preparedSwarmEdgeStatus(snapshot);
   const projections = preparedRuntimeProjectionStatus(snapshot);
+  const resource = preparedPostureStatus(snapshot?.resource, 'unknown');
+  const retention = preparedPostureStatus(snapshot?.retention, 'unknown');
   return {
     catalog,
     catalogLabel: catalog.length === 1 ? '1 service' : `${catalog.length} services`,
     serviceRegistry,
     edge,
     projections,
+    resource,
+    retention,
   };
 }
 
@@ -186,10 +202,15 @@ export function renderRuntimeSnapshotView(elements, snapshot = {}, documentRef =
   if (elements.edgeStatusEl) elements.edgeStatusEl.textContent = view.edge.edgeLabel;
   if (elements.queueStatusEl) elements.queueStatusEl.textContent = view.edge.queueLabel;
   if (elements.projectionStatusEl) elements.projectionStatusEl.textContent = view.projections.label;
+  if (elements.resourceStatusEl) elements.resourceStatusEl.textContent = view.resource.label;
+  if (elements.retentionStatusEl) elements.retentionStatusEl.textContent = view.retention.label;
   if (elements.runtimeStatusDetailEl) {
-    elements.runtimeStatusDetailEl.textContent = view.edge.rejectMessage
-      ? `Last reject: ${view.edge.rejectMessage}`
-      : 'Runtime snapshot updates automatically.';
+    const detail = [
+      view.edge.rejectMessage ? `Last reject: ${view.edge.rejectMessage}` : '',
+      view.resource.reason ? `Resource: ${view.resource.reason}` : '',
+      view.retention.reason ? `Retention: ${view.retention.reason}` : '',
+    ].filter(Boolean).join(' / ');
+    elements.runtimeStatusDetailEl.textContent = detail || 'Runtime snapshot updates automatically.';
   }
   return view;
 }
