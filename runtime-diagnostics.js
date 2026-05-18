@@ -102,6 +102,8 @@ function pushRing(win, event) {
 
 function localRingConsumerFloor(ring, clientId, sampledAt = Date.now()) {
   const last = ring[ring.length - 1] || null;
+  const lagging = ring.length >= RUNTIME_DIAGNOSTICS_RING_LIMIT;
+  const eventTimeFloor = Number(last?.observedAt || 0) || undefined;
   return assertConsumerFloor({
     kind: SWARM.RECORD_KIND.CONSUMER_FLOOR,
     floorId: `floor:runtime-diagnostics-agent:${clientId}`,
@@ -112,11 +114,12 @@ function localRingConsumerFloor(ring, clientId, sampledAt = Date.now()) {
     ackFloor: String(ring.length),
     witnessFloor: String(ring.length),
     compactionFloor: String(Math.max(0, ring.length - RUNTIME_DIAGNOSTICS_RING_LIMIT)),
-    eventTimeFloor: Number(last?.observedAt || 0) || undefined,
-    observedTimeFloor: sampledAt,
-    lagState: ring.length >= RUNTIME_DIAGNOSTICS_RING_LIMIT
+    eventTimeFloor,
+    observedTimeFloor: Math.max(sampledAt, Number(eventTimeFloor || 0)),
+    lagState: lagging
       ? SWARM.MATERIALIZATION_LAG_STATE.LAGGING
       : SWARM.MATERIALIZATION_LAG_STATE.CAUGHT_UP,
+    reason: lagging ? "runtime diagnostics ring reached local materialization limit" : undefined,
     replay: { mode: "debug-ring", replayLimit: RUNTIME_DIAGNOSTICS_RING_LIMIT },
     redelivery: { mode: "replace-oldest", duplicatePolicy: "eventId" },
     sampledAt,

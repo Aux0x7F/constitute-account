@@ -1,13 +1,25 @@
 import {
+  AGREEMENT,
   PROJECTION,
   SERVICE_REGISTRY,
   SWARM,
   STREAM_SESSION_LIFECYCLE_PHASE,
   applyProjectionDelta,
+  assertActionAuthorityExercise,
+  assertActionAuthorityGrant,
   assertProjectionDelta,
+  assertAccessGroup,
+  assertAccessEpoch,
+  assertAuthorityGrantRevocationPosture,
+  assertAuthorityMultiIdentityProof,
+  assertAuthorityRootOperation,
   assertEventAdmissionEnvelope,
+  assertEventFabricAccessClass,
+  assertEventFabricProcessorContract,
+  assertSecurityProcessorSeed,
   assertConsumerFloor,
   assertMaterializationBudget,
+  assertPrivateContentEnvelope,
   assertProjectionPolicy,
   assertProjectionRecord,
   assertProjectionSnapshot,
@@ -53,6 +65,7 @@ const PROJECTION_PUT = 'projection.put';
 const PROJECTION_POLICY_PUT = 'projection.policy.put';
 const RUNTIME_AUTHORITY_DEVICE_PUT = 'runtime.authority.device.put';
 const RUNTIME_AUTHORITY_POSTURE_GET = 'runtime.authority.posture.get';
+const RUNTIME_AUTHORITY_RECORDS_REDUCE = 'runtime.authority.records.reduce';
 const RUNTIME_MEDIA_TRANSPORT_PROFILE_GET = 'runtime.media.transport.profile.get';
 const RUNTIME_MEDIA_TRANSPORT_OBSERVATION_PUT = 'runtime.media.transport.observation.put';
 const RUNTIME_MEDIA_FULFILLMENT_EVIDENCE_PUT = 'runtime.media.fulfillment.evidence.put';
@@ -787,6 +800,13 @@ function materializationBudgetSummary(budget) {
     blockedReasons: normalizeArray(budget.blockedReasons).map((entry) => String(entry || '').trim()).filter(Boolean),
     retentionClass: String(budget.retentionClass || '').trim(),
     referenceRefs: normalizeArray(budget.referenceRefs).map((entry) => String(entry || '').trim()).filter(Boolean),
+    limits: budget.limits && typeof budget.limits === 'object' ? safeClone(budget.limits) : {},
+    snapshotPolicy: budget.snapshotPolicy && typeof budget.snapshotPolicy === 'object' ? safeClone(budget.snapshotPolicy) : {},
+    deltaPolicy: budget.deltaPolicy && typeof budget.deltaPolicy === 'object' ? safeClone(budget.deltaPolicy) : {},
+    coalescing: budget.coalescing && typeof budget.coalescing === 'object' ? safeClone(budget.coalescing) : {},
+    cardinality: budget.cardinality && typeof budget.cardinality === 'object' ? safeClone(budget.cardinality) : {},
+    releaseAfter: Number(budget.releaseAfter || 0) || 0,
+    expiresAt: Number(budget.expiresAt || 0) || 0,
     consumerFloor: budget.consumerFloor ? {
       floorId: String(budget.consumerFloor.floorId || '').trim(),
       lagState: String(budget.consumerFloor.lagState || '').trim(),
@@ -795,6 +815,217 @@ function materializationBudgetSummary(budget) {
       compactionFloor: String(budget.consumerFloor.compactionFloor || '').trim(),
     } : null,
   };
+}
+
+function materializationStateForCount(count, limit) {
+  const value = Math.max(0, Number(count || 0) || 0);
+  const cap = Math.max(0, Number(limit || 0) || 0);
+  if (!cap) return SWARM.RESOURCE_POSTURE_STATE.WITHIN_BUDGET;
+  if (value > cap) return SWARM.RESOURCE_POSTURE_STATE.OVER_BUDGET;
+  if (value >= cap * 0.8) return SWARM.RESOURCE_POSTURE_STATE.PRESSURE;
+  return SWARM.RESOURCE_POSTURE_STATE.WITHIN_BUDGET;
+}
+
+function runtimeMaterializationConsumerFloor({
+  materializationId,
+  consumerRef = 'runtime.read-model',
+  subjectRef = '',
+  cursor = '',
+  count = 0,
+  sampledAt = nowMs(),
+  replayMode = 'snapshot',
+  duplicatePolicy = 'replaceLatest',
+  lagState = SWARM.MATERIALIZATION_LAG_STATE.CAUGHT_UP,
+  reason = '',
+}) {
+  const normalizedId = String(materializationId || '').trim();
+  const normalizedCursor = String(cursor || count || 0);
+  const floor = {
+    kind: SWARM.RECORD_KIND.CONSUMER_FLOOR,
+    floorId: `floor:${normalizedId}`,
+    consumerRef: String(consumerRef || 'runtime.read-model').trim() || 'runtime.read-model',
+    materializationId: normalizedId,
+    subjectRef: String(subjectRef || normalizedId).trim() || normalizedId,
+    lagState,
+    cursor: normalizedCursor,
+    ackFloor: normalizedCursor,
+    witnessFloor: normalizedCursor,
+    compactionFloor: normalizedCursor,
+    eventTimeFloor: sampledAt,
+    observedTimeFloor: sampledAt,
+    replay: { mode: replayMode, count: Number(count || 0) || 0 },
+    redelivery: { mode: replayMode, duplicatePolicy },
+    sampledAt,
+    expiresAt: sampledAt + 60_000,
+  };
+  if (reason) floor.reason = reason;
+  return assertConsumerFloor(floor);
+}
+
+function runtimeReadModelMaterializationBudget({
+  budgetId,
+  subjectRef,
+  count = 0,
+  limit = 0,
+  payloadClass = SWARM.MATERIALIZATION_PAYLOAD_CLASS.PROJECTION,
+  copyRole = SWARM.MATERIALIZATION_COPY_ROLE.PROJECTION,
+  transferMode = SWARM.MATERIALIZATION_TRANSFER_MODE.CLONE,
+  privacyTier = SWARM.MATERIALIZATION_PRIVACY_TIER.SAFE_PROJECTION,
+  snapshotMode = 'runtime-snapshot-section',
+  deltaMode = 'runtime-delta',
+  coalescingKey = '',
+  retentionClass = 'ephemeral.runtime-read-model',
+  schemaVersion = '',
+  sampledAt = nowMs(),
+}) {
+  const state = materializationStateForCount(count, limit);
+  const blockedReasons = state === SWARM.RESOURCE_POSTURE_STATE.WITHIN_BUDGET
+    ? []
+    : [`${String(budgetId || 'runtime.materialization').replace(/[^a-z0-9]+/gi, '.')}.pressure`];
+  const normalizedBudgetId = String(budgetId || '').trim();
+  const cursor = String(count || 0);
+  const reason = blockedReasons[0] || '';
+  const budget = {
+    kind: SWARM.RECORD_KIND.MATERIALIZATION_BUDGET,
+    budgetId: normalizedBudgetId,
+    sourceAuthority: `runtime:${runtimeSessionId}`,
+    consumerRef: 'runtime.read-model',
+    payloadClass,
+    copyRole,
+    transferMode,
+    privacyTier,
+    state,
+    limits: {
+      count: Number(count || 0) || 0,
+      limit: Number(limit || 0) || 0,
+      fanout: endpoints.size,
+    },
+    snapshotPolicy: { mode: snapshotMode },
+    deltaPolicy: { mode: deltaMode },
+    coalescing: { key: coalescingKey || normalizedBudgetId, duplicatePolicy: 'replaceLatest' },
+    cardinality: { maxCount: Number(limit || 0) || 0, keySpace: coalescingKey || normalizedBudgetId },
+    schema: {
+      state: SWARM.MATERIALIZATION_SCHEMA_STATE.CURRENT,
+      version: schemaVersion || `${normalizedBudgetId}.v1`,
+    },
+    consumerFloor: runtimeMaterializationConsumerFloor({
+      materializationId: normalizedBudgetId,
+      subjectRef,
+      cursor,
+      count,
+      sampledAt,
+      replayMode: snapshotMode,
+      duplicatePolicy: 'replaceLatest',
+      lagState: state === SWARM.RESOURCE_POSTURE_STATE.WITHIN_BUDGET
+        ? SWARM.MATERIALIZATION_LAG_STATE.CAUGHT_UP
+        : SWARM.MATERIALIZATION_LAG_STATE.LAGGING,
+      reason,
+    }),
+    blockedReasons,
+    retentionClass,
+    issuedAt: sampledAt,
+    releaseAfter: sampledAt + 60_000,
+    expiresAt: sampledAt + 5 * 60_000,
+  };
+  return assertMaterializationBudget(budget);
+}
+
+function runtimeReadModelMaterializationBudgets(sampledAt = nowMs()) {
+  const profile = runtimeResourceProfile();
+  const caps = normalizeObject(profile.caps);
+  const edgeObservationCount = swarmEdge.rejections.length
+    + swarmEdge.repairRequests.length
+    + swarmEdge.routeObservations.length
+    + swarmEdge.contributionLifecycles.length;
+  return [
+    runtimeReadModelMaterializationBudget({
+      budgetId: 'runtime.queue.outbound',
+      subjectRef: 'runtime.swarmQueue',
+      count: outboundSwarmFrames.size,
+      limit: PENDING_AUTHORITY_INTENT_LIMIT,
+      payloadClass: SWARM.MATERIALIZATION_PAYLOAD_CLASS.CONTROL,
+      copyRole: SWARM.MATERIALIZATION_COPY_ROLE.BUFFER,
+      privacyTier: SWARM.MATERIALIZATION_PRIVACY_TIER.SAFE_FACTS,
+      snapshotMode: 'bounded-queue-snapshot',
+      deltaMode: 'queue-status-delta',
+      coalescingKey: 'frameId',
+      retentionClass: 'ephemeral.runtime-queue',
+      sampledAt,
+    }),
+    runtimeReadModelMaterializationBudget({
+      budgetId: 'runtime.swarmEdge.observations',
+      subjectRef: 'runtime.swarmEdge',
+      count: edgeObservationCount,
+      limit: 100 + PROJECTION_REPAIR_REQUEST_LIMIT + CONTRIBUTION_LIFECYCLE_LIMIT + 100,
+      payloadClass: SWARM.MATERIALIZATION_PAYLOAD_CLASS.EVIDENCE,
+      copyRole: SWARM.MATERIALIZATION_COPY_ROLE.EVIDENCE,
+      privacyTier: SWARM.MATERIALIZATION_PRIVACY_TIER.SAFE_FACTS,
+      snapshotMode: 'bounded-edge-observation-rings',
+      deltaMode: 'edge-observation-delta',
+      coalescingKey: 'routePromiseId|frameId|repairId|contributionId',
+      retentionClass: 'ephemeral.runtime-edge-evidence',
+      sampledAt,
+    }),
+    runtimeReadModelMaterializationBudget({
+      budgetId: 'runtime.activations.read-model',
+      subjectRef: 'runtime.activationResolutions',
+      count: pendingAuthorityIntents.size + pendingRouteIntents.size + outboundSwarmFrames.size,
+      limit: PENDING_AUTHORITY_INTENT_LIMIT * 3,
+      payloadClass: SWARM.MATERIALIZATION_PAYLOAD_CLASS.PROJECTION,
+      copyRole: SWARM.MATERIALIZATION_COPY_ROLE.PROJECTION,
+      privacyTier: SWARM.MATERIALIZATION_PRIVACY_TIER.SAFE_PROJECTION,
+      snapshotMode: 'activation-read-model',
+      deltaMode: 'activation-posture-delta',
+      coalescingKey: 'activationId|routePromiseId|frameId',
+      retentionClass: 'ephemeral.runtime-activation-posture',
+      sampledAt,
+    }),
+    runtimeReadModelMaterializationBudget({
+      budgetId: 'runtime.media.fulfillment',
+      subjectRef: 'runtime.mediaFulfillment',
+      count: mediaFulfillmentPostures.size,
+      limit: Math.max(1, Number(caps.mediaTracks || 4) || 4) * 4,
+      payloadClass: SWARM.MATERIALIZATION_PAYLOAD_CLASS.EVIDENCE,
+      copyRole: SWARM.MATERIALIZATION_COPY_ROLE.EVIDENCE,
+      privacyTier: SWARM.MATERIALIZATION_PRIVACY_TIER.SAFE_FACTS,
+      snapshotMode: 'media-evidence-posture',
+      deltaMode: 'media-evidence-delta',
+      coalescingKey: 'sessionId|activationId|evidenceKind',
+      retentionClass: 'ephemeral.runtime-media-evidence',
+      sampledAt,
+    }),
+    runtimeReadModelMaterializationBudget({
+      budgetId: 'runtime.stream.recovery',
+      subjectRef: 'runtime.streamRecovery',
+      count: streamRecoveryPostures.size,
+      limit: Math.max(1, Number(caps.liveStreams || 2) || 2) * 4,
+      payloadClass: SWARM.MATERIALIZATION_PAYLOAD_CLASS.EVIDENCE,
+      copyRole: SWARM.MATERIALIZATION_COPY_ROLE.BUFFER,
+      privacyTier: SWARM.MATERIALIZATION_PRIVACY_TIER.SAFE_FACTS,
+      snapshotMode: 'stream-recovery-posture',
+      deltaMode: 'stream-recovery-delta',
+      coalescingKey: 'sessionId|activationId',
+      retentionClass: 'ephemeral.runtime-stream-recovery',
+      sampledAt,
+    }),
+    runtimeReadModelMaterializationBudget({
+      budgetId: 'runtime.retained.catalog',
+      subjectRef: 'runtime.catalog',
+      count: Object.keys(managedState.applianceSnapshot?.owned || {}).length
+        + Object.keys(managedState.applianceSnapshot?.granted || {}).length
+        + Object.keys(managedState.applianceSnapshot?.discoverable || {}).length
+        + Object.keys(runtimeStatus.services || {}).length,
+      limit: Math.max(1, Number(caps.projections || 256) || 256),
+      payloadClass: SWARM.MATERIALIZATION_PAYLOAD_CLASS.PROJECTION,
+      copyRole: SWARM.MATERIALIZATION_COPY_ROLE.CACHE,
+      privacyTier: SWARM.MATERIALIZATION_PRIVACY_TIER.SAFE_PROJECTION,
+      snapshotMode: 'retained-catalog-read-model',
+      deltaMode: 'catalog-delta',
+      coalescingKey: 'serviceRef|applianceRef|catalogKey',
+      retentionClass: 'ephemeral.runtime-catalog',
+      sampledAt,
+    }),
+  ];
 }
 
 function runtimeProjectionStoreConsumerFloor(sampledAt = nowMs()) {
@@ -936,16 +1167,37 @@ function runtimeEventRingMaterializationBudget(sampledAt = nowMs()) {
 }
 
 function runtimeMaterializationSummary(sampledAt = nowMs()) {
+  const readModelBudgets = runtimeReadModelMaterializationBudgets(sampledAt);
   const budgets = [
     runtimeProjectionStoreMaterializationBudget(sampledAt),
     runtimeEventRingMaterializationBudget(sampledAt),
     diagnosticLoggingBacklogMaterializationBudget(sampledAt),
+    ...readModelBudgets,
     ...Array.from(endpoints.values())
       .map((endpoint) => endpoint?.runtimeSnapshotMaterializationBudget)
       .filter(Boolean),
   ];
   const state = materializationWorstState(budgets);
   const budgetSummaries = budgets.map((budget) => materializationBudgetSummary(budget)).filter(Boolean);
+  const countBy = (field) => budgetSummaries.reduce((out, budget) => {
+    const key = String(budget?.[field] || 'unknown').trim() || 'unknown';
+    out[key] = (out[key] || 0) + 1;
+    return out;
+  }, {});
+  const readModels = [];
+  for (const budget of budgetSummaries) {
+    if (!String(budget.budgetId || '').startsWith('runtime.')) continue;
+    readModels.push({
+      budgetId: budget.budgetId,
+      payloadClass: budget.payloadClass,
+      copyRole: budget.copyRole,
+      transferMode: budget.transferMode,
+      state: budget.state,
+      subjectRef: String(budget.consumerFloor?.materializationId || budget.budgetId || '').trim(),
+      count: Number(budget.limits?.count ?? budget.limits?.projectionCount ?? budget.limits?.eventCount ?? 0) || 0,
+      limit: Number(budget.limits?.limit ?? budget.limits?.maxProjectionCount ?? budget.limits?.ringLimit ?? 0) || 0,
+    });
+  }
   return {
     kind: 'runtime.materialization.summary',
     state,
@@ -956,6 +1208,11 @@ function runtimeMaterializationSummary(sampledAt = nowMs()) {
         .filter(Boolean)
         .join(', '),
     budgets: budgetSummaries,
+    readModels,
+    byPayloadClass: countBy('payloadClass'),
+    byCopyRole: countBy('copyRole'),
+    byTransferMode: countBy('transferMode'),
+    byState: countBy('state'),
     fanout: endpoints.size,
     projectionCount: retainedProjections.size,
     projectionPolicyCount: projectionPolicies.size,
@@ -1705,6 +1962,13 @@ function retentionReleaseEvaluation(input = {}) {
   const pins = normalizeArray(source.pins).filter((pin) => normalizeObject(pin).active !== false);
   const fulfillments = normalizeArray(source.fulfillments);
   const overlays = normalizeArray(source.overlays).filter((overlay) => normalizeObject(overlay).active !== false);
+  const validUntil = Number(source.validUntil || policy.validUntil || 0) || undefined;
+  const releaseAfter = Number(source.releaseAfter || policy.releaseAfter || 0) || undefined;
+  const requireWitness = source.requireWitness === true || policy.requireWitness === true;
+  const witnessRefs = uniqueTrimmedStrings([source.witnessRef, ...(Array.isArray(source.witnessRefs) ? source.witnessRefs : [])]);
+  const supersessionRefs = uniqueTrimmedStrings([source.supersessionRef, ...(Array.isArray(source.supersessionRefs) ? source.supersessionRefs : [])]);
+  const retractionRefs = uniqueTrimmedStrings([source.retractionRef, ...(Array.isArray(source.retractionRefs) ? source.retractionRefs : [])]);
+  const revocationRefs = uniqueTrimmedStrings([source.revocationRef, ...(Array.isArray(source.revocationRefs) ? source.revocationRefs : [])]);
   let effectiveClass = normalizeRetentionClass(policy.class || policy.retentionClass, 'durable');
   for (const overlay of overlays) {
     const overlayClass = normalizeRetentionClass(overlay.class || overlay.retentionClass, '');
@@ -1721,6 +1985,11 @@ function retentionReleaseEvaluation(input = {}) {
   });
   const liveRoot = source.liveRoot === true || residency.liveRoot === true;
   const blockers = [];
+  if (validUntil && validUntil > nowMs() && supersessionRefs.length === 0 && retractionRefs.length === 0 && revocationRefs.length === 0) {
+    blockers.push('validity.active');
+  }
+  if (releaseAfter && releaseAfter > nowMs()) blockers.push('releaseAfter.pending');
+  if (requireWitness && witnessRefs.length === 0) blockers.push('witness.missing');
   if (pins.length > 0) blockers.push('activePin');
   if (!disposable && !fulfilled) blockers.push('fulfillment.missing');
   if (liveRoot) blockers.push('liveRoot');
@@ -1748,17 +2017,40 @@ function retentionReleaseEvaluation(input = {}) {
     ...(Array.isArray(source.residencyLayers) ? source.residencyLayers : []),
     'browserHotCache',
   ]);
+  const policyRefs = uniqueTrimmedStrings([
+    source.policyRef,
+    policy.policyRef,
+    policy.policyId ? `policy:${policy.policyId}` : '',
+    `policy:runtime.retention.${effectiveClass}`,
+    ...(Array.isArray(source.policyRefs) ? source.policyRefs : []),
+  ]);
+  const overlayRefs = uniqueTrimmedStrings([
+    ...overlays.map((overlay) => {
+      const record = normalizeObject(overlay);
+      return record.overlayRef || record.overlayId || '';
+    }),
+    ...(Array.isArray(source.overlayRefs) ? source.overlayRefs : []),
+    overlays.length ? '' : 'overlay:none',
+  ]);
   const releasePosture = assertRetentionReleasePosture({
     kind: SWARM.RECORD_KIND.RETENTION_RELEASE,
     evaluationId: String(source.evaluationId || `retention-release:${runtimeSessionId}:${evaluatedAt}`).trim(),
     subjectRef: String(source.subjectRef || source.subject || 'unknown').trim() || 'unknown',
     effectiveRetention: effectiveClass,
     state: freeable ? SWARM.RETENTION_RELEASE_STATE.FREEABLE : SWARM.RETENTION_RELEASE_STATE.RELEASE_BLOCKED,
+    policyRefs,
+    overlayRefs,
     ownerRefs,
     holderRefs,
     fulfillmentRefs,
     residencyLayers,
+    witnessRefs,
+    supersessionRefs,
+    retractionRefs,
+    revocationRefs,
     blockers: blockers.map((code) => ({ code })),
+    validUntil,
+    releaseAfter,
     evaluatedAt,
   });
   return {
@@ -2152,6 +2444,302 @@ function runtimeLoggingSeverityCounts(logEvents) {
   return counts;
 }
 
+function runtimeLoggingSecurityAccessGroup(issuedAt = nowMs()) {
+  const serviceRef = `service:logging:${RUNTIME_LOGGING_PROJECTION_SERVICE_PK}`;
+  return assertAccessGroup({
+    kind: SWARM.RECORD_KIND.ACCESS_GROUP,
+    groupId: 'access-group:runtime.logging.security.default',
+    ownerRef: serviceRef,
+    subjectRef: 'logging.events.encryptedDetail',
+    contentClasses: ['encryptedDetail', 'diagnosticDetail'],
+    memberRefs: [serviceRef, 'constitute-security'],
+    adminRefs: [serviceRef],
+    currentEpochId: 'access-epoch:runtime.logging.security.default:1',
+    partitionRefs: ['partition:event-fabric:runtime-logging-security'],
+    policyRefs: ['policy:runtime.logging.security.default'],
+    safeFacts: {
+      purpose: 'securityReplay',
+      retentionWindow: '90d',
+      source: 'runtime.safeDiagnostics',
+      readability: 'futureEpochsOnly',
+    },
+    issuedAt,
+  });
+}
+
+function runtimeLoggingSecurityAccessEpoch(issuedAt = nowMs()) {
+  const serviceRef = `service:logging:${RUNTIME_LOGGING_PROJECTION_SERVICE_PK}`;
+  return assertAccessEpoch({
+    kind: SWARM.RECORD_KIND.ACCESS_EPOCH,
+    epochId: 'access-epoch:runtime.logging.security.default:1',
+    groupId: 'access-group:runtime.logging.security.default',
+    sequence: 1,
+    changeKind: 'create',
+    memberRefs: [serviceRef, 'constitute-security'],
+    addedMemberRefs: ['constitute-security'],
+    removedMemberRefs: [],
+    partitionRefs: ['partition:event-fabric:runtime-logging-security'],
+    keyRef: 'key-ref:runtime.logging.security.default:epoch:1',
+    proofRefs: ['profile:runtime.logging.security.default'],
+    safeFacts: {
+      purpose: 'securityReplay',
+      contentClasses: ['encryptedDetail', 'diagnosticDetail'],
+      source: 'runtime.safeDiagnostics',
+    },
+    issuedAt,
+    expiresAt: issuedAt + 90 * 24 * 60 * 60 * 1000,
+  });
+}
+
+function runtimeLoggingEventFabricAccessClasses(issuedAt = nowMs()) {
+  const groupRef = 'access-group:runtime.logging.security.default';
+  return [
+    assertEventFabricAccessClass({
+      kind: SWARM.RECORD_KIND.EVENT_FABRIC_ACCESS_CLASS,
+      classId: 'event-class:runtime.logging.security.encrypted-detail',
+      contentClass: 'encryptedDetail',
+      privacyTier: 'domainEncrypted',
+      eventClasses: [
+        'security.audit',
+        'runtime.diagnostic',
+        'service.event',
+        'storage.access',
+        'media.path',
+      ],
+      accessGroupRefs: [groupRef],
+      processorRoleRefs: ['role:logging.processor', 'role:security.processor'],
+      storageClass: 'runtime.safeDiagnostics',
+      retentionClass: 'rolling.security-evidence',
+      safeFactPolicy: 'indexOnly',
+      indexPolicy: {
+        bitemporal: true,
+        safeKeys: ['kind', 'level', 'channelId', 'service', 'surface'],
+        highCardinalityOverflow: 'encryptedDetailRef',
+      },
+      safeFacts: {
+        processorAgreement: 'runtime-logging-security-replay',
+        detailCustody: 'encryptedDetailRef',
+      },
+      issuedAt,
+    }),
+    assertEventFabricAccessClass({
+      kind: SWARM.RECORD_KIND.EVENT_FABRIC_ACCESS_CLASS,
+      classId: 'event-class:runtime.logging.security.diagnostic-detail',
+      contentClass: 'diagnosticDetail',
+      privacyTier: 'domainEncrypted',
+      eventClasses: ['runtime.diagnostic'],
+      accessGroupRefs: [groupRef],
+      processorRoleRefs: ['role:logging.processor', 'role:security.processor'],
+      storageClass: 'runtime.safeDiagnostics',
+      retentionClass: 'rolling.diagnostic-detail',
+      safeFactPolicy: 'minimal',
+      indexPolicy: {
+        bitemporal: true,
+        safeKeys: ['kind', 'level', 'channelId'],
+        highCardinalityOverflow: 'encryptedDetailRef',
+      },
+      safeFacts: {
+        processorAgreement: 'runtime-diagnostic-replay',
+        detailCustody: 'encryptedDetailRef',
+      },
+      issuedAt,
+    }),
+  ];
+}
+
+function runtimeLoggingProcessorFloor(materializationId, consumerRef, issuedAt = nowMs()) {
+  return assertConsumerFloor({
+    kind: SWARM.RECORD_KIND.CONSUMER_FLOOR,
+    floorId: `floor:${materializationId}`,
+    consumerRef,
+    materializationId,
+    subjectRef: 'event-fabric:runtime.logging.default',
+    cursor: String(runtimeEvents.length),
+    ackFloor: String(runtimeEvents.length),
+    witnessFloor: String(runtimeEvents.length),
+    compactionFloor: 'runtime.safeDiagnostics',
+    eventTimeFloor: runtimeEvents.length ? Number(runtimeEvents[0]?.observedAt || runtimeEvents[0]?.issuedAt || 0) : issuedAt,
+    observedTimeFloor: issuedAt,
+    lagState: 'caughtUp',
+    redelivery: { mode: 'runtimeProjectionReplay', duplicatePolicy: 'eventId' },
+    replay: { mode: 'boundedRuntimeDiagnostics' },
+    evidenceRefs: ['runtime.safeDiagnostics'],
+    sampledAt: issuedAt,
+    expiresAt: issuedAt + 60_000,
+  });
+}
+
+function runtimeLoggingEventFabricProcessorContracts(accessClasses, issuedAt = nowMs()) {
+  const accessClassRefs = accessClasses.map((entry) => entry.classId).filter(Boolean).sort();
+  const inputEventClasses = [...new Set(accessClasses.flatMap((entry) => entry.eventClasses || []))].sort();
+  const inputContentClasses = [...new Set(accessClasses.map((entry) => entry.contentClass).filter(Boolean))].sort();
+  const accessGroupRefs = ['access-group:runtime.logging.security.default'];
+  return [
+    assertEventFabricProcessorContract({
+      kind: SWARM.RECORD_KIND.EVENT_FABRIC_PROCESSOR_CONTRACT,
+      processorContractId: 'processor-contract:runtime.logging.dashboard',
+      fabricRef: 'event-fabric:runtime.logging.default',
+      processorRef: `service:logging:${RUNTIME_LOGGING_PROJECTION_SERVICE_PK}`,
+      processorRoleRef: 'role:logging.processor',
+      state: 'ready',
+      inputAccessClassRefs: accessClassRefs,
+      inputEventClasses,
+      inputContentClasses,
+      outputRefs: ['projection:logging.events', 'projection:logging.dashboard', 'projection:logging.health'],
+      storageRefs: ['runtime.safeDiagnostics'],
+      accessGroupRefs,
+      consumerFloor: runtimeLoggingProcessorFloor('runtime.logging.dashboard.projection', 'runtime.projection.store', issuedAt),
+      bitemporalPolicy: {
+        eventTimeField: 'occurredAt',
+        observedTimeField: 'observedAt',
+      },
+      schemaPolicy: {
+        currentVersion: 'constitute.logging.dashboard.v1',
+        unknownVersionPosture: 'ignore',
+      },
+      compactionPolicy: {
+        snapshotCadence: 'bounded',
+        compactionFloor: 'runtime.safeDiagnostics',
+      },
+      cardinalityPolicy: {
+        maxLabelValues: 250,
+        highCardinalityOverflow: 'encryptedDetailRef',
+      },
+      encryptedDetailCustody: {
+        state: 'referenceOnly',
+        accessGroupRefs,
+      },
+      samplingPolicy: {
+        state: 'adaptive',
+        degradeBefore: ['authority', 'route', 'activation'],
+      },
+      safeFacts: {
+        purpose: 'runtimeDashboardProjection',
+        detailCustody: 'encryptedDetailRef',
+      },
+      evidenceRefs: ['runtime.safeDiagnostics'],
+      issuedAt,
+      expiresAt: issuedAt + 60_000,
+    }),
+    assertEventFabricProcessorContract({
+      kind: SWARM.RECORD_KIND.EVENT_FABRIC_PROCESSOR_CONTRACT,
+      processorContractId: 'processor-contract:runtime.logging.security',
+      fabricRef: 'event-fabric:runtime.logging.default',
+      processorRef: 'constitute-security',
+      processorRoleRef: 'role:security.processor',
+      state: 'ready',
+      inputAccessClassRefs: accessClassRefs,
+      inputEventClasses,
+      inputContentClasses,
+      outputRefs: ['security:evidence:runtime.logging.default', 'storage:runtime.logging.security.archive'],
+      storageRefs: ['runtime.safeDiagnostics'],
+      accessGroupRefs,
+      consumerFloor: runtimeLoggingProcessorFloor('runtime.logging.security.evidence', 'constitute-security', issuedAt),
+      bitemporalPolicy: {
+        eventTimeField: 'occurredAt',
+        observedTimeField: 'observedAt',
+      },
+      schemaPolicy: {
+        currentVersion: 'runtime.logging.security.evidence.v1',
+        unknownVersionPosture: 'ignore',
+      },
+      compactionPolicy: {
+        snapshotCadence: 'retention-window',
+        compactionFloor: 'retention-window:90d',
+      },
+      cardinalityPolicy: {
+        rawDetail: 'byObjectRef',
+        safeFacts: 'indexedSummary',
+        highCardinalityOverflow: 'encryptedDetailRef',
+      },
+      encryptedDetailCustody: {
+        state: 'referenceOnly',
+        accessGroupRefs,
+      },
+      samplingPolicy: {
+        state: 'fullWithinRetention',
+        degradeBefore: ['authority', 'route', 'activation'],
+      },
+      safeFacts: {
+        purpose: 'runtimeSecurityReplay',
+        detailCustody: 'encryptedDetailRef',
+      },
+      evidenceRefs: ['runtime.safeDiagnostics'],
+      issuedAt,
+      expiresAt: issuedAt + 90 * 24 * 60 * 60 * 1000,
+    }),
+  ];
+}
+
+function runtimeLoggingSecurityProcessorSeed(accessClasses, processorContracts, issuedAt = nowMs()) {
+  const accessClassRefs = accessClasses.map((entry) => entry.classId).filter(Boolean).sort();
+  const inputEventClasses = [...new Set(accessClasses.flatMap((entry) => entry.eventClasses || []))].sort();
+  const inputContentClasses = [...new Set(accessClasses.map((entry) => entry.contentClass).filter(Boolean))].sort();
+  const processorContractRefs = processorContracts
+    .filter((contract) => contract.processorRoleRef === 'role:security.processor')
+    .map((contract) => contract.processorContractId)
+    .filter(Boolean)
+    .sort();
+  const accessGroupRefs = ['access-group:runtime.logging.security.default'];
+  return assertSecurityProcessorSeed({
+    kind: SWARM.RECORD_KIND.SECURITY_PROCESSOR_SEED,
+    seedId: 'security-seed:runtime.logging.default',
+    fabricRef: 'event-fabric:runtime.logging.default',
+    processorRef: 'constitute-security',
+    processorRoleRef: 'role:security.processor',
+    state: 'ready',
+    threatAnalysisRole: 'eventFabricThreatAnalysis',
+    inputAccessClassRefs: accessClassRefs,
+    inputEventClasses,
+    inputContentClasses,
+    accessGroupRefs,
+    processorContractRefs,
+    evidenceProfileRefs: ['runtime.logging.security.default'],
+    materializationBudgetRefs: ['runtime.logging.security.evidence'],
+    storageRefs: ['runtime.safeDiagnostics'],
+    detailRefs: ['encrypted-detail:runtime.logging.default'],
+    alertOutputRefs: ['security:alerts:runtime.logging.default'],
+    evidenceHoldRefs: ['security:evidence-hold:runtime.logging.default'],
+    retentionHoldRefs: ['retention:security-hold:runtime.logging.default'],
+    encryptedDetailCustody: {
+      state: 'referenceOnly',
+      accessGroupRefs,
+      detailRefs: ['encrypted-detail:runtime.logging.default'],
+    },
+    semanticBoundaries: {
+      logging: 'mayConsumeMaterializations',
+      storage: 'ciphertextFulfillmentOnly',
+      eventDomain: 'doesNotOwn',
+    },
+    safeFacts: {
+      purpose: 'runtimeSecurityThreatAnalysis',
+      detailCustody: 'encryptedDetailRef',
+      alerting: 'seeded',
+    },
+    evidenceRefs: ['runtime.safeDiagnostics'],
+    issuedAt,
+    expiresAt: issuedAt + 90 * 24 * 60 * 60 * 1000,
+  });
+}
+
+function runtimeLoggingEventFabricPosture(issuedAt = nowMs()) {
+  const accessGroup = runtimeLoggingSecurityAccessGroup(issuedAt);
+  const accessEpoch = runtimeLoggingSecurityAccessEpoch(issuedAt);
+  const accessClasses = runtimeLoggingEventFabricAccessClasses(issuedAt);
+  const processorContracts = runtimeLoggingEventFabricProcessorContracts(accessClasses, issuedAt);
+  const securityProcessorSeeds = [runtimeLoggingSecurityProcessorSeed(accessClasses, processorContracts, issuedAt)];
+  return {
+    accessGroups: [accessGroup],
+    accessEpochs: [accessEpoch],
+    accessClasses,
+    processorContracts,
+    securityProcessorSeeds,
+    contentClasses: accessGroup.contentClasses,
+    processorRoles: ['role:logging.processor', 'role:security.processor'],
+    currentEpochId: accessGroup.currentEpochId,
+  };
+}
+
 function runtimeLoggingProjectionNodePath(policy, channelId) {
   const explicit = String(policy?.nodePath || '').trim();
   if (explicit) return explicit;
@@ -2206,6 +2794,7 @@ function runtimeLoggingProjectionPayload(policy) {
       criticalShortlist.push(event);
       if (criticalShortlist.length >= 8) break;
     }
+    const eventFabric = runtimeLoggingEventFabricPosture(nowMs());
     return {
       nodePath,
       coverage,
@@ -2215,6 +2804,7 @@ function runtimeLoggingProjectionPayload(policy) {
         status: diagnosticLoggingRouteReady() ? 'routed' : 'local-retained',
         archiveContainerId: '',
       },
+      eventFabric,
     };
   }
   return {
@@ -2231,6 +2821,8 @@ function synthesizeRuntimeLoggingProjection(policy) {
   if (service !== 'logging' || !RUNTIME_LOGGING_PROJECTION_CHANNELS.has(channelId)) return null;
   const nodePath = runtimeLoggingProjectionNodePath(policy, channelId);
   const observedAt = nowMs();
+  const payload = runtimeLoggingProjectionPayload(policy);
+  const eventFabric = payload?.eventFabric || {};
   return storeProjectionRecord({
     channelId,
     service: 'logging',
@@ -2249,10 +2841,14 @@ function synthesizeRuntimeLoggingProjection(policy) {
       source: 'runtime.safeDiagnostics',
       debugOnly: false,
       runtimeSessionId,
+      eventFabricAccessGroups: Array.isArray(eventFabric.accessGroups) ? eventFabric.accessGroups.length : 0,
+      eventFabricAccessClasses: Array.isArray(eventFabric.accessClasses) ? eventFabric.accessClasses.length : 0,
+      eventFabricProcessorContracts: Array.isArray(eventFabric.processorContracts) ? eventFabric.processorContracts.length : 0,
+      securityProcessorSeeds: Array.isArray(eventFabric.securityProcessorSeeds) ? eventFabric.securityProcessorSeeds.length : 0,
     },
     encryptedDetailRefs: [],
     diagnostics: [],
-    payload: runtimeLoggingProjectionPayload(policy),
+    payload,
   });
 }
 
@@ -2822,6 +3418,447 @@ async function handleRuntimeAuthorityDevicePut(message) {
   broadcastSnapshot();
   void flushPendingAuthorityIntents('runtime.authority.device.ready');
   return { ok: true, result: { devicePk: String(device?.nostr?.pk || '').trim(), posture: safeClone(runtimeAuthorityPostureState) } };
+}
+
+function runtimeAuthorityRecordRef(record) {
+  const kind = String(record?.kind || record?.recordKind || '').trim();
+  switch (kind) {
+    case SWARM.RECORD_KIND.AUTHORITY_ROOT_OPERATION:
+      return String(record?.operationId || '').trim();
+    case SWARM.RECORD_KIND.AUTHORITY_ACTION_GRANT:
+      return String(record?.grantId || '').trim();
+    case SWARM.RECORD_KIND.AUTHORITY_ACTION_EXERCISE:
+      return String(record?.exerciseId || '').trim();
+    case SWARM.RECORD_KIND.AUTHORITY_GRANT_REVOCATION_POSTURE:
+      return String(record?.revocationId || '').trim();
+    case SWARM.RECORD_KIND.ACCESS_GROUP:
+      return String(record?.groupId || '').trim();
+    case SWARM.RECORD_KIND.ACCESS_EPOCH:
+      return String(record?.epochId || '').trim();
+    case SWARM.RECORD_KIND.PRIVATE_CONTENT_ENVELOPE:
+      return String(record?.envelopeId || '').trim();
+    case SWARM.RECORD_KIND.AUTHORITY_MULTI_IDENTITY_PROOF:
+      return String(record?.proofId || '').trim();
+    case SWARM.RECORD_KIND.EVENT_FABRIC_ACCESS_CLASS:
+      return String(record?.classId || '').trim();
+    default:
+      break;
+  }
+  return String(
+    record?.operationId
+    || record?.grantId
+    || record?.exerciseId
+    || record?.revocationId
+    || record?.groupId
+    || record?.epochId
+    || record?.envelopeId
+    || record?.proofId
+    || record?.classId
+    || record?.id
+    || '',
+  ).trim();
+}
+
+function runtimeAuthorityRecordsFromMessage(message) {
+  const payload = message?.payload && typeof message.payload === 'object' ? message.payload : {};
+  if (Array.isArray(message?.records)) return message.records;
+  if (Array.isArray(payload.records)) return payload.records;
+  if (message?.record && typeof message.record === 'object') return [message.record];
+  if (payload.record && typeof payload.record === 'object') return [payload.record];
+  return [];
+}
+
+function authorityPlane(state = 'blocked', reason = '', extra = {}) {
+  return {
+    state,
+    reason: String(reason || '').trim(),
+    refs: [],
+    blockedReasons: [],
+    ...extra,
+  };
+}
+
+function markAuthorityPlaneReady(plane, ref) {
+  if (ref && !plane.refs.includes(ref)) plane.refs.push(ref);
+  if (plane.state !== 'blocked') {
+    plane.state = 'ready';
+  } else if (!plane.blockedReasons.length) {
+    plane.state = 'ready';
+    plane.reason = '';
+  }
+}
+
+function markAuthorityPlaneBlocked(plane, reason) {
+  const value = String(reason || '').trim();
+  if (value && !plane.blockedReasons.includes(value)) plane.blockedReasons.push(value);
+  if (plane.state !== 'ready') {
+    plane.state = 'blocked';
+    plane.reason = plane.reason || value;
+  } else {
+    plane.state = 'degraded';
+    plane.reason = plane.reason || value;
+  }
+}
+
+function validateAuthorityReductionRecord(record) {
+  const kind = String(record?.kind || record?.recordKind || '').trim();
+  switch (kind) {
+    case SWARM.RECORD_KIND.AUTHORITY_ROOT_OPERATION:
+      return assertAuthorityRootOperation(record);
+    case SWARM.RECORD_KIND.AUTHORITY_ACTION_GRANT:
+      return assertActionAuthorityGrant(record);
+    case SWARM.RECORD_KIND.AUTHORITY_ACTION_EXERCISE:
+      return assertActionAuthorityExercise(record);
+    case SWARM.RECORD_KIND.AUTHORITY_GRANT_REVOCATION_POSTURE:
+      return assertAuthorityGrantRevocationPosture(record);
+    case SWARM.RECORD_KIND.AUTHORITY_MULTI_IDENTITY_PROOF:
+      return assertAuthorityMultiIdentityProof(record);
+    case SWARM.RECORD_KIND.ACCESS_GROUP:
+      return assertAccessGroup(record);
+    case SWARM.RECORD_KIND.ACCESS_EPOCH:
+      return assertAccessEpoch(record);
+    case SWARM.RECORD_KIND.PRIVATE_CONTENT_ENVELOPE:
+      return assertPrivateContentEnvelope(record);
+    case SWARM.RECORD_KIND.EVENT_FABRIC_ACCESS_CLASS:
+      return assertEventFabricAccessClass(record);
+    case SWARM.RECORD_KIND.EVENT_FABRIC_PROCESSOR_CONTRACT:
+      return assertEventFabricProcessorContract(record);
+    case SWARM.RECORD_KIND.SECURITY_PROCESSOR_SEED:
+      return assertSecurityProcessorSeed(record);
+    default:
+      throw new Error(`unsupported authority record kind: ${kind || 'missing'}`);
+  }
+}
+
+function provedAuthorityCheck(check) {
+  return check?.state === AGREEMENT.AUTHORITY_PROOF_STATE.PROVED;
+}
+
+function authorityGrantUsable(state) {
+  return [
+    AGREEMENT.ACTION_GRANT_STATE.ACCEPTED,
+    AGREEMENT.ACTION_GRANT_STATE.APPLIED,
+  ].includes(state);
+}
+
+const RUNTIME_AUTHORITY_PROOF_ROW_DEFINITIONS = Object.freeze([
+  {
+    check: AGREEMENT.AUTHORITY_PROOF_CHECK.SYNC,
+    plane: AGREEMENT.PLANE.DELIVERY_WITNESS,
+    actionabilityKey: 'canSync',
+    missingReason: 'syncWitnessMissing',
+  },
+  {
+    check: AGREEMENT.AUTHORITY_PROOF_CHECK.READ,
+    plane: AGREEMENT.PLANE.ACCESS_AUTHORITY,
+    actionabilityKey: 'canRead',
+    missingReason: 'accessAuthorityMissing',
+  },
+  {
+    check: AGREEMENT.AUTHORITY_PROOF_CHECK.WRITE_REDUCE,
+    plane: AGREEMENT.PLANE.ACTION_AUTHORITY,
+    actionabilityKey: 'canWriteReduce',
+    missingReason: 'actionAuthorityMissing',
+  },
+  {
+    check: AGREEMENT.AUTHORITY_PROOF_CHECK.REVOKE_EXPIRE,
+    plane: AGREEMENT.PLANE.ACTION_AUTHORITY,
+    actionabilityKey: 'canRevokeExpire',
+    missingReason: 'revokeExpireMissing',
+  },
+]);
+
+function runtimeAuthorityProofRow(definition, reduction) {
+  return {
+    check: definition.check,
+    plane: definition.plane,
+    state: 'blocked',
+    actionable: false,
+    targetRefs: [],
+    grantRefs: [],
+    accessGroupRefs: [],
+    accessEpochRefs: [],
+    exerciseRefs: [],
+    evidenceRefs: [],
+    expiresAt: 0,
+    blockedReason: definition.missingReason,
+    updatedAt: reduction.updatedAt,
+  };
+}
+
+function mergeAuthorityProofRow(row, check) {
+  const state = String(check?.state || '').trim();
+  if (row.state !== AGREEMENT.AUTHORITY_PROOF_STATE.PROVED || state === AGREEMENT.AUTHORITY_PROOF_STATE.PROVED) {
+    row.state = state || row.state;
+  }
+  if (check?.targetRef && !row.targetRefs.includes(check.targetRef)) row.targetRefs.push(check.targetRef);
+  for (const ref of normalizeArray(check?.grantRefs)) {
+    if (ref && !row.grantRefs.includes(ref)) row.grantRefs.push(ref);
+  }
+  for (const ref of normalizeArray(check?.accessGroupRefs)) {
+    if (ref && !row.accessGroupRefs.includes(ref)) row.accessGroupRefs.push(ref);
+  }
+  for (const ref of normalizeArray(check?.accessEpochRefs)) {
+    if (ref && !row.accessEpochRefs.includes(ref)) row.accessEpochRefs.push(ref);
+  }
+  for (const ref of normalizeArray(check?.exerciseRefs)) {
+    if (ref && !row.exerciseRefs.includes(ref)) row.exerciseRefs.push(ref);
+  }
+  for (const ref of normalizeArray(check?.evidenceRefs)) {
+    if (ref && !row.evidenceRefs.includes(ref)) row.evidenceRefs.push(ref);
+  }
+  row.expiresAt = Math.max(row.expiresAt, Number(check?.expiresAt || 0) || 0);
+  row.blockedReason = String(check?.blockedReason || '').trim() || row.blockedReason;
+  return row;
+}
+
+function runtimeAuthorityWalletPosture(validRecords, reduction) {
+  const proofRecords = validRecords.filter((record) => record.kind === SWARM.RECORD_KIND.AUTHORITY_MULTI_IDENTITY_PROOF);
+  const rows = RUNTIME_AUTHORITY_PROOF_ROW_DEFINITIONS.map((definition) => runtimeAuthorityProofRow(definition, reduction));
+  const rowByCheck = new Map(rows.map((row) => [row.check, row]));
+  for (const proof of proofRecords) {
+    for (const check of normalizeArray(proof.checks)) {
+      const row = rowByCheck.get(check?.check);
+      if (!row) continue;
+      mergeAuthorityProofRow(row, check);
+    }
+  }
+  for (const definition of RUNTIME_AUTHORITY_PROOF_ROW_DEFINITIONS) {
+    const row = rowByCheck.get(definition.check);
+    row.actionable = Boolean(reduction.actionability[definition.actionabilityKey]);
+    if (row.actionable && row.state === 'blocked') {
+      row.state = AGREEMENT.AUTHORITY_PROOF_STATE.DEGRADED;
+      row.blockedReason = 'proofCheckMissing';
+    }
+    if (row.state === AGREEMENT.AUTHORITY_PROOF_STATE.PROVED) row.blockedReason = '';
+  }
+  const primaryProof = proofRecords[0] || {};
+  return {
+    kind: 'runtime.authority.wallet.posture',
+    state: reduction.state,
+    ownerIdentityRef: String(primaryProof.ownerIdentityRef || '').trim(),
+    granteeIdentityRef: String(primaryProof.granteeIdentityRef || '').trim(),
+    granteeMemberRef: String(primaryProof.granteeMemberRef || '').trim(),
+    subjectRefs: uniqueTrimmedStrings(proofRecords.flatMap((record) => normalizeArray(record.subjectRefs))),
+    actionGrantRefs: safeClone(reduction.actionAuthority.grantRefs),
+    actionExerciseRefs: safeClone(reduction.actionAuthority.exerciseRefs),
+    accessGroupRefs: safeClone(reduction.accessAuthority.accessGroupRefs),
+    accessEpochRefs: safeClone(reduction.accessAuthority.accessEpochRefs),
+    privateEnvelopeRefs: safeClone(reduction.accessAuthority.privateEnvelopeRefs),
+    revocationRefs: safeClone(reduction.actionAuthority.revocationRefs),
+    proofRefs: uniqueTrimmedStrings(proofRecords.map((record) => record.proofId)),
+    rows,
+    actionability: safeClone(reduction.actionability),
+    blockedReasons: safeClone(reduction.blockedReasons),
+    updatedAt: reduction.updatedAt,
+  };
+}
+
+function reduceRuntimeAuthorityRecords(message = {}) {
+  const records = runtimeAuthorityRecordsFromMessage(message);
+  const now = nowMs();
+  const validRecords = [];
+  const reduction = {
+    kind: 'runtime.authority.reduction',
+    state: 'blocked',
+    actionAuthority: authorityPlane('blocked', 'action authority missing', {
+      grantRefs: [],
+      exerciseRefs: [],
+      rootOperationRefs: [],
+      revocationRefs: [],
+      actions: [],
+      resourceRefs: [],
+    }),
+    accessAuthority: authorityPlane('blocked', 'access authority missing', {
+      accessGroupRefs: [],
+      accessEpochRefs: [],
+      privateEnvelopeRefs: [],
+      contentClasses: [],
+      currentEpochRefs: [],
+      futureReadable: false,
+      rawReadable: false,
+    }),
+    deliveryWitness: authorityPlane('blocked', 'delivery witness missing', {
+      proofRefs: [],
+      witnessRefs: [],
+    }),
+    materialization: authorityPlane('notRequired', '', {
+      eventFabricAccessClassRefs: [],
+      processorRoleRefs: [],
+    }),
+    actionability: {
+      canSync: false,
+      canRead: false,
+      canWriteReduce: false,
+      canRevokeExpire: false,
+      canAct: false,
+      futureReadable: false,
+      rawReadable: false,
+    },
+    recordRefs: [],
+    invalidRecords: [],
+    blockedReasons: [],
+    updatedAt: now,
+  };
+
+  for (const [index, raw] of records.entries()) {
+    let record;
+    try {
+      record = validateAuthorityReductionRecord(raw);
+    } catch (error) {
+      const reason = String(error?.message || error || 'invalid authority record').trim();
+      reduction.invalidRecords.push({ index, kind: String(raw?.kind || raw?.recordKind || '').trim(), reason });
+      reduction.blockedReasons.push(reason);
+      continue;
+    }
+    validRecords.push(record);
+
+    const ref = runtimeAuthorityRecordRef(record);
+    if (ref && !reduction.recordRefs.includes(ref)) reduction.recordRefs.push(ref);
+
+    switch (record.kind) {
+      case SWARM.RECORD_KIND.AUTHORITY_ROOT_OPERATION:
+        if (authorityGrantUsable(record.state)) {
+          markAuthorityPlaneReady(reduction.actionAuthority, ref);
+          if (!reduction.actionAuthority.rootOperationRefs.includes(ref)) reduction.actionAuthority.rootOperationRefs.push(ref);
+        } else {
+          markAuthorityPlaneBlocked(reduction.actionAuthority, record.blockedReason || record.state);
+        }
+        break;
+      case SWARM.RECORD_KIND.AUTHORITY_ACTION_GRANT:
+        if (authorityGrantUsable(record.state)) {
+          markAuthorityPlaneReady(reduction.actionAuthority, ref);
+          if (!reduction.actionAuthority.grantRefs.includes(ref)) reduction.actionAuthority.grantRefs.push(ref);
+          if (record.action && !reduction.actionAuthority.actions.includes(record.action)) reduction.actionAuthority.actions.push(record.action);
+          if (record.resourceRef && !reduction.actionAuthority.resourceRefs.includes(record.resourceRef)) reduction.actionAuthority.resourceRefs.push(record.resourceRef);
+        } else {
+          markAuthorityPlaneBlocked(reduction.actionAuthority, record.blockedReason || record.state);
+        }
+        break;
+      case SWARM.RECORD_KIND.AUTHORITY_ACTION_EXERCISE:
+        if (authorityGrantUsable(record.state)) {
+          markAuthorityPlaneReady(reduction.actionAuthority, ref);
+          if (!reduction.actionAuthority.exerciseRefs.includes(ref)) reduction.actionAuthority.exerciseRefs.push(ref);
+        } else {
+          markAuthorityPlaneBlocked(reduction.actionAuthority, record.blockedReason || record.state);
+        }
+        break;
+      case SWARM.RECORD_KIND.AUTHORITY_GRANT_REVOCATION_POSTURE:
+        markAuthorityPlaneReady(reduction.actionAuthority, ref);
+        if (!reduction.actionAuthority.revocationRefs.includes(ref)) reduction.actionAuthority.revocationRefs.push(ref);
+        reduction.actionability.canRevokeExpire = true;
+        break;
+      case SWARM.RECORD_KIND.ACCESS_GROUP:
+        markAuthorityPlaneReady(reduction.accessAuthority, ref);
+        if (!reduction.accessAuthority.accessGroupRefs.includes(ref)) reduction.accessAuthority.accessGroupRefs.push(ref);
+        for (const contentClass of normalizeArray(record.contentClasses)) {
+          if (contentClass && !reduction.accessAuthority.contentClasses.includes(contentClass)) reduction.accessAuthority.contentClasses.push(contentClass);
+        }
+        if (record.currentEpochId && !reduction.accessAuthority.currentEpochRefs.includes(record.currentEpochId)) {
+          reduction.accessAuthority.currentEpochRefs.push(record.currentEpochId);
+        }
+        reduction.accessAuthority.futureReadable = true;
+        reduction.actionability.futureReadable = true;
+        break;
+      case SWARM.RECORD_KIND.ACCESS_EPOCH:
+        markAuthorityPlaneReady(reduction.accessAuthority, ref);
+        if (!reduction.accessAuthority.accessEpochRefs.includes(ref)) reduction.accessAuthority.accessEpochRefs.push(ref);
+        reduction.accessAuthority.futureReadable = true;
+        reduction.actionability.futureReadable = true;
+        break;
+      case SWARM.RECORD_KIND.PRIVATE_CONTENT_ENVELOPE:
+        markAuthorityPlaneReady(reduction.accessAuthority, ref);
+        if (!reduction.accessAuthority.privateEnvelopeRefs.includes(ref)) reduction.accessAuthority.privateEnvelopeRefs.push(ref);
+        if (record.contentClass && !reduction.accessAuthority.contentClasses.includes(record.contentClass)) reduction.accessAuthority.contentClasses.push(record.contentClass);
+        reduction.accessAuthority.rawReadable = true;
+        reduction.actionability.rawReadable = true;
+        break;
+      case SWARM.RECORD_KIND.EVENT_FABRIC_ACCESS_CLASS:
+        reduction.materialization.state = 'ready';
+        if (ref && !reduction.materialization.refs.includes(ref)) reduction.materialization.refs.push(ref);
+        if (!reduction.materialization.eventFabricAccessClassRefs.includes(ref)) reduction.materialization.eventFabricAccessClassRefs.push(ref);
+        for (const roleRef of normalizeArray(record.processorRoleRefs)) {
+          if (roleRef && !reduction.materialization.processorRoleRefs.includes(roleRef)) reduction.materialization.processorRoleRefs.push(roleRef);
+        }
+        break;
+      case SWARM.RECORD_KIND.AUTHORITY_MULTI_IDENTITY_PROOF:
+        if (record.state !== AGREEMENT.AUTHORITY_PROOF_STATE.PROVED) {
+          markAuthorityPlaneBlocked(reduction.actionAuthority, normalizeArray(record.blockedReasons)[0] || record.state);
+        }
+        if (ref && !reduction.deliveryWitness.proofRefs.includes(ref)) reduction.deliveryWitness.proofRefs.push(ref);
+        for (const check of normalizeArray(record.checks)) {
+          if (check.check === AGREEMENT.AUTHORITY_PROOF_CHECK.SYNC && provedAuthorityCheck(check)) {
+            reduction.actionability.canSync = true;
+            markAuthorityPlaneReady(reduction.deliveryWitness, ref);
+          }
+          if (check.check === AGREEMENT.AUTHORITY_PROOF_CHECK.READ && provedAuthorityCheck(check)) {
+            reduction.actionability.canRead = true;
+            markAuthorityPlaneReady(reduction.accessAuthority, ref);
+            for (const groupRef of normalizeArray(check.accessGroupRefs)) {
+              if (groupRef && !reduction.accessAuthority.accessGroupRefs.includes(groupRef)) reduction.accessAuthority.accessGroupRefs.push(groupRef);
+            }
+          }
+          if (check.check === AGREEMENT.AUTHORITY_PROOF_CHECK.WRITE_REDUCE && provedAuthorityCheck(check)) {
+            reduction.actionability.canWriteReduce = true;
+            markAuthorityPlaneReady(reduction.actionAuthority, ref);
+          }
+          if (check.check === AGREEMENT.AUTHORITY_PROOF_CHECK.REVOKE_EXPIRE && provedAuthorityCheck(check)) {
+            reduction.actionability.canRevokeExpire = true;
+            markAuthorityPlaneReady(reduction.actionAuthority, ref);
+          }
+        }
+        break;
+      default:
+        break;
+    }
+  }
+
+  reduction.actionability.canAct = reduction.actionAuthority.state === 'ready' || reduction.actionability.canWriteReduce || reduction.actionability.canRevokeExpire;
+  reduction.actionability.canRead = reduction.actionability.canRead && reduction.accessAuthority.state !== 'blocked';
+
+  const missing = [];
+  if (!records.length) missing.push('authorityRecordsMissing');
+  if (!reduction.actionability.canSync) missing.push('syncWitnessMissing');
+  if (!reduction.actionability.canAct) missing.push('actionAuthorityMissing');
+  if (!reduction.actionability.canRead && !reduction.actionability.rawReadable && !reduction.actionability.futureReadable) missing.push('accessAuthorityMissing');
+
+  reduction.blockedReasons = uniqueTrimmedStrings([
+    ...reduction.blockedReasons,
+    ...missing,
+    ...reduction.actionAuthority.blockedReasons,
+    ...reduction.accessAuthority.blockedReasons,
+    ...reduction.deliveryWitness.blockedReasons,
+  ]);
+  if (reduction.invalidRecords.length) {
+    reduction.state = 'blocked';
+  } else if (missing.length) {
+    reduction.state = records.length ? 'degraded' : 'blocked';
+  } else {
+    reduction.state = 'ready';
+  }
+
+  if (reduction.actionAuthority.state === 'blocked' && reduction.actionAuthority.refs.length) reduction.actionAuthority.state = 'degraded';
+  if (reduction.accessAuthority.state === 'blocked' && reduction.accessAuthority.refs.length) reduction.accessAuthority.state = 'degraded';
+  if (reduction.deliveryWitness.state === 'blocked' && reduction.deliveryWitness.refs.length) reduction.deliveryWitness.state = 'degraded';
+  reduction.walletPosture = runtimeAuthorityWalletPosture(validRecords, reduction);
+
+  return reduction;
+}
+
+function handleRuntimeAuthorityRecordsReduce(message) {
+  const result = reduceRuntimeAuthorityRecords(message);
+  recordRuntimeEvent('runtime.authority.records.reduced', {
+    state: result.state,
+    recordCount: runtimeAuthorityRecordsFromMessage(message).length,
+    actionAuthorityState: result.actionAuthority.state,
+    accessAuthorityState: result.accessAuthority.state,
+    deliveryWitnessState: result.deliveryWitness.state,
+    canSync: result.actionability.canSync,
+    canRead: result.actionability.canRead,
+    canWriteReduce: result.actionability.canWriteReduce,
+    canRevokeExpire: result.actionability.canRevokeExpire,
+  });
+  return { ok: true, result };
 }
 
 function appIntentRecipientPks(intent, authority) {
@@ -9347,6 +10384,15 @@ async function handleControlMessage(message, endpoint) {
         kind: RUNTIME_AUTHORITY_POSTURE_GET,
         ok: true,
         result: await runtimeAuthorityPosture(),
+      };
+      break;
+    }
+    case RUNTIME_AUTHORITY_RECORDS_REDUCE: {
+      response = {
+        type: 'runtime.response',
+        requestId: String(message.requestId || '').trim(),
+        kind: RUNTIME_AUTHORITY_RECORDS_REDUCE,
+        ...handleRuntimeAuthorityRecordsReduce(message),
       };
       break;
     }

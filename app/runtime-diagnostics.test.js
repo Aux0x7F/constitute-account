@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   RUNTIME_DIAGNOSTICS_COMMAND,
   RUNTIME_DIAGNOSTIC_OPERATOR_PLANES,
+  RUNTIME_DIAGNOSTICS_RING_LIMIT,
   RUNTIME_DIAGNOSTICS_STORAGE_KEY,
   RUNTIME_DIAGNOSTICS_SUBSCRIBE,
   attachRuntimeDiagnostics,
@@ -229,6 +230,42 @@ test('runtime diagnostics replay populates ring without fresh console warnings',
   assert.equal(lines.length, 1);
   assert.match(lines[0][0], /runtime diagnostic/);
   assert.equal(agent.localMaterializationBudget.consumerFloor.ackFloor, '2');
+});
+
+test('runtime diagnostics local consumer floor carries a reason when the ring lags', () => {
+  const win = makeWindow();
+  const port = makePort();
+  const lines = [];
+  const agent = attachRuntimeDiagnostics({
+    window: win,
+    port,
+    surface: 'test-ui',
+    clientId: 'test-ui',
+    console: { debug: (...args) => lines.push(args), warn: (...args) => lines.push(args), error: (...args) => lines.push(args) },
+  });
+  const observedAt = Date.now();
+  for (let index = 0; index < RUNTIME_DIAGNOSTICS_RING_LIMIT; index += 1) {
+    assert.equal(agent.handleMessage({
+      type: 'runtime.diagnostic.event',
+      runtimeSessionId: 'runtime-session-test',
+      event: {
+        recordKind: 'runtime.diagnostic.event',
+        eventId: `event-live-${index}`,
+        kind: 'projection.applied',
+        level: 'debug',
+        observedAt: observedAt + index,
+        buildId: 'runtime-2.57',
+        runtimeSessionId: 'runtime-session-test',
+        safeFacts: { index },
+      },
+    }), true);
+  }
+  assert.equal(win.__constituteRuntimeDiagnostics.length, RUNTIME_DIAGNOSTICS_RING_LIMIT);
+  assert.equal(agent.localMaterializationBudget.consumerFloor.lagState, 'lagging');
+  assert.equal(
+    agent.localMaterializationBudget.consumerFloor.reason,
+    'runtime diagnostics ring reached local materialization limit',
+  );
 });
 
 test('runtime diagnostics agent sends subscription posture for event-plane filtering', () => {

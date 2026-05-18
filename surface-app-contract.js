@@ -1,6 +1,12 @@
-import { SURFACE_APP, assertSurfaceAppContract } from "../constitute-protocol/src/index.js";
+import {
+  SURFACE_APP,
+  assertServiceManagerSecretBoundary,
+  assertSurfaceAppBootstrapContract,
+  assertSurfaceAppContract,
+} from "../constitute-protocol/src/index.js";
 import {
   defineSurfaceAppContract,
+  surfaceAppRunnerPlan,
   surfaceAppBootstrapPosture,
   surfaceServiceManagerOperationPosture,
   surfaceServiceManagerProofDigest,
@@ -154,6 +160,18 @@ export const accountSurfaceModules = surfaceAppModuleImplementations(
   accountSurfaceApp,
 );
 
+export const accountSurfaceRunnerPlan = surfaceAppRunnerPlan(accountSurfaceApp, {
+  issuedAt: ISSUED_AT,
+});
+
+export const accountServiceManagerSecretBoundary = assertServiceManagerSecretBoundary(
+  accountSurfaceRunnerPlan.secretBoundary,
+);
+
+export const accountSurfaceBootstrapContract = assertSurfaceAppBootstrapContract(
+  accountSurfaceRunnerPlan.bootstrapContract,
+);
+
 export const accountSurfaceBootstrapPosture = surfaceAppBootstrapPosture(accountSurfaceApp, {
   issuedAt: ISSUED_AT,
 });
@@ -187,6 +205,9 @@ export const accountPlatformAdapterModule = accountSurfaceModuleRegistry.require
 
 export const accountSurfaceAttachContext = accountSurfaceApp.attachContext({
   productSurface: "constitute-account",
+  runnerPlan: accountSurfaceRunnerPlan,
+  bootstrapContract: accountSurfaceBootstrapContract,
+  serviceManagerSecretBoundary: accountServiceManagerSecretBoundary,
   bootstrapPosture: accountSurfaceBootstrapPosture,
   serviceManagerOperationPosture: accountServiceManagerOperationPosture,
   serviceManagerProofDigest: accountServiceManagerProofDigest,
