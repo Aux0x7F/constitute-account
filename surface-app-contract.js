@@ -227,7 +227,7 @@ export const accountSurfaceModuleRegistry = createSurfaceModuleRegistry([
 
 export const accountSurfaceModules = surfaceAppModuleImplementations(
   accountSurfaceModuleRegistry,
-  accountSurfaceApp,
+  accountSurfaceRuntimeSelectionPosture,
 );
 
 export const accountSurfaceRunnerPlan = surfaceAppRunnerPlan(accountSurfaceApp, {
@@ -259,17 +259,17 @@ export const accountServiceManagerProofDigest = surfaceServiceManagerProofDigest
 });
 
 export const accountRuntimeClientModule = accountSurfaceModuleRegistry.require(
-  accountSurfaceApp,
+  accountSurfaceRuntimeSelectionPosture,
   SURFACE_APP.MODULE_ROLE.RUNTIME_CLIENT,
 ).implementation;
 
 export const accountProjectionModelModule = accountSurfaceModuleRegistry.require(
-  accountSurfaceApp,
+  accountSurfaceRuntimeSelectionPosture,
   SURFACE_APP.MODULE_ROLE.PROJECTION_MODEL,
 ).implementation;
 
 export const accountPlatformAdapterModule = accountSurfaceModuleRegistry.require(
-  accountSurfaceApp,
+  accountSurfaceRuntimeSelectionPosture,
   SURFACE_APP.MODULE_ROLE.PLATFORM_ADAPTER,
 ).implementation;
 
