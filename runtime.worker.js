@@ -1245,12 +1245,99 @@ function runtimeSnapshotConsumerFloor(endpoint, sampledAt = nowMs()) {
   });
 }
 
-function runtimeSnapshotMaterializationBudget(endpoint, sampledAt = nowMs()) {
-  const clientId = String(endpoint?.clientId || 'runtime-surface').trim() || 'runtime-surface';
+function runtimeSnapshotDeliveryLimits(endpoint) {
   const subscription = endpoint?.snapshotSubscription && typeof endpoint.snapshotSubscription === 'object'
     ? endpoint.snapshotSubscription
     : {};
+  const replayLimit = Number(subscription.replayLimit ?? RUNTIME_DIAGNOSTIC_SNAPSHOT_LIMIT);
+  const snapshotMaxBytes = Number(subscription.snapshotMaxBytes || 512 * 1024);
+  return {
+    replayLimit: Number.isFinite(replayLimit)
+      ? Math.max(0, Math.min(RUNTIME_DIAGNOSTIC_SNAPSHOT_LIMIT, replayLimit))
+      : RUNTIME_DIAGNOSTIC_SNAPSHOT_LIMIT,
+    snapshotMaxBytes: Number.isFinite(snapshotMaxBytes) && snapshotMaxBytes > 0 ? snapshotMaxBytes : 512 * 1024,
+    deliveryMode: String(subscription.mode || 'push'),
+  };
+}
+
+function objectEntryCount(value) {
+  return value && typeof value === 'object' && !Array.isArray(value) ? Object.keys(value).length : 0;
+}
+
+function estimatedRuntimeSnapshotBytes(snapshot) {
+  const eventCount = normalizeArray(snapshot.runtimeEvents).length;
+  const projectionCountValue = objectEntryCount(snapshot.projections);
+  const queueCount = objectEntryCount(snapshot.swarmQueue);
+  const activationCount = objectEntryCount(snapshot.activationResolutions);
+  const mediaCount = objectEntryCount(snapshot.mediaFulfillment);
+  const recoveryCount = objectEntryCount(snapshot.streamRecovery);
+  const serviceCountValue = normalizeArray(snapshot.serviceCatalog?.services).length
+    || objectEntryCount(snapshot.services);
+  return 48 * 1024
+    + eventCount * 1536
+    + projectionCountValue * 4096
+    + queueCount * 2048
+    + activationCount * 2048
+    + mediaCount * 1536
+    + recoveryCount * 768
+    + serviceCountValue * 2048;
+}
+
+function materializeRuntimeSnapshotForEndpoint(snapshot, endpoint, sampledAt = nowMs()) {
+  const next = {
+    ...snapshot,
+    runtimeEvents: normalizeArray(snapshot.runtimeEvents),
+  };
+  const limits = runtimeSnapshotDeliveryLimits(endpoint);
+  const sourceEventCount = next.runtimeEvents.length;
+  let droppedByReplayLimit = 0;
+  if (sourceEventCount > limits.replayLimit) {
+    next.runtimeEvents = next.runtimeEvents.slice(-limits.replayLimit);
+    droppedByReplayLimit = sourceEventCount - next.runtimeEvents.length;
+  }
+  let estimatedSnapshotBytes = estimatedRuntimeSnapshotBytes(next);
+  let droppedByByteCount = 0;
+  while (next.runtimeEvents.length > 0 && estimatedSnapshotBytes > limits.snapshotMaxBytes) {
+    next.runtimeEvents.shift();
+    droppedByByteCount += 1;
+    estimatedSnapshotBytes = estimatedRuntimeSnapshotBytes(next);
+  }
+  const deliveredRuntimeEventCount = normalizeArray(next.runtimeEvents).length;
+  next.materialization = {
+    ...(next.materialization && typeof next.materialization === 'object' ? next.materialization : {}),
+    delivery: {
+      kind: 'runtime.snapshot.materialization.delivery',
+      estimateMode: 'bounded-counts',
+      consumerRef: String(endpoint?.clientId || 'runtime-surface').trim() || 'runtime-surface',
+      sourceRuntimeEventCount: sourceEventCount,
+      deliveredRuntimeEventCount,
+      droppedByReplayLimit,
+      droppedByByteCount,
+      estimatedSnapshotBytes,
+      snapshotMaxBytes: limits.snapshotMaxBytes,
+      replayLimit: limits.replayLimit,
+      sampledAt,
+    },
+  };
+  return {
+    snapshot: next,
+    delivery: next.materialization.delivery,
+  };
+}
+
+function runtimeSnapshotMaterializationBudget(endpoint, sampledAt = nowMs(), delivery = {}) {
+  const clientId = String(endpoint?.clientId || 'runtime-surface').trim() || 'runtime-surface';
+  const limits = runtimeSnapshotDeliveryLimits(endpoint);
   const materializationId = `materialization:${clientId}:runtime-snapshot`;
+  const estimatedSnapshotBytes = Number(delivery.estimatedSnapshotBytes || 0) || 0;
+  const droppedByByteCount = Number(delivery.droppedByByteCount || 0) || 0;
+  const state = estimatedSnapshotBytes > limits.snapshotMaxBytes
+    ? SWARM.RESOURCE_POSTURE_STATE.OVER_BUDGET
+    : (droppedByByteCount > 0 ? SWARM.RESOURCE_POSTURE_STATE.PRESSURE : SWARM.RESOURCE_POSTURE_STATE.WITHIN_BUDGET);
+  const blockedReasons = [
+    ...(estimatedSnapshotBytes > limits.snapshotMaxBytes ? ['runtimeSnapshotByteCapExceeded'] : []),
+    ...(droppedByByteCount > 0 ? ['runtimeSnapshotByteCapApplied'] : []),
+  ];
   return assertMaterializationBudget({
     kind: SWARM.RECORD_KIND.MATERIALIZATION_BUDGET,
     budgetId: materializationId,
@@ -1260,12 +1347,17 @@ function runtimeSnapshotMaterializationBudget(endpoint, sampledAt = nowMs()) {
     copyRole: SWARM.MATERIALIZATION_COPY_ROLE.PROJECTION,
     transferMode: SWARM.MATERIALIZATION_TRANSFER_MODE.CLONE,
     privacyTier: SWARM.MATERIALIZATION_PRIVACY_TIER.SAFE_PROJECTION,
-    state: SWARM.RESOURCE_POSTURE_STATE.WITHIN_BUDGET,
+    state,
     limits: {
       maxFanout: endpoints.size || 1,
-      snapshotMaxBytes: Number(subscription.snapshotMaxBytes || 512 * 1024),
-      replayLimit: Number(subscription.replayLimit || 1),
-      deliveryMode: String(subscription.mode || 'push'),
+      snapshotMaxBytes: limits.snapshotMaxBytes,
+      replayLimit: limits.replayLimit,
+      deliveryMode: limits.deliveryMode,
+      estimatedSnapshotBytes,
+      sourceRuntimeEventCount: Number(delivery.sourceRuntimeEventCount || 0) || 0,
+      deliveredRuntimeEventCount: Number(delivery.deliveredRuntimeEventCount || 0) || 0,
+      droppedByReplayLimit: Number(delivery.droppedByReplayLimit || 0) || 0,
+      droppedByByteCount,
     },
     snapshotPolicy: {
       mode: 'baselineAndRepair',
@@ -1289,16 +1381,17 @@ function runtimeSnapshotMaterializationBudget(endpoint, sampledAt = nowMs()) {
       version: RUNTIME_WORKER_BUILD_ID,
     },
     consumerFloor: runtimeSnapshotConsumerFloor(endpoint, sampledAt),
+    blockedReasons,
     retentionClass: 'ephemeral.runtime-snapshot',
     issuedAt: sampledAt,
     expiresAt: sampledAt + 60_000,
   });
 }
 
-function refreshRuntimeSnapshotMaterialization(endpoint) {
+function refreshRuntimeSnapshotMaterialization(endpoint, delivery = {}) {
   if (!endpoint) return null;
   const sampledAt = nowMs();
-  endpoint.runtimeSnapshotMaterializationBudget = runtimeSnapshotMaterializationBudget(endpoint, sampledAt);
+  endpoint.runtimeSnapshotMaterializationBudget = runtimeSnapshotMaterializationBudget(endpoint, sampledAt, delivery);
   return endpoint.runtimeSnapshotMaterializationBudget;
 }
 
@@ -9060,11 +9153,12 @@ function broadcast(message) {
 function broadcastSnapshot() {
   const snapshot = runtimeSnapshot();
   for (const endpoint of endpoints.values()) {
-    const materializationBudget = refreshRuntimeSnapshotMaterialization(endpoint);
+    const materialized = materializeRuntimeSnapshotForEndpoint(snapshot, endpoint);
+    const materializationBudget = refreshRuntimeSnapshotMaterialization(endpoint, materialized.delivery);
     endpointPost(endpoint, {
       type: 'runtime.snapshot',
       buildId: RUNTIME_WORKER_BUILD_ID,
-      snapshot,
+      snapshot: materialized.snapshot,
       materializationBudget: safeClone(materializationBudget),
       consumerFloor: safeClone(materializationBudget?.consumerFloor || null),
     });
@@ -10267,13 +10361,15 @@ async function handleControlMessage(message, endpoint) {
       attachContext: message.attachContext,
     });
     startHydrationInBackground();
+    const materialized = materializeRuntimeSnapshotForEndpoint(runtimeSnapshot(), entry);
+    const materializationBudget = refreshRuntimeSnapshotMaterialization(entry, materialized.delivery);
     endpointPost(endpoint, {
       type: 'runtime.attached',
       buildId: RUNTIME_WORKER_BUILD_ID,
       clientId: entry?.clientId || '',
-      snapshot: runtimeSnapshot(),
-      materializationBudget: safeClone(entry?.runtimeSnapshotMaterializationBudget || null),
-      consumerFloor: safeClone(entry?.runtimeSnapshotMaterializationBudget?.consumerFloor || null),
+      snapshot: materialized.snapshot,
+      materializationBudget: safeClone(materializationBudget || null),
+      consumerFloor: safeClone(materializationBudget?.consumerFloor || null),
     });
     recordRuntimeEvent('runtime.attach', {
       clientId: entry?.clientId || '',
@@ -10336,12 +10432,16 @@ async function handleControlMessage(message, endpoint) {
       break;
     }
     case 'runtime.snapshot.get': {
+      const materialized = materializeRuntimeSnapshotForEndpoint(runtimeSnapshot(), endpoint);
+      const materializationBudget = refreshRuntimeSnapshotMaterialization(endpoint, materialized.delivery);
       response = {
         type: 'runtime.response',
         requestId: String(message.requestId || '').trim(),
         kind: 'runtime.snapshot.get',
         ok: true,
-        result: runtimeSnapshot(),
+        result: materialized.snapshot,
+        materializationBudget: safeClone(materializationBudget || null),
+        consumerFloor: safeClone(materializationBudget?.consumerFloor || null),
       };
       break;
     }
