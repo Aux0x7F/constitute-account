@@ -658,6 +658,20 @@ test('runtime attach declares snapshot materialization budget per surface', asyn
   assert.equal(snapshot.result.materialization.state, 'withinBudget');
   assert.equal(snapshot.result.materialization.budgets.some((entry) => entry.budgetId === 'runtime.projections.retained'), true);
   assert.equal(snapshot.result.materialization.budgets.some((entry) => entry.budgetId === 'runtime.events.ring'), true);
+  assert.equal(snapshot.result.materialization.budgets.some((entry) => entry.budgetId === 'runtime.queue.outbound'), true);
+  assert.equal(snapshot.result.materialization.budgets.some((entry) => entry.budgetId === 'runtime.swarmEdge.observations'), true);
+  assert.equal(snapshot.result.materialization.budgets.some((entry) => entry.budgetId === 'runtime.activations.read-model'), true);
+  assert.equal(snapshot.result.materialization.budgets.some((entry) => entry.budgetId === 'runtime.media.fulfillment'), true);
+  assert.equal(snapshot.result.materialization.budgets.some((entry) => entry.budgetId === 'runtime.stream.recovery'), true);
+  assert.equal(snapshot.result.materialization.budgets.some((entry) => entry.budgetId === 'runtime.retained.catalog'), true);
+  assert.equal(snapshot.result.materialization.readModels.some((entry) => (
+    entry.budgetId === 'runtime.queue.outbound'
+      && entry.payloadClass === 'control'
+      && entry.copyRole === 'buffer'
+  )), true);
+  assert.equal(snapshot.result.materialization.byPayloadClass.projection >= 1, true);
+  assert.equal(snapshot.result.materialization.byCopyRole.buffer >= 1, true);
+  assert.equal(snapshot.result.materialization.byTransferMode.clone >= 1, true);
   assert.equal(snapshot.result.productShellState.materialization.state, 'withinBudget');
   assert.equal(snapshot.result.resource.kind, 'runtime.resource.postureSummary');
   assert.equal(snapshot.result.resource.cleanupAllowed, false);

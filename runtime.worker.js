@@ -787,6 +787,13 @@ function materializationBudgetSummary(budget) {
     blockedReasons: normalizeArray(budget.blockedReasons).map((entry) => String(entry || '').trim()).filter(Boolean),
     retentionClass: String(budget.retentionClass || '').trim(),
     referenceRefs: normalizeArray(budget.referenceRefs).map((entry) => String(entry || '').trim()).filter(Boolean),
+    limits: budget.limits && typeof budget.limits === 'object' ? safeClone(budget.limits) : {},
+    snapshotPolicy: budget.snapshotPolicy && typeof budget.snapshotPolicy === 'object' ? safeClone(budget.snapshotPolicy) : {},
+    deltaPolicy: budget.deltaPolicy && typeof budget.deltaPolicy === 'object' ? safeClone(budget.deltaPolicy) : {},
+    coalescing: budget.coalescing && typeof budget.coalescing === 'object' ? safeClone(budget.coalescing) : {},
+    cardinality: budget.cardinality && typeof budget.cardinality === 'object' ? safeClone(budget.cardinality) : {},
+    releaseAfter: Number(budget.releaseAfter || 0) || 0,
+    expiresAt: Number(budget.expiresAt || 0) || 0,
     consumerFloor: budget.consumerFloor ? {
       floorId: String(budget.consumerFloor.floorId || '').trim(),
       lagState: String(budget.consumerFloor.lagState || '').trim(),
@@ -795,6 +802,217 @@ function materializationBudgetSummary(budget) {
       compactionFloor: String(budget.consumerFloor.compactionFloor || '').trim(),
     } : null,
   };
+}
+
+function materializationStateForCount(count, limit) {
+  const value = Math.max(0, Number(count || 0) || 0);
+  const cap = Math.max(0, Number(limit || 0) || 0);
+  if (!cap) return SWARM.RESOURCE_POSTURE_STATE.WITHIN_BUDGET;
+  if (value > cap) return SWARM.RESOURCE_POSTURE_STATE.OVER_BUDGET;
+  if (value >= cap * 0.8) return SWARM.RESOURCE_POSTURE_STATE.PRESSURE;
+  return SWARM.RESOURCE_POSTURE_STATE.WITHIN_BUDGET;
+}
+
+function runtimeMaterializationConsumerFloor({
+  materializationId,
+  consumerRef = 'runtime.read-model',
+  subjectRef = '',
+  cursor = '',
+  count = 0,
+  sampledAt = nowMs(),
+  replayMode = 'snapshot',
+  duplicatePolicy = 'replaceLatest',
+  lagState = SWARM.MATERIALIZATION_LAG_STATE.CAUGHT_UP,
+  reason = '',
+}) {
+  const normalizedId = String(materializationId || '').trim();
+  const normalizedCursor = String(cursor || count || 0);
+  const floor = {
+    kind: SWARM.RECORD_KIND.CONSUMER_FLOOR,
+    floorId: `floor:${normalizedId}`,
+    consumerRef: String(consumerRef || 'runtime.read-model').trim() || 'runtime.read-model',
+    materializationId: normalizedId,
+    subjectRef: String(subjectRef || normalizedId).trim() || normalizedId,
+    lagState,
+    cursor: normalizedCursor,
+    ackFloor: normalizedCursor,
+    witnessFloor: normalizedCursor,
+    compactionFloor: normalizedCursor,
+    eventTimeFloor: sampledAt,
+    observedTimeFloor: sampledAt,
+    replay: { mode: replayMode, count: Number(count || 0) || 0 },
+    redelivery: { mode: replayMode, duplicatePolicy },
+    sampledAt,
+    expiresAt: sampledAt + 60_000,
+  };
+  if (reason) floor.reason = reason;
+  return assertConsumerFloor(floor);
+}
+
+function runtimeReadModelMaterializationBudget({
+  budgetId,
+  subjectRef,
+  count = 0,
+  limit = 0,
+  payloadClass = SWARM.MATERIALIZATION_PAYLOAD_CLASS.PROJECTION,
+  copyRole = SWARM.MATERIALIZATION_COPY_ROLE.PROJECTION,
+  transferMode = SWARM.MATERIALIZATION_TRANSFER_MODE.CLONE,
+  privacyTier = SWARM.MATERIALIZATION_PRIVACY_TIER.SAFE_PROJECTION,
+  snapshotMode = 'runtime-snapshot-section',
+  deltaMode = 'runtime-delta',
+  coalescingKey = '',
+  retentionClass = 'ephemeral.runtime-read-model',
+  schemaVersion = '',
+  sampledAt = nowMs(),
+}) {
+  const state = materializationStateForCount(count, limit);
+  const blockedReasons = state === SWARM.RESOURCE_POSTURE_STATE.WITHIN_BUDGET
+    ? []
+    : [`${String(budgetId || 'runtime.materialization').replace(/[^a-z0-9]+/gi, '.')}.pressure`];
+  const normalizedBudgetId = String(budgetId || '').trim();
+  const cursor = String(count || 0);
+  const reason = blockedReasons[0] || '';
+  const budget = {
+    kind: SWARM.RECORD_KIND.MATERIALIZATION_BUDGET,
+    budgetId: normalizedBudgetId,
+    sourceAuthority: `runtime:${runtimeSessionId}`,
+    consumerRef: 'runtime.read-model',
+    payloadClass,
+    copyRole,
+    transferMode,
+    privacyTier,
+    state,
+    limits: {
+      count: Number(count || 0) || 0,
+      limit: Number(limit || 0) || 0,
+      fanout: endpoints.size,
+    },
+    snapshotPolicy: { mode: snapshotMode },
+    deltaPolicy: { mode: deltaMode },
+    coalescing: { key: coalescingKey || normalizedBudgetId, duplicatePolicy: 'replaceLatest' },
+    cardinality: { maxCount: Number(limit || 0) || 0, keySpace: coalescingKey || normalizedBudgetId },
+    schema: {
+      state: SWARM.MATERIALIZATION_SCHEMA_STATE.CURRENT,
+      version: schemaVersion || `${normalizedBudgetId}.v1`,
+    },
+    consumerFloor: runtimeMaterializationConsumerFloor({
+      materializationId: normalizedBudgetId,
+      subjectRef,
+      cursor,
+      count,
+      sampledAt,
+      replayMode: snapshotMode,
+      duplicatePolicy: 'replaceLatest',
+      lagState: state === SWARM.RESOURCE_POSTURE_STATE.WITHIN_BUDGET
+        ? SWARM.MATERIALIZATION_LAG_STATE.CAUGHT_UP
+        : SWARM.MATERIALIZATION_LAG_STATE.LAGGING,
+      reason,
+    }),
+    blockedReasons,
+    retentionClass,
+    issuedAt: sampledAt,
+    releaseAfter: sampledAt + 60_000,
+    expiresAt: sampledAt + 5 * 60_000,
+  };
+  return assertMaterializationBudget(budget);
+}
+
+function runtimeReadModelMaterializationBudgets(sampledAt = nowMs()) {
+  const profile = runtimeResourceProfile();
+  const caps = normalizeObject(profile.caps);
+  const edgeObservationCount = swarmEdge.rejections.length
+    + swarmEdge.repairRequests.length
+    + swarmEdge.routeObservations.length
+    + swarmEdge.contributionLifecycles.length;
+  return [
+    runtimeReadModelMaterializationBudget({
+      budgetId: 'runtime.queue.outbound',
+      subjectRef: 'runtime.swarmQueue',
+      count: outboundSwarmFrames.size,
+      limit: PENDING_AUTHORITY_INTENT_LIMIT,
+      payloadClass: SWARM.MATERIALIZATION_PAYLOAD_CLASS.CONTROL,
+      copyRole: SWARM.MATERIALIZATION_COPY_ROLE.BUFFER,
+      privacyTier: SWARM.MATERIALIZATION_PRIVACY_TIER.SAFE_FACTS,
+      snapshotMode: 'bounded-queue-snapshot',
+      deltaMode: 'queue-status-delta',
+      coalescingKey: 'frameId',
+      retentionClass: 'ephemeral.runtime-queue',
+      sampledAt,
+    }),
+    runtimeReadModelMaterializationBudget({
+      budgetId: 'runtime.swarmEdge.observations',
+      subjectRef: 'runtime.swarmEdge',
+      count: edgeObservationCount,
+      limit: 100 + PROJECTION_REPAIR_REQUEST_LIMIT + CONTRIBUTION_LIFECYCLE_LIMIT + 100,
+      payloadClass: SWARM.MATERIALIZATION_PAYLOAD_CLASS.EVIDENCE,
+      copyRole: SWARM.MATERIALIZATION_COPY_ROLE.EVIDENCE,
+      privacyTier: SWARM.MATERIALIZATION_PRIVACY_TIER.SAFE_FACTS,
+      snapshotMode: 'bounded-edge-observation-rings',
+      deltaMode: 'edge-observation-delta',
+      coalescingKey: 'routePromiseId|frameId|repairId|contributionId',
+      retentionClass: 'ephemeral.runtime-edge-evidence',
+      sampledAt,
+    }),
+    runtimeReadModelMaterializationBudget({
+      budgetId: 'runtime.activations.read-model',
+      subjectRef: 'runtime.activationResolutions',
+      count: pendingAuthorityIntents.size + pendingRouteIntents.size + outboundSwarmFrames.size,
+      limit: PENDING_AUTHORITY_INTENT_LIMIT * 3,
+      payloadClass: SWARM.MATERIALIZATION_PAYLOAD_CLASS.PROJECTION,
+      copyRole: SWARM.MATERIALIZATION_COPY_ROLE.PROJECTION,
+      privacyTier: SWARM.MATERIALIZATION_PRIVACY_TIER.SAFE_PROJECTION,
+      snapshotMode: 'activation-read-model',
+      deltaMode: 'activation-posture-delta',
+      coalescingKey: 'activationId|routePromiseId|frameId',
+      retentionClass: 'ephemeral.runtime-activation-posture',
+      sampledAt,
+    }),
+    runtimeReadModelMaterializationBudget({
+      budgetId: 'runtime.media.fulfillment',
+      subjectRef: 'runtime.mediaFulfillment',
+      count: mediaFulfillmentPostures.size,
+      limit: Math.max(1, Number(caps.mediaTracks || 4) || 4) * 4,
+      payloadClass: SWARM.MATERIALIZATION_PAYLOAD_CLASS.EVIDENCE,
+      copyRole: SWARM.MATERIALIZATION_COPY_ROLE.EVIDENCE,
+      privacyTier: SWARM.MATERIALIZATION_PRIVACY_TIER.SAFE_FACTS,
+      snapshotMode: 'media-evidence-posture',
+      deltaMode: 'media-evidence-delta',
+      coalescingKey: 'sessionId|activationId|evidenceKind',
+      retentionClass: 'ephemeral.runtime-media-evidence',
+      sampledAt,
+    }),
+    runtimeReadModelMaterializationBudget({
+      budgetId: 'runtime.stream.recovery',
+      subjectRef: 'runtime.streamRecovery',
+      count: streamRecoveryPostures.size,
+      limit: Math.max(1, Number(caps.liveStreams || 2) || 2) * 4,
+      payloadClass: SWARM.MATERIALIZATION_PAYLOAD_CLASS.EVIDENCE,
+      copyRole: SWARM.MATERIALIZATION_COPY_ROLE.BUFFER,
+      privacyTier: SWARM.MATERIALIZATION_PRIVACY_TIER.SAFE_FACTS,
+      snapshotMode: 'stream-recovery-posture',
+      deltaMode: 'stream-recovery-delta',
+      coalescingKey: 'sessionId|activationId',
+      retentionClass: 'ephemeral.runtime-stream-recovery',
+      sampledAt,
+    }),
+    runtimeReadModelMaterializationBudget({
+      budgetId: 'runtime.retained.catalog',
+      subjectRef: 'runtime.catalog',
+      count: Object.keys(managedState.applianceSnapshot?.owned || {}).length
+        + Object.keys(managedState.applianceSnapshot?.granted || {}).length
+        + Object.keys(managedState.applianceSnapshot?.discoverable || {}).length
+        + Object.keys(runtimeStatus.services || {}).length,
+      limit: Math.max(1, Number(caps.projections || 256) || 256),
+      payloadClass: SWARM.MATERIALIZATION_PAYLOAD_CLASS.PROJECTION,
+      copyRole: SWARM.MATERIALIZATION_COPY_ROLE.CACHE,
+      privacyTier: SWARM.MATERIALIZATION_PRIVACY_TIER.SAFE_PROJECTION,
+      snapshotMode: 'retained-catalog-read-model',
+      deltaMode: 'catalog-delta',
+      coalescingKey: 'serviceRef|applianceRef|catalogKey',
+      retentionClass: 'ephemeral.runtime-catalog',
+      sampledAt,
+    }),
+  ];
 }
 
 function runtimeProjectionStoreConsumerFloor(sampledAt = nowMs()) {
@@ -936,16 +1154,37 @@ function runtimeEventRingMaterializationBudget(sampledAt = nowMs()) {
 }
 
 function runtimeMaterializationSummary(sampledAt = nowMs()) {
+  const readModelBudgets = runtimeReadModelMaterializationBudgets(sampledAt);
   const budgets = [
     runtimeProjectionStoreMaterializationBudget(sampledAt),
     runtimeEventRingMaterializationBudget(sampledAt),
     diagnosticLoggingBacklogMaterializationBudget(sampledAt),
+    ...readModelBudgets,
     ...Array.from(endpoints.values())
       .map((endpoint) => endpoint?.runtimeSnapshotMaterializationBudget)
       .filter(Boolean),
   ];
   const state = materializationWorstState(budgets);
   const budgetSummaries = budgets.map((budget) => materializationBudgetSummary(budget)).filter(Boolean);
+  const countBy = (field) => budgetSummaries.reduce((out, budget) => {
+    const key = String(budget?.[field] || 'unknown').trim() || 'unknown';
+    out[key] = (out[key] || 0) + 1;
+    return out;
+  }, {});
+  const readModels = [];
+  for (const budget of budgetSummaries) {
+    if (!String(budget.budgetId || '').startsWith('runtime.')) continue;
+    readModels.push({
+      budgetId: budget.budgetId,
+      payloadClass: budget.payloadClass,
+      copyRole: budget.copyRole,
+      transferMode: budget.transferMode,
+      state: budget.state,
+      subjectRef: String(budget.consumerFloor?.materializationId || budget.budgetId || '').trim(),
+      count: Number(budget.limits?.count ?? budget.limits?.projectionCount ?? budget.limits?.eventCount ?? 0) || 0,
+      limit: Number(budget.limits?.limit ?? budget.limits?.maxProjectionCount ?? budget.limits?.ringLimit ?? 0) || 0,
+    });
+  }
   return {
     kind: 'runtime.materialization.summary',
     state,
@@ -956,6 +1195,11 @@ function runtimeMaterializationSummary(sampledAt = nowMs()) {
         .filter(Boolean)
         .join(', '),
     budgets: budgetSummaries,
+    readModels,
+    byPayloadClass: countBy('payloadClass'),
+    byCopyRole: countBy('copyRole'),
+    byTransferMode: countBy('transferMode'),
+    byState: countBy('state'),
     fanout: endpoints.size,
     projectionCount: retainedProjections.size,
     projectionPolicyCount: projectionPolicies.size,
