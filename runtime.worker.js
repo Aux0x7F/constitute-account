@@ -16,6 +16,7 @@ import {
   assertEventAdmissionEnvelope,
   assertEventFabricAccessClass,
   assertEventFabricProcessorContract,
+  assertSecurityProcessorSeed,
   assertConsumerFloor,
   assertMaterializationBudget,
   assertPrivateContentEnvelope,
@@ -2670,16 +2671,69 @@ function runtimeLoggingEventFabricProcessorContracts(accessClasses, issuedAt = n
   ];
 }
 
+function runtimeLoggingSecurityProcessorSeed(accessClasses, processorContracts, issuedAt = nowMs()) {
+  const accessClassRefs = accessClasses.map((entry) => entry.classId).filter(Boolean).sort();
+  const inputEventClasses = [...new Set(accessClasses.flatMap((entry) => entry.eventClasses || []))].sort();
+  const inputContentClasses = [...new Set(accessClasses.map((entry) => entry.contentClass).filter(Boolean))].sort();
+  const processorContractRefs = processorContracts
+    .filter((contract) => contract.processorRoleRef === 'role:security.processor')
+    .map((contract) => contract.processorContractId)
+    .filter(Boolean)
+    .sort();
+  const accessGroupRefs = ['access-group:runtime.logging.security.default'];
+  return assertSecurityProcessorSeed({
+    kind: SWARM.RECORD_KIND.SECURITY_PROCESSOR_SEED,
+    seedId: 'security-seed:runtime.logging.default',
+    fabricRef: 'event-fabric:runtime.logging.default',
+    processorRef: 'constitute-security',
+    processorRoleRef: 'role:security.processor',
+    state: 'ready',
+    threatAnalysisRole: 'eventFabricThreatAnalysis',
+    inputAccessClassRefs: accessClassRefs,
+    inputEventClasses,
+    inputContentClasses,
+    accessGroupRefs,
+    processorContractRefs,
+    evidenceProfileRefs: ['runtime.logging.security.default'],
+    materializationBudgetRefs: ['runtime.logging.security.evidence'],
+    storageRefs: ['runtime.safeDiagnostics'],
+    detailRefs: ['encrypted-detail:runtime.logging.default'],
+    alertOutputRefs: ['security:alerts:runtime.logging.default'],
+    evidenceHoldRefs: ['security:evidence-hold:runtime.logging.default'],
+    retentionHoldRefs: ['retention:security-hold:runtime.logging.default'],
+    encryptedDetailCustody: {
+      state: 'referenceOnly',
+      accessGroupRefs,
+      detailRefs: ['encrypted-detail:runtime.logging.default'],
+    },
+    semanticBoundaries: {
+      logging: 'mayConsumeMaterializations',
+      storage: 'ciphertextFulfillmentOnly',
+      eventDomain: 'doesNotOwn',
+    },
+    safeFacts: {
+      purpose: 'runtimeSecurityThreatAnalysis',
+      detailCustody: 'encryptedDetailRef',
+      alerting: 'seeded',
+    },
+    evidenceRefs: ['runtime.safeDiagnostics'],
+    issuedAt,
+    expiresAt: issuedAt + 90 * 24 * 60 * 60 * 1000,
+  });
+}
+
 function runtimeLoggingEventFabricPosture(issuedAt = nowMs()) {
   const accessGroup = runtimeLoggingSecurityAccessGroup(issuedAt);
   const accessEpoch = runtimeLoggingSecurityAccessEpoch(issuedAt);
   const accessClasses = runtimeLoggingEventFabricAccessClasses(issuedAt);
   const processorContracts = runtimeLoggingEventFabricProcessorContracts(accessClasses, issuedAt);
+  const securityProcessorSeeds = [runtimeLoggingSecurityProcessorSeed(accessClasses, processorContracts, issuedAt)];
   return {
     accessGroups: [accessGroup],
     accessEpochs: [accessEpoch],
     accessClasses,
     processorContracts,
+    securityProcessorSeeds,
     contentClasses: accessGroup.contentClasses,
     processorRoles: ['role:logging.processor', 'role:security.processor'],
     currentEpochId: accessGroup.currentEpochId,
@@ -2790,6 +2844,7 @@ function synthesizeRuntimeLoggingProjection(policy) {
       eventFabricAccessGroups: Array.isArray(eventFabric.accessGroups) ? eventFabric.accessGroups.length : 0,
       eventFabricAccessClasses: Array.isArray(eventFabric.accessClasses) ? eventFabric.accessClasses.length : 0,
       eventFabricProcessorContracts: Array.isArray(eventFabric.processorContracts) ? eventFabric.processorContracts.length : 0,
+      securityProcessorSeeds: Array.isArray(eventFabric.securityProcessorSeeds) ? eventFabric.securityProcessorSeeds.length : 0,
     },
     encryptedDetailRefs: [],
     diagnostics: [],
@@ -3468,6 +3523,8 @@ function validateAuthorityReductionRecord(record) {
       return assertEventFabricAccessClass(record);
     case SWARM.RECORD_KIND.EVENT_FABRIC_PROCESSOR_CONTRACT:
       return assertEventFabricProcessorContract(record);
+    case SWARM.RECORD_KIND.SECURITY_PROCESSOR_SEED:
+      return assertSecurityProcessorSeed(record);
     default:
       throw new Error(`unsupported authority record kind: ${kind || 'missing'}`);
   }
