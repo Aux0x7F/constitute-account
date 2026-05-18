@@ -291,6 +291,20 @@ test('runtime worker persists retained projections under service identity keys',
   assert.match(workerSource, /if \(channelId && !out\[channelId\]\) out\[channelId\] = cloned/);
 });
 
+test('runtime retained logging dashboard declares security event fabric posture', () => {
+  assert.match(workerSource, /assertAccessGroup/);
+  assert.match(workerSource, /assertAccessEpoch/);
+  assert.match(workerSource, /assertEventFabricAccessClass/);
+  assert.match(workerSource, /function runtimeLoggingEventFabricPosture\(/);
+  assert.match(workerSource, /accessGroups: \[accessGroup\]/);
+  assert.match(workerSource, /accessEpochs: \[accessEpoch\]/);
+  assert.match(workerSource, /accessClasses,/);
+  assert.match(workerSource, /eventFabricAccessGroups: Array\.isArray\(eventFabric\.accessGroups\) \? eventFabric\.accessGroups\.length : 0/);
+  assert.match(workerSource, /eventFabricAccessClasses: Array\.isArray\(eventFabric\.accessClasses\) \? eventFabric\.accessClasses\.length : 0/);
+  assert.match(workerSource, /processorRoles: \['role:logging\.processor', 'role:security\.processor'\]/);
+  assert.match(workerSource, /contentClasses: \['encryptedDetail', 'diagnosticDetail'\]/);
+});
+
 test('runtime worker owns projection policy sync instead of UI request assembly', () => {
   assert.match(workerSource, /const PROJECTION_POLICY_PUT = 'projection\.policy\.put'/);
   assert.match(workerSource, /const projectionPolicies = new Map\(\)/);

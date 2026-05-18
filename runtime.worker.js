@@ -5,7 +5,10 @@ import {
   STREAM_SESSION_LIFECYCLE_PHASE,
   applyProjectionDelta,
   assertProjectionDelta,
+  assertAccessGroup,
+  assertAccessEpoch,
   assertEventAdmissionEnvelope,
+  assertEventFabricAccessClass,
   assertConsumerFloor,
   assertMaterializationBudget,
   assertProjectionPolicy,
@@ -2396,6 +2399,123 @@ function runtimeLoggingSeverityCounts(logEvents) {
   return counts;
 }
 
+function runtimeLoggingSecurityAccessGroup(issuedAt = nowMs()) {
+  const serviceRef = `service:logging:${RUNTIME_LOGGING_PROJECTION_SERVICE_PK}`;
+  return assertAccessGroup({
+    kind: SWARM.RECORD_KIND.ACCESS_GROUP,
+    groupId: 'access-group:runtime.logging.security.default',
+    ownerRef: serviceRef,
+    subjectRef: 'logging.events.encryptedDetail',
+    contentClasses: ['encryptedDetail', 'diagnosticDetail'],
+    memberRefs: [serviceRef, 'constitute-security'],
+    adminRefs: [serviceRef],
+    currentEpochId: 'access-epoch:runtime.logging.security.default:1',
+    partitionRefs: ['partition:event-fabric:runtime-logging-security'],
+    policyRefs: ['policy:runtime.logging.security.default'],
+    safeFacts: {
+      purpose: 'securityReplay',
+      retentionWindow: '90d',
+      source: 'runtime.safeDiagnostics',
+      readability: 'futureEpochsOnly',
+    },
+    issuedAt,
+  });
+}
+
+function runtimeLoggingSecurityAccessEpoch(issuedAt = nowMs()) {
+  const serviceRef = `service:logging:${RUNTIME_LOGGING_PROJECTION_SERVICE_PK}`;
+  return assertAccessEpoch({
+    kind: SWARM.RECORD_KIND.ACCESS_EPOCH,
+    epochId: 'access-epoch:runtime.logging.security.default:1',
+    groupId: 'access-group:runtime.logging.security.default',
+    sequence: 1,
+    changeKind: 'create',
+    memberRefs: [serviceRef, 'constitute-security'],
+    addedMemberRefs: ['constitute-security'],
+    removedMemberRefs: [],
+    partitionRefs: ['partition:event-fabric:runtime-logging-security'],
+    keyRef: 'key-ref:runtime.logging.security.default:epoch:1',
+    proofRefs: ['profile:runtime.logging.security.default'],
+    safeFacts: {
+      purpose: 'securityReplay',
+      contentClasses: ['encryptedDetail', 'diagnosticDetail'],
+      source: 'runtime.safeDiagnostics',
+    },
+    issuedAt,
+    expiresAt: issuedAt + 90 * 24 * 60 * 60 * 1000,
+  });
+}
+
+function runtimeLoggingEventFabricAccessClasses(issuedAt = nowMs()) {
+  const groupRef = 'access-group:runtime.logging.security.default';
+  return [
+    assertEventFabricAccessClass({
+      kind: SWARM.RECORD_KIND.EVENT_FABRIC_ACCESS_CLASS,
+      classId: 'event-class:runtime.logging.security.encrypted-detail',
+      contentClass: 'encryptedDetail',
+      privacyTier: 'domainEncrypted',
+      eventClasses: [
+        'security.audit',
+        'runtime.diagnostic',
+        'service.event',
+        'storage.access',
+        'media.path',
+      ],
+      accessGroupRefs: [groupRef],
+      processorRoleRefs: ['role:logging.processor', 'role:security.processor'],
+      storageClass: 'runtime.safeDiagnostics',
+      retentionClass: 'rolling.security-evidence',
+      safeFactPolicy: 'indexOnly',
+      indexPolicy: {
+        bitemporal: true,
+        safeKeys: ['kind', 'level', 'channelId', 'service', 'surface'],
+        highCardinalityOverflow: 'encryptedDetailRef',
+      },
+      safeFacts: {
+        processorAgreement: 'runtime-logging-security-replay',
+        detailCustody: 'encryptedDetailRef',
+      },
+      issuedAt,
+    }),
+    assertEventFabricAccessClass({
+      kind: SWARM.RECORD_KIND.EVENT_FABRIC_ACCESS_CLASS,
+      classId: 'event-class:runtime.logging.security.diagnostic-detail',
+      contentClass: 'diagnosticDetail',
+      privacyTier: 'domainEncrypted',
+      eventClasses: ['runtime.diagnostic'],
+      accessGroupRefs: [groupRef],
+      processorRoleRefs: ['role:logging.processor', 'role:security.processor'],
+      storageClass: 'runtime.safeDiagnostics',
+      retentionClass: 'rolling.diagnostic-detail',
+      safeFactPolicy: 'minimal',
+      indexPolicy: {
+        bitemporal: true,
+        safeKeys: ['kind', 'level', 'channelId'],
+        highCardinalityOverflow: 'encryptedDetailRef',
+      },
+      safeFacts: {
+        processorAgreement: 'runtime-diagnostic-replay',
+        detailCustody: 'encryptedDetailRef',
+      },
+      issuedAt,
+    }),
+  ];
+}
+
+function runtimeLoggingEventFabricPosture(issuedAt = nowMs()) {
+  const accessGroup = runtimeLoggingSecurityAccessGroup(issuedAt);
+  const accessEpoch = runtimeLoggingSecurityAccessEpoch(issuedAt);
+  const accessClasses = runtimeLoggingEventFabricAccessClasses(issuedAt);
+  return {
+    accessGroups: [accessGroup],
+    accessEpochs: [accessEpoch],
+    accessClasses,
+    contentClasses: accessGroup.contentClasses,
+    processorRoles: ['role:logging.processor', 'role:security.processor'],
+    currentEpochId: accessGroup.currentEpochId,
+  };
+}
+
 function runtimeLoggingProjectionNodePath(policy, channelId) {
   const explicit = String(policy?.nodePath || '').trim();
   if (explicit) return explicit;
@@ -2450,6 +2570,7 @@ function runtimeLoggingProjectionPayload(policy) {
       criticalShortlist.push(event);
       if (criticalShortlist.length >= 8) break;
     }
+    const eventFabric = runtimeLoggingEventFabricPosture(nowMs());
     return {
       nodePath,
       coverage,
@@ -2459,6 +2580,7 @@ function runtimeLoggingProjectionPayload(policy) {
         status: diagnosticLoggingRouteReady() ? 'routed' : 'local-retained',
         archiveContainerId: '',
       },
+      eventFabric,
     };
   }
   return {
@@ -2475,6 +2597,8 @@ function synthesizeRuntimeLoggingProjection(policy) {
   if (service !== 'logging' || !RUNTIME_LOGGING_PROJECTION_CHANNELS.has(channelId)) return null;
   const nodePath = runtimeLoggingProjectionNodePath(policy, channelId);
   const observedAt = nowMs();
+  const payload = runtimeLoggingProjectionPayload(policy);
+  const eventFabric = payload?.eventFabric || {};
   return storeProjectionRecord({
     channelId,
     service: 'logging',
@@ -2493,10 +2617,12 @@ function synthesizeRuntimeLoggingProjection(policy) {
       source: 'runtime.safeDiagnostics',
       debugOnly: false,
       runtimeSessionId,
+      eventFabricAccessGroups: Array.isArray(eventFabric.accessGroups) ? eventFabric.accessGroups.length : 0,
+      eventFabricAccessClasses: Array.isArray(eventFabric.accessClasses) ? eventFabric.accessClasses.length : 0,
     },
     encryptedDetailRefs: [],
     diagnostics: [],
-    payload: runtimeLoggingProjectionPayload(policy),
+    payload,
   });
 }
 
