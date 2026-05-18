@@ -479,9 +479,8 @@ test('expired activations ignore late acks instead of re-opening route churn', a
   assert.equal(subscribed.ok, true);
   const queued = await send(runtime.port, {
     type: 'swarm.frame.queue',
-    payload: frameInput({ expiresAt: Date.now() + 50 }),
+    payload: frameInput({ expiresAt: Date.now() - 1 }),
   });
-  await new Promise((resolve) => setTimeout(resolve, 70));
 
   const ack = await send(runtime.port, { type: 'swarm.edge.ack', correlationId: queued.result.frameId });
   assert.equal(ack.ok, true);
