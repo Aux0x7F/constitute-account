@@ -2,8 +2,11 @@ import {
   SURFACE_APP,
   assertServiceManagerSecretBoundary,
   assertSurfaceAppBootstrapContract,
+  assertSurfaceAppInstancePosture,
   assertSurfaceAppManifest,
+  assertSurfaceAppRuntimeSelectionPosture,
   assertSurfaceAppContract,
+  assertSurfaceAppRunnerPlan,
 } from "../constitute-protocol/src/index.js";
 import {
   defineSurfaceAppContract,
@@ -183,14 +186,14 @@ export const accountSurfaceAppManifest = assertSurfaceAppManifest({
   issuedAt: ISSUED_AT,
 });
 
-export const accountSurfaceRuntimeSelectionPosture = surfaceAppRuntimeSelectionPosture(
+export const accountSurfaceRuntimeSelectionPosture = assertSurfaceAppRuntimeSelectionPosture(surfaceAppRuntimeSelectionPosture(
   accountSurfaceAppManifest,
   [accountSurfaceApp],
   {
     runtimeVersion: "0.1.0",
     issuedAt: ISSUED_AT,
   },
-);
+));
 
 export const accountSurfaceModuleRegistry = createSurfaceModuleRegistry([
   {
@@ -231,9 +234,9 @@ export const accountSurfaceModules = surfaceAppModuleImplementations(
   accountSurfaceRuntimeSelectionPosture,
 );
 
-export const accountSurfaceRunnerPlan = surfaceAppRunnerPlan(accountSurfaceApp, {
+export const accountSurfaceRunnerPlan = assertSurfaceAppRunnerPlan(surfaceAppRunnerPlan(accountSurfaceApp, {
   issuedAt: ISSUED_AT,
-});
+}));
 
 export const accountServiceManagerSecretBoundary = assertServiceManagerSecretBoundary(
   accountSurfaceRunnerPlan.secretBoundary,
@@ -259,7 +262,7 @@ export const accountServiceManagerProofDigest = surfaceServiceManagerProofDigest
   observedAt: ISSUED_AT,
 });
 
-export const accountSurfaceAppInstancePosture = surfaceAppInstancePosture(accountSurfaceApp, {
+export const accountSurfaceAppInstancePosture = assertSurfaceAppInstancePosture(surfaceAppInstancePosture(accountSurfaceApp, {
   runtimeSelectionPosture: accountSurfaceRuntimeSelectionPosture,
   moduleBindings: accountSurfaceModules,
   runnerPlan: accountSurfaceRunnerPlan,
@@ -268,7 +271,7 @@ export const accountSurfaceAppInstancePosture = surfaceAppInstancePosture(accoun
   serviceManagerOperationPosture: accountServiceManagerOperationPosture,
   serviceManagerProofDigest: accountServiceManagerProofDigest,
   issuedAt: ISSUED_AT,
-});
+}));
 
 export const accountRuntimeClientModule = accountSurfaceModuleRegistry.require(
   accountSurfaceRuntimeSelectionPosture,
