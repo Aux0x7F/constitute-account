@@ -2,12 +2,14 @@ import {
   SURFACE_APP,
   assertServiceManagerSecretBoundary,
   assertSurfaceAppBootstrapContract,
+  assertSurfaceAppManifest,
   assertSurfaceAppContract,
 } from "../constitute-protocol/src/index.js";
 import {
   defineSurfaceAppContract,
   surfaceAppRunnerPlan,
   surfaceAppBootstrapPosture,
+  surfaceAppRuntimeSelectionPosture,
   surfaceServiceManagerOperationPosture,
   surfaceServiceManagerProofDigest,
 } from "../constitute-ui/src/surface-app-contract.js";
@@ -121,6 +123,74 @@ export const accountSurfaceApp = defineSurfaceAppContract(accountSurfaceAppContr
   validate: assertSurfaceAppContract,
 });
 
+export const accountSurfaceAppManifest = assertSurfaceAppManifest({
+  kind: "surface.app.manifest",
+  manifestId: "manifest:account-ui",
+  appId: "constitute-account",
+  state: SURFACE_APP.MANIFEST_VERSION_STATE.CURRENT,
+  currentAppContractRef: "app:account-ui",
+  currentVersion: "0.1.0",
+  defaultSourceMode: SURFACE_APP.FULFILLMENT_MODE.BUNDLED,
+  requiredModuleRoles: [
+    SURFACE_APP.MODULE_ROLE.RUNTIME_CLIENT,
+    SURFACE_APP.MODULE_ROLE.PROJECTION_MODEL,
+    SURFACE_APP.MODULE_ROLE.PLATFORM_ADAPTER,
+    SURFACE_APP.MODULE_ROLE.PRODUCT_VIEW,
+  ],
+  bundledSourceRefs: ["bundle:account-ui@0.1.0"],
+  compatibilityWindow: {
+    minVersion: "0.1.0",
+    maxVersion: "0.1.x",
+    protocolRef: "protocol:surface-app:v1",
+  },
+  versions: [
+    {
+      appContractRef: "app:account-ui",
+      version: "0.1.0",
+      state: SURFACE_APP.MANIFEST_VERSION_STATE.CURRENT,
+      sourceMode: SURFACE_APP.FULFILLMENT_MODE.BUNDLED,
+      requiredModuleRoles: [
+        SURFACE_APP.MODULE_ROLE.RUNTIME_CLIENT,
+        SURFACE_APP.MODULE_ROLE.PROJECTION_MODEL,
+        SURFACE_APP.MODULE_ROLE.PLATFORM_ADAPTER,
+        SURFACE_APP.MODULE_ROLE.PRODUCT_VIEW,
+      ],
+      compatibilityWindow: {
+        minVersion: "0.1.0",
+        maxVersion: "0.1.x",
+        protocolRef: "protocol:surface-app:v1",
+      },
+      bundledSourceRefs: ["bundle:account-ui@0.1.0"],
+      grantRefs: ["grant:app:account-ui:run"],
+      runnerRequirementRefs: ["runner:req:account-ui"],
+      serviceManagerRequirementRefs: ["service-manager:req:account-ui"],
+      compatibilityRefs: ["protocol:surface-app:v1"],
+      bootstrapContractRef: "bootstrap-contract:app:account-ui",
+      releaseContractRef: "release:account-ui:local",
+      issuedAt: ISSUED_AT,
+    },
+  ],
+  appContractRefs: ["app:account-ui"],
+  grantRefs: ["grant:app:account-ui:run"],
+  runnerRequirementRefs: ["runner:req:account-ui"],
+  serviceManagerRequirementRefs: ["service-manager:req:account-ui"],
+  compatibilityRefs: ["protocol:surface-app:v1"],
+  bootstrapContractRefs: ["bootstrap-contract:app:account-ui"],
+  releaseContractRefs: ["release:account-ui:local"],
+  authorityRefs: ["authority:account-ui:local"],
+  evidenceRefs: ["build:account-ui:local"],
+  issuedAt: ISSUED_AT,
+});
+
+export const accountSurfaceRuntimeSelectionPosture = surfaceAppRuntimeSelectionPosture(
+  accountSurfaceAppManifest,
+  [accountSurfaceApp],
+  {
+    runtimeVersion: "0.1.0",
+    issuedAt: ISSUED_AT,
+  },
+);
+
 export const accountSurfaceModuleRegistry = createSurfaceModuleRegistry([
   {
     moduleRef: "constitute-ui/runtime-surface-client@0.1.0",
@@ -205,6 +275,7 @@ export const accountPlatformAdapterModule = accountSurfaceModuleRegistry.require
 
 export const accountSurfaceAttachContext = accountSurfaceApp.attachContext({
   productSurface: "constitute-account",
+  runtimeSelectionPosture: accountSurfaceRuntimeSelectionPosture,
   runnerPlan: accountSurfaceRunnerPlan,
   bootstrapContract: accountSurfaceBootstrapContract,
   serviceManagerSecretBoundary: accountServiceManagerSecretBoundary,

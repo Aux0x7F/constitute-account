@@ -2387,6 +2387,34 @@ test('live swarm edge attach requires resolved member refs and reuses duplicate 
   assert.equal(closedEvent?.safeFacts?.closeCode, 1006);
 });
 
+test('live swarm edge attach waits for runtime authority when member ref is runtime-owned', async () => {
+  const runtime = loadRuntime(new Map(), { noDevice: true });
+  await attach(runtime.port);
+  const zoneScope = { zoneId: 'zone_lab', privacy: 'rawIds', ttl: 30, maxHops: 2 };
+
+  const blocked = await send(runtime.port, {
+    type: 'swarm.edge.attach',
+    payload: {
+      swarmEdgeEndpoint: 'ws://127.0.0.1:7447/',
+      zoneScope,
+    },
+  });
+
+  assert.equal(blocked.ok, false);
+  assert.match(blocked.error, /missingRuntimeAuthorityMemberRef/);
+  assert.equal(blocked.state, 'waitingAuthority');
+  assert.equal(blocked.blockedReason, 'missingRuntimeAuthorityMemberRef');
+  assert.equal(runtime.webSockets.length, 0);
+
+  const snapshot = await send(runtime.port, { type: 'runtime.snapshot.get' });
+  assert.equal(snapshot.result.edge.mode, 'pendingAuthority');
+  assert.equal(snapshot.result.edge.connected, false);
+  const blockedEvent = snapshot.result.runtimeEvents.find((entry) => entry.kind === 'adapter.edge.attach.blocked');
+  assert.equal(blockedEvent?.safeFacts?.blockedReason, 'missingRuntimeAuthorityMemberRef');
+  assert.equal(blockedEvent?.safeFacts?.retryable, true);
+  assert.equal(blockedEvent?.level, 'info');
+});
+
 test('live swarm edge attach is not gated by runtime hydration', () => {
   const source = readFileSync(workerPath, 'utf8');
   assert.doesNotMatch(
