@@ -1952,6 +1952,13 @@ function retentionReleaseEvaluation(input = {}) {
   const pins = normalizeArray(source.pins).filter((pin) => normalizeObject(pin).active !== false);
   const fulfillments = normalizeArray(source.fulfillments);
   const overlays = normalizeArray(source.overlays).filter((overlay) => normalizeObject(overlay).active !== false);
+  const validUntil = Number(source.validUntil || policy.validUntil || 0) || undefined;
+  const releaseAfter = Number(source.releaseAfter || policy.releaseAfter || 0) || undefined;
+  const requireWitness = source.requireWitness === true || policy.requireWitness === true;
+  const witnessRefs = uniqueTrimmedStrings([source.witnessRef, ...(Array.isArray(source.witnessRefs) ? source.witnessRefs : [])]);
+  const supersessionRefs = uniqueTrimmedStrings([source.supersessionRef, ...(Array.isArray(source.supersessionRefs) ? source.supersessionRefs : [])]);
+  const retractionRefs = uniqueTrimmedStrings([source.retractionRef, ...(Array.isArray(source.retractionRefs) ? source.retractionRefs : [])]);
+  const revocationRefs = uniqueTrimmedStrings([source.revocationRef, ...(Array.isArray(source.revocationRefs) ? source.revocationRefs : [])]);
   let effectiveClass = normalizeRetentionClass(policy.class || policy.retentionClass, 'durable');
   for (const overlay of overlays) {
     const overlayClass = normalizeRetentionClass(overlay.class || overlay.retentionClass, '');
@@ -1968,6 +1975,11 @@ function retentionReleaseEvaluation(input = {}) {
   });
   const liveRoot = source.liveRoot === true || residency.liveRoot === true;
   const blockers = [];
+  if (validUntil && validUntil > nowMs() && supersessionRefs.length === 0 && retractionRefs.length === 0 && revocationRefs.length === 0) {
+    blockers.push('validity.active');
+  }
+  if (releaseAfter && releaseAfter > nowMs()) blockers.push('releaseAfter.pending');
+  if (requireWitness && witnessRefs.length === 0) blockers.push('witness.missing');
   if (pins.length > 0) blockers.push('activePin');
   if (!disposable && !fulfilled) blockers.push('fulfillment.missing');
   if (liveRoot) blockers.push('liveRoot');
@@ -1995,17 +2007,40 @@ function retentionReleaseEvaluation(input = {}) {
     ...(Array.isArray(source.residencyLayers) ? source.residencyLayers : []),
     'browserHotCache',
   ]);
+  const policyRefs = uniqueTrimmedStrings([
+    source.policyRef,
+    policy.policyRef,
+    policy.policyId ? `policy:${policy.policyId}` : '',
+    `policy:runtime.retention.${effectiveClass}`,
+    ...(Array.isArray(source.policyRefs) ? source.policyRefs : []),
+  ]);
+  const overlayRefs = uniqueTrimmedStrings([
+    ...overlays.map((overlay) => {
+      const record = normalizeObject(overlay);
+      return record.overlayRef || record.overlayId || '';
+    }),
+    ...(Array.isArray(source.overlayRefs) ? source.overlayRefs : []),
+    overlays.length ? '' : 'overlay:none',
+  ]);
   const releasePosture = assertRetentionReleasePosture({
     kind: SWARM.RECORD_KIND.RETENTION_RELEASE,
     evaluationId: String(source.evaluationId || `retention-release:${runtimeSessionId}:${evaluatedAt}`).trim(),
     subjectRef: String(source.subjectRef || source.subject || 'unknown').trim() || 'unknown',
     effectiveRetention: effectiveClass,
     state: freeable ? SWARM.RETENTION_RELEASE_STATE.FREEABLE : SWARM.RETENTION_RELEASE_STATE.RELEASE_BLOCKED,
+    policyRefs,
+    overlayRefs,
     ownerRefs,
     holderRefs,
     fulfillmentRefs,
     residencyLayers,
+    witnessRefs,
+    supersessionRefs,
+    retractionRefs,
+    revocationRefs,
     blockers: blockers.map((code) => ({ code })),
+    validUntil,
+    releaseAfter,
     evaluatedAt,
   });
   return {

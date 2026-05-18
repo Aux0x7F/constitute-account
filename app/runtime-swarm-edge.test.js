@@ -2662,6 +2662,22 @@ test('retention release posture blocks unfulfilled durable data and recomputes p
   assert.equal(unfulfilled.result.releasePosture.kind, protocol.SWARM.RECORD_KIND.RETENTION_RELEASE);
   assert.equal(unfulfilled.result.releasePosture.state, protocol.SWARM.RETENTION_RELEASE_STATE.RELEASE_BLOCKED);
   assert.equal(unfulfilled.result.releasePosture.subjectRef, 'projection:logging.events');
+  assert.equal(unfulfilled.result.releasePosture.policyRefs.includes('policy:runtime.retention.durable'), true);
+  assert.equal(unfulfilled.result.releasePosture.overlayRefs.includes('overlay:none'), true);
+
+  const witnessBlocked = await send(runtime.port, {
+    type: 'runtime.retention.release.evaluate',
+    payload: {
+      subjectRef: 'projection:logging.events',
+      policy: { class: 'durable', requireWitness: true, releaseAfter: Date.now() + 10_000 },
+      fulfillments: [{ state: 'fulfilled', holder: 'storage:local' }],
+      validUntil: Date.now() + 10_000,
+    },
+  });
+  assert.equal(witnessBlocked.result.state, 'releaseBlocked');
+  assert.ok(witnessBlocked.result.blockers.includes('validity.active'));
+  assert.ok(witnessBlocked.result.blockers.includes('releaseAfter.pending'));
+  assert.ok(witnessBlocked.result.blockers.includes('witness.missing'));
 
   const disposable = await send(runtime.port, {
     type: 'runtime.retention.release.evaluate',
@@ -2681,10 +2697,12 @@ test('retention release posture blocks unfulfilled durable data and recomputes p
       subjectRef: 'projection:logging.events',
       policy: { class: 'durable' },
       fulfillments: [{ state: 'fulfilled', holder: 'storage:local' }],
+      witnessRefs: ['witness:runtime:release'],
     },
   });
   assert.equal(fulfilled.result.state, 'freeable');
   assert.equal(fulfilled.result.releasePosture.state, protocol.SWARM.RETENTION_RELEASE_STATE.FREEABLE);
+  assert.equal(fulfilled.result.releasePosture.witnessRefs[0], 'witness:runtime:release');
 
   const pinned = await send(runtime.port, {
     type: 'runtime.retention.release.evaluate',
