@@ -7,9 +7,10 @@ import {
 } from "../constitute-protocol/src/index.js";
 import {
   defineSurfaceAppContract,
-  surfaceAppRunnerPlan,
   surfaceAppBootstrapPosture,
+  surfaceAppInstancePosture,
   surfaceAppRuntimeSelectionPosture,
+  surfaceAppRunnerPlan,
   surfaceServiceManagerOperationPosture,
   surfaceServiceManagerProofDigest,
 } from "../constitute-ui/src/surface-app-contract.js";
@@ -258,6 +259,17 @@ export const accountServiceManagerProofDigest = surfaceServiceManagerProofDigest
   observedAt: ISSUED_AT,
 });
 
+export const accountSurfaceAppInstancePosture = surfaceAppInstancePosture(accountSurfaceApp, {
+  runtimeSelectionPosture: accountSurfaceRuntimeSelectionPosture,
+  moduleBindings: accountSurfaceModules,
+  runnerPlan: accountSurfaceRunnerPlan,
+  bootstrapContract: accountSurfaceBootstrapContract,
+  bootstrapPosture: accountSurfaceBootstrapPosture,
+  serviceManagerOperationPosture: accountServiceManagerOperationPosture,
+  serviceManagerProofDigest: accountServiceManagerProofDigest,
+  issuedAt: ISSUED_AT,
+});
+
 export const accountRuntimeClientModule = accountSurfaceModuleRegistry.require(
   accountSurfaceRuntimeSelectionPosture,
   SURFACE_APP.MODULE_ROLE.RUNTIME_CLIENT,
@@ -277,6 +289,7 @@ export const accountSurfaceAttachContext = accountSurfaceApp.attachContext({
   productSurface: "constitute-account",
   runtimeSelectionPosture: accountSurfaceRuntimeSelectionPosture,
   runnerPlan: accountSurfaceRunnerPlan,
+  appInstancePosture: accountSurfaceAppInstancePosture,
   bootstrapContract: accountSurfaceBootstrapContract,
   serviceManagerSecretBoundary: accountServiceManagerSecretBoundary,
   bootstrapPosture: accountSurfaceBootstrapPosture,

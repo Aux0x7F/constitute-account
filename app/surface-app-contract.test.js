@@ -6,6 +6,7 @@ import {
   accountServiceManagerProofDigest,
   accountServiceManagerSecretBoundary,
   accountSurfaceApp,
+  accountSurfaceAppInstancePosture,
   accountSurfaceAttachContext,
   accountSurfaceAppManifest,
   accountSurfaceBootstrapContract,
@@ -27,6 +28,9 @@ test("account ui declares its surface app modules before runtime attach", () => 
   assert.equal(typeof accountRuntimeClientModule.createRuntimeSurfaceClient, "function");
   assert.equal(accountSurfaceAttachContext.kind, "surface.app.attachContext");
   assert.equal(accountSurfaceAttachContext.appId, "constitute-account");
+  assert.equal(accountSurfaceAppInstancePosture.kind, "surface.app.instance.posture");
+  assert.equal(accountSurfaceAppInstancePosture.state, "ready");
+  assert.equal(accountSurfaceAppInstancePosture.appId, "constitute-account");
   assert.equal(accountSurfaceAppManifest.kind, "surface.app.manifest");
   assert.equal(accountSurfaceRuntimeSelectionPosture.kind, "surface.app.runtime.selection.posture");
   assert.equal(accountSurfaceRuntimeSelectionPosture.state, "ready");
@@ -43,6 +47,7 @@ test("account ui declares its surface app modules before runtime attach", () => 
   assert.equal(accountServiceManagerOperationPosture.state, "requested");
   assert.equal(accountServiceManagerProofDigest.kind, "service.manager.proof.digest");
   assert.equal(accountSurfaceAttachContext.runnerPlan, accountSurfaceRunnerPlan);
+  assert.equal(accountSurfaceAttachContext.appInstancePosture, accountSurfaceAppInstancePosture);
   assert.equal(accountSurfaceAttachContext.runtimeSelectionPosture, accountSurfaceRuntimeSelectionPosture);
   assert.equal(accountSurfaceAttachContext.bootstrapContract, accountSurfaceBootstrapContract);
   assert.equal(accountSurfaceAttachContext.serviceManagerOperationPosture, accountServiceManagerOperationPosture);
