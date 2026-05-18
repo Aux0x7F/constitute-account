@@ -35,6 +35,16 @@ test("shell state derives online service posture from edge and retained projecti
       cleanupAllowed: false,
       cleanupReason: "retention posture must allow release before sweeping",
     },
+    materialization: {
+      state: "withinBudget",
+      budgets: [
+        { budgetId: "runtime.projections.retained" },
+        { budgetId: "runtime.events.ring" },
+      ],
+      fanout: 1,
+      projectionCount: 1,
+      runtimeEventCount: 4,
+    },
     retention: {
       state: "releaseRequired",
       reason: "local release requires explicit retention release posture",
@@ -60,6 +70,9 @@ test("shell state derives online service posture from edge and retained projecti
   assert.equal(state.projections.materialized, true);
   assert.equal(state.resource.state, "withinBudget");
   assert.equal(state.resource.cleanupAllowed, false);
+  assert.equal(state.materialization.state, "withinBudget");
+  assert.equal(state.materialization.budgetCount, 2);
+  assert.equal(state.materialization.runtimeEventCount, 4);
   assert.equal(state.retention.state, "releaseRequired");
   assert.equal(state.retention.releaseRequired, true);
 });

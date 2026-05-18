@@ -654,6 +654,11 @@ test('runtime attach declares snapshot materialization budget per surface', asyn
     entry.budgetId === attached.materializationBudget.budgetId
       && entry.clientId === 'surface-materialization-test'
   )), true);
+  assert.equal(snapshot.result.materialization.kind, 'runtime.materialization.summary');
+  assert.equal(snapshot.result.materialization.state, 'withinBudget');
+  assert.equal(snapshot.result.materialization.budgets.some((entry) => entry.budgetId === 'runtime.projections.retained'), true);
+  assert.equal(snapshot.result.materialization.budgets.some((entry) => entry.budgetId === 'runtime.events.ring'), true);
+  assert.equal(snapshot.result.productShellState.materialization.state, 'withinBudget');
   assert.equal(snapshot.result.resource.kind, 'runtime.resource.postureSummary');
   assert.equal(snapshot.result.resource.cleanupAllowed, false);
   assert.equal(snapshot.result.retention.kind, 'runtime.retention.postureSummary');
