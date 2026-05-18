@@ -1,20 +1,15 @@
 import {
   SURFACE_APP,
-  assertServiceManagerSecretBoundary,
-  assertSurfaceAppBootstrapContract,
+  assertSurfaceAppManifest,
   assertSurfaceAppContract,
 } from "../constitute-protocol/src/index.js";
 import {
   defineSurfaceAppContract,
-  surfaceAppRunnerPlan,
-  surfaceAppBootstrapPosture,
-  surfaceServiceManagerOperationPosture,
-  surfaceServiceManagerProofDigest,
 } from "../constitute-ui/src/surface-app-contract.js";
+import { surfaceAppSelectionReadModel } from "../constitute-ui/src/surface-selection-read-model.js";
 import { createRuntimeSurfaceClient } from "../constitute-ui/src/runtime-surface-client.js";
 import {
   createSurfaceModuleRegistry,
-  surfaceAppModuleImplementations,
 } from "../constitute-ui/src/surface-module-registry.js";
 import {
   browserStorageShellContext,
@@ -121,6 +116,65 @@ export const accountSurfaceApp = defineSurfaceAppContract(accountSurfaceAppContr
   validate: assertSurfaceAppContract,
 });
 
+export const accountSurfaceAppManifest = assertSurfaceAppManifest({
+  kind: "surface.app.manifest",
+  manifestId: "manifest:account-ui",
+  appId: "constitute-account",
+  state: SURFACE_APP.MANIFEST_VERSION_STATE.CURRENT,
+  currentAppContractRef: "app:account-ui",
+  currentVersion: "0.1.0",
+  defaultSourceMode: SURFACE_APP.FULFILLMENT_MODE.BUNDLED,
+  requiredModuleRoles: [
+    SURFACE_APP.MODULE_ROLE.RUNTIME_CLIENT,
+    SURFACE_APP.MODULE_ROLE.PROJECTION_MODEL,
+    SURFACE_APP.MODULE_ROLE.PLATFORM_ADAPTER,
+    SURFACE_APP.MODULE_ROLE.PRODUCT_VIEW,
+  ],
+  bundledSourceRefs: ["bundle:account-ui@0.1.0"],
+  compatibilityWindow: {
+    minVersion: "0.1.0",
+    maxVersion: "0.1.x",
+    protocolRef: "protocol:surface-app:v1",
+  },
+  versions: [
+    {
+      appContractRef: "app:account-ui",
+      version: "0.1.0",
+      state: SURFACE_APP.MANIFEST_VERSION_STATE.CURRENT,
+      sourceMode: SURFACE_APP.FULFILLMENT_MODE.BUNDLED,
+      requiredModuleRoles: [
+        SURFACE_APP.MODULE_ROLE.RUNTIME_CLIENT,
+        SURFACE_APP.MODULE_ROLE.PROJECTION_MODEL,
+        SURFACE_APP.MODULE_ROLE.PLATFORM_ADAPTER,
+        SURFACE_APP.MODULE_ROLE.PRODUCT_VIEW,
+      ],
+      compatibilityWindow: {
+        minVersion: "0.1.0",
+        maxVersion: "0.1.x",
+        protocolRef: "protocol:surface-app:v1",
+      },
+      bundledSourceRefs: ["bundle:account-ui@0.1.0"],
+      grantRefs: ["grant:app:account-ui:run"],
+      runnerRequirementRefs: ["runner:req:account-ui"],
+      serviceManagerRequirementRefs: ["service-manager:req:account-ui"],
+      compatibilityRefs: ["protocol:surface-app:v1"],
+      bootstrapContractRef: "bootstrap-contract:app:account-ui",
+      releaseContractRef: "release:account-ui:local",
+      issuedAt: ISSUED_AT,
+    },
+  ],
+  appContractRefs: ["app:account-ui"],
+  grantRefs: ["grant:app:account-ui:run"],
+  runnerRequirementRefs: ["runner:req:account-ui"],
+  serviceManagerRequirementRefs: ["service-manager:req:account-ui"],
+  compatibilityRefs: ["protocol:surface-app:v1"],
+  bootstrapContractRefs: ["bootstrap-contract:app:account-ui"],
+  releaseContractRefs: ["release:account-ui:local"],
+  authorityRefs: ["authority:account-ui:local"],
+  evidenceRefs: ["build:account-ui:local"],
+  issuedAt: ISSUED_AT,
+});
+
 export const accountSurfaceModuleRegistry = createSurfaceModuleRegistry([
   {
     moduleRef: "constitute-ui/runtime-surface-client@0.1.0",
@@ -155,60 +209,48 @@ export const accountSurfaceModuleRegistry = createSurfaceModuleRegistry([
   },
 ]);
 
-export const accountSurfaceModules = surfaceAppModuleImplementations(
-  accountSurfaceModuleRegistry,
-  accountSurfaceApp,
-);
-
-export const accountSurfaceRunnerPlan = surfaceAppRunnerPlan(accountSurfaceApp, {
+export const accountSurfaceSelectionReadModel = surfaceAppSelectionReadModel({
+  surfaceApp: accountSurfaceApp,
+  manifest: accountSurfaceAppManifest,
+  moduleRegistry: accountSurfaceModuleRegistry,
+  moduleBindingMode: "implementations",
+  productSurface: "constitute-account",
+  runtimeVersion: "0.1.0",
   issuedAt: ISSUED_AT,
+  serviceManagerOperationOptions: {
+    operation: SURFACE_APP.SERVICE_MANAGER_OPERATION.HEALTH_CHECK,
+    operationId: "operation:account-ui:bootstrap-health",
+    requestedAt: ISSUED_AT,
+  },
+  serviceManagerProofDigestOptions: {
+    digestId: "proof-digest:account-ui:bootstrap",
+    observedAt: ISSUED_AT,
+  },
 });
 
-export const accountServiceManagerSecretBoundary = assertServiceManagerSecretBoundary(
-  accountSurfaceRunnerPlan.secretBoundary,
-);
-
-export const accountSurfaceBootstrapContract = assertSurfaceAppBootstrapContract(
-  accountSurfaceRunnerPlan.bootstrapContract,
-);
-
-export const accountSurfaceBootstrapPosture = surfaceAppBootstrapPosture(accountSurfaceApp, {
-  issuedAt: ISSUED_AT,
-});
-
-export const accountServiceManagerOperationPosture = surfaceServiceManagerOperationPosture(accountSurfaceApp, {
-  operation: SURFACE_APP.SERVICE_MANAGER_OPERATION.HEALTH_CHECK,
-  operationId: "operation:account-ui:bootstrap-health",
-  requestedAt: ISSUED_AT,
-});
-
-export const accountServiceManagerProofDigest = surfaceServiceManagerProofDigest(accountSurfaceApp, {
-  operationPosture: accountServiceManagerOperationPosture,
-  digestId: "proof-digest:account-ui:bootstrap",
-  observedAt: ISSUED_AT,
-});
+export const accountSurfaceRuntimeSelectionPosture = accountSurfaceSelectionReadModel.runtimeSelectionPosture;
+export const accountSurfaceModules = accountSurfaceSelectionReadModel.moduleBindings;
+export const accountSurfaceRunnerPlan = accountSurfaceSelectionReadModel.runnerPlan;
+export const accountServiceManagerSecretBoundary = accountSurfaceSelectionReadModel.serviceManagerSecretBoundary;
+export const accountSurfaceBootstrapContract = accountSurfaceSelectionReadModel.bootstrapContract;
+export const accountSurfaceBootstrapPosture = accountSurfaceSelectionReadModel.bootstrapPosture;
+export const accountServiceManagerOperationPosture = accountSurfaceSelectionReadModel.serviceManagerOperationPosture;
+export const accountServiceManagerProofDigest = accountSurfaceSelectionReadModel.serviceManagerProofDigest;
+export const accountSurfaceAppInstancePosture = accountSurfaceSelectionReadModel.appInstancePosture;
 
 export const accountRuntimeClientModule = accountSurfaceModuleRegistry.require(
-  accountSurfaceApp,
+  accountSurfaceRuntimeSelectionPosture,
   SURFACE_APP.MODULE_ROLE.RUNTIME_CLIENT,
 ).implementation;
 
 export const accountProjectionModelModule = accountSurfaceModuleRegistry.require(
-  accountSurfaceApp,
+  accountSurfaceRuntimeSelectionPosture,
   SURFACE_APP.MODULE_ROLE.PROJECTION_MODEL,
 ).implementation;
 
 export const accountPlatformAdapterModule = accountSurfaceModuleRegistry.require(
-  accountSurfaceApp,
+  accountSurfaceRuntimeSelectionPosture,
   SURFACE_APP.MODULE_ROLE.PLATFORM_ADAPTER,
 ).implementation;
 
-export const accountSurfaceAttachContext = accountSurfaceApp.attachContext({
-  productSurface: "constitute-account",
-  runnerPlan: accountSurfaceRunnerPlan,
-  bootstrapContract: accountSurfaceBootstrapContract,
-  serviceManagerSecretBoundary: accountServiceManagerSecretBoundary,
-  bootstrapPosture: accountSurfaceBootstrapPosture,
-  serviceManagerOperationPosture: accountServiceManagerOperationPosture,
-  serviceManagerProofDigest: accountServiceManagerProofDigest,
-});
+export const accountSurfaceAttachContext = accountSurfaceSelectionReadModel.attachContext;

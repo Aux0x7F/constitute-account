@@ -4803,6 +4803,16 @@ function resolvedRuntimeAuthorityMemberRef() {
   );
 }
 
+function isMissingImplicitEdgeMemberRef(source) {
+  return !String(source?.memberRef || '').trim();
+}
+
+function edgeAttachWaitingAuthorityMessage() {
+  const state = String(runtimeAuthorityPostureState?.state || 'waitingAuthority').trim() || 'waitingAuthority';
+  const reason = String(runtimeAuthorityPostureState?.reason || 'runtime authority memberRef is not ready').trim();
+  return `runtime authority ${state}: missingRuntimeAuthorityMemberRef${reason ? ` (${reason})` : ''}`;
+}
+
 function resolvedEdgeMemberRefFromMessage(source) {
   const memberRef = String(source?.memberRef || '').trim();
   if (!memberRef) {
@@ -5078,15 +5088,51 @@ async function attachLiveSwarmEdge(message) {
     return { ok: false, error: 'WebSocket unavailable in runtime worker' };
   }
   markRuntimeControlPlaneBusy(15_000);
+  if (isMissingImplicitEdgeMemberRef(source)) {
+    await runtimeAuthorityPosture().catch(() => null);
+  }
   let memberRef = '';
   try {
     memberRef = resolvedEdgeMemberRefFromMessage(source);
   } catch (error) {
+    const waitingAuthority = isMissingImplicitEdgeMemberRef(source);
+    const message = waitingAuthority
+      ? edgeAttachWaitingAuthorityMessage()
+      : String(error?.message || error || 'resolved swarm edge memberRef is required');
+    if (waitingAuthority) {
+      const requestedZoneScope = appIntentZoneScope(source);
+      closeSwarmEdgeSocket();
+      swarmEdge.mode = 'pendingAuthority';
+      swarmEdge.connected = false;
+      swarmEdge.endpoint = socketEndpoint;
+      swarmEdge.sessionId = '';
+      swarmEdge.memberRef = '';
+      swarmEdge.zoneScope = safeClone(requestedZoneScope);
+      recordRuntimeEvent('adapter.edge.attach.blocked', {
+        level: 'info',
+        state: String(runtimeAuthorityPostureState?.state || 'waitingAuthority').trim() || 'waitingAuthority',
+        blockedReason: 'missingRuntimeAuthorityMemberRef',
+        retryable: true,
+        error: { message },
+        ...edgeEndpointDiagnosticFacts(socketEndpoint),
+        zoneScope: requestedZoneScope,
+      });
+      touchRuntime();
+      broadcastSnapshot();
+      return {
+        ok: false,
+        error: message,
+        state: 'waitingAuthority',
+        blockedReason: 'missingRuntimeAuthorityMemberRef',
+        retryable: true,
+        result: edgeSnapshot(),
+      };
+    }
     recordRuntimeEvent('adapter.edge.attach.failed', {
-      error: { message: String(error?.message || error || 'resolved swarm edge memberRef is required') },
+      error: { message },
       level: 'error',
     });
-    return { ok: false, error: String(error?.message || error || 'resolved swarm edge memberRef is required') };
+    return { ok: false, error: message };
   }
   const requestedZoneScope = appIntentZoneScope(source);
   const attachTarget = `${socketEndpoint}|${memberRef}|${stableJson(requestedZoneScope)}`;
@@ -9174,6 +9220,7 @@ async function hydrateRuntimeState() {
     }
     for (const timer of serviceAdmissionTimeoutTimers.values()) self.clearTimeout(timer);
     serviceAdmissionTimeoutTimers.clear();
+    const liveSwarmQueue = new Map(outboundSwarmFrames);
     outboundSwarmFrames.clear();
     if (sameRuntimeBuild) {
       const persistedSwarmQueue = payload.swarmQueue && typeof payload.swarmQueue === 'object'
@@ -9201,9 +9248,12 @@ async function hydrateRuntimeState() {
           });
         } catch {}
       }
-      for (const entry of outboundSwarmFrames.values()) {
-        scheduleServiceAdmissionTimeout(entry);
-      }
+    }
+    for (const [frameId, entry] of liveSwarmQueue.entries()) {
+      outboundSwarmFrames.set(frameId, entry);
+    }
+    for (const entry of outboundSwarmFrames.values()) {
+      scheduleServiceAdmissionTimeout(entry);
     }
     mediaFulfillmentPostures.clear();
     const persistedMediaFulfillment = payload.mediaFulfillment && typeof payload.mediaFulfillment === 'object'
