@@ -1,4 +1,4 @@
-import { preparedServiceRegistry } from '../../constitute-ui/src/service-registry-model.js';
+import { preparedServiceRegistry } from 'constitute-ui';
 
 function normalizeArray(value) {
   return Array.isArray(value) ? value : [];
