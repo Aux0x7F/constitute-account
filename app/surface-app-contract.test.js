@@ -15,6 +15,7 @@ import {
   accountSurfaceModules,
   accountSurfaceRuntimeSelectionPosture,
   accountSurfaceRunnerPlan,
+  accountSurfaceSelectionReadModel,
 } from "../surface-app-contract.js";
 
 test("account ui declares its surface app modules before runtime attach", () => {
@@ -25,6 +26,8 @@ test("account ui declares its surface app modules before runtime attach", () => 
   assert.equal(accountSurfaceApp.hasRole("productView"), true);
   assert.equal(accountSurfaceModuleRegistry.kind, "surface.module.registry");
   assert.equal(accountSurfaceModules.state, "ready");
+  assert.equal(accountSurfaceSelectionReadModel.kind, "surface.app.selection.readModel");
+  assert.equal(accountSurfaceSelectionReadModel.state, "ready");
   assert.equal(typeof accountRuntimeClientModule.createRuntimeSurfaceClient, "function");
   assert.equal(accountSurfaceAttachContext.kind, "surface.app.attachContext");
   assert.equal(accountSurfaceAttachContext.appId, "constitute-account");
@@ -49,6 +52,7 @@ test("account ui declares its surface app modules before runtime attach", () => 
   assert.equal(accountSurfaceAttachContext.runnerPlan, accountSurfaceRunnerPlan);
   assert.equal(accountSurfaceAttachContext.appInstancePosture, accountSurfaceAppInstancePosture);
   assert.equal(accountSurfaceAttachContext.runtimeSelectionPosture, accountSurfaceRuntimeSelectionPosture);
+  assert.equal(accountSurfaceSelectionReadModel.attachContext, accountSurfaceAttachContext);
   assert.equal(accountSurfaceAttachContext.bootstrapContract, accountSurfaceBootstrapContract);
   assert.equal(accountSurfaceAttachContext.serviceManagerOperationPosture, accountServiceManagerOperationPosture);
 });
