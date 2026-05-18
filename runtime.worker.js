@@ -15,6 +15,7 @@ import {
   assertAuthorityRootOperation,
   assertEventAdmissionEnvelope,
   assertEventFabricAccessClass,
+  assertEventFabricProcessorContract,
   assertConsumerFloor,
   assertMaterializationBudget,
   assertPrivateContentEnvelope,
@@ -2545,14 +2546,140 @@ function runtimeLoggingEventFabricAccessClasses(issuedAt = nowMs()) {
   ];
 }
 
+function runtimeLoggingProcessorFloor(materializationId, consumerRef, issuedAt = nowMs()) {
+  return assertConsumerFloor({
+    kind: SWARM.RECORD_KIND.CONSUMER_FLOOR,
+    floorId: `floor:${materializationId}`,
+    consumerRef,
+    materializationId,
+    subjectRef: 'event-fabric:runtime.logging.default',
+    cursor: String(runtimeEvents.length),
+    ackFloor: String(runtimeEvents.length),
+    witnessFloor: String(runtimeEvents.length),
+    compactionFloor: 'runtime.safeDiagnostics',
+    eventTimeFloor: runtimeEvents.length ? Number(runtimeEvents[0]?.observedAt || runtimeEvents[0]?.issuedAt || 0) : issuedAt,
+    observedTimeFloor: issuedAt,
+    lagState: 'caughtUp',
+    redelivery: { mode: 'runtimeProjectionReplay', duplicatePolicy: 'eventId' },
+    replay: { mode: 'boundedRuntimeDiagnostics' },
+    evidenceRefs: ['runtime.safeDiagnostics'],
+    sampledAt: issuedAt,
+    expiresAt: issuedAt + 60_000,
+  });
+}
+
+function runtimeLoggingEventFabricProcessorContracts(accessClasses, issuedAt = nowMs()) {
+  const accessClassRefs = accessClasses.map((entry) => entry.classId).filter(Boolean).sort();
+  const inputEventClasses = [...new Set(accessClasses.flatMap((entry) => entry.eventClasses || []))].sort();
+  const inputContentClasses = [...new Set(accessClasses.map((entry) => entry.contentClass).filter(Boolean))].sort();
+  const accessGroupRefs = ['access-group:runtime.logging.security.default'];
+  return [
+    assertEventFabricProcessorContract({
+      kind: SWARM.RECORD_KIND.EVENT_FABRIC_PROCESSOR_CONTRACT,
+      processorContractId: 'processor-contract:runtime.logging.dashboard',
+      fabricRef: 'event-fabric:runtime.logging.default',
+      processorRef: `service:logging:${RUNTIME_LOGGING_PROJECTION_SERVICE_PK}`,
+      processorRoleRef: 'role:logging.processor',
+      state: 'ready',
+      inputAccessClassRefs: accessClassRefs,
+      inputEventClasses,
+      inputContentClasses,
+      outputRefs: ['projection:logging.events', 'projection:logging.dashboard', 'projection:logging.health'],
+      storageRefs: ['runtime.safeDiagnostics'],
+      accessGroupRefs,
+      consumerFloor: runtimeLoggingProcessorFloor('runtime.logging.dashboard.projection', 'runtime.projection.store', issuedAt),
+      bitemporalPolicy: {
+        eventTimeField: 'occurredAt',
+        observedTimeField: 'observedAt',
+      },
+      schemaPolicy: {
+        currentVersion: 'constitute.logging.dashboard.v1',
+        unknownVersionPosture: 'ignore',
+      },
+      compactionPolicy: {
+        snapshotCadence: 'bounded',
+        compactionFloor: 'runtime.safeDiagnostics',
+      },
+      cardinalityPolicy: {
+        maxLabelValues: 250,
+        highCardinalityOverflow: 'encryptedDetailRef',
+      },
+      encryptedDetailCustody: {
+        state: 'referenceOnly',
+        accessGroupRefs,
+      },
+      samplingPolicy: {
+        state: 'adaptive',
+        degradeBefore: ['authority', 'route', 'activation'],
+      },
+      safeFacts: {
+        purpose: 'runtimeDashboardProjection',
+        detailCustody: 'encryptedDetailRef',
+      },
+      evidenceRefs: ['runtime.safeDiagnostics'],
+      issuedAt,
+      expiresAt: issuedAt + 60_000,
+    }),
+    assertEventFabricProcessorContract({
+      kind: SWARM.RECORD_KIND.EVENT_FABRIC_PROCESSOR_CONTRACT,
+      processorContractId: 'processor-contract:runtime.logging.security',
+      fabricRef: 'event-fabric:runtime.logging.default',
+      processorRef: 'constitute-security',
+      processorRoleRef: 'role:security.processor',
+      state: 'ready',
+      inputAccessClassRefs: accessClassRefs,
+      inputEventClasses,
+      inputContentClasses,
+      outputRefs: ['security:evidence:runtime.logging.default', 'storage:runtime.logging.security.archive'],
+      storageRefs: ['runtime.safeDiagnostics'],
+      accessGroupRefs,
+      consumerFloor: runtimeLoggingProcessorFloor('runtime.logging.security.evidence', 'constitute-security', issuedAt),
+      bitemporalPolicy: {
+        eventTimeField: 'occurredAt',
+        observedTimeField: 'observedAt',
+      },
+      schemaPolicy: {
+        currentVersion: 'runtime.logging.security.evidence.v1',
+        unknownVersionPosture: 'ignore',
+      },
+      compactionPolicy: {
+        snapshotCadence: 'retention-window',
+        compactionFloor: 'retention-window:90d',
+      },
+      cardinalityPolicy: {
+        rawDetail: 'byObjectRef',
+        safeFacts: 'indexedSummary',
+        highCardinalityOverflow: 'encryptedDetailRef',
+      },
+      encryptedDetailCustody: {
+        state: 'referenceOnly',
+        accessGroupRefs,
+      },
+      samplingPolicy: {
+        state: 'fullWithinRetention',
+        degradeBefore: ['authority', 'route', 'activation'],
+      },
+      safeFacts: {
+        purpose: 'runtimeSecurityReplay',
+        detailCustody: 'encryptedDetailRef',
+      },
+      evidenceRefs: ['runtime.safeDiagnostics'],
+      issuedAt,
+      expiresAt: issuedAt + 90 * 24 * 60 * 60 * 1000,
+    }),
+  ];
+}
+
 function runtimeLoggingEventFabricPosture(issuedAt = nowMs()) {
   const accessGroup = runtimeLoggingSecurityAccessGroup(issuedAt);
   const accessEpoch = runtimeLoggingSecurityAccessEpoch(issuedAt);
   const accessClasses = runtimeLoggingEventFabricAccessClasses(issuedAt);
+  const processorContracts = runtimeLoggingEventFabricProcessorContracts(accessClasses, issuedAt);
   return {
     accessGroups: [accessGroup],
     accessEpochs: [accessEpoch],
     accessClasses,
+    processorContracts,
     contentClasses: accessGroup.contentClasses,
     processorRoles: ['role:logging.processor', 'role:security.processor'],
     currentEpochId: accessGroup.currentEpochId,
@@ -2662,6 +2789,7 @@ function synthesizeRuntimeLoggingProjection(policy) {
       runtimeSessionId,
       eventFabricAccessGroups: Array.isArray(eventFabric.accessGroups) ? eventFabric.accessGroups.length : 0,
       eventFabricAccessClasses: Array.isArray(eventFabric.accessClasses) ? eventFabric.accessClasses.length : 0,
+      eventFabricProcessorContracts: Array.isArray(eventFabric.processorContracts) ? eventFabric.processorContracts.length : 0,
     },
     encryptedDetailRefs: [],
     diagnostics: [],
@@ -3338,6 +3466,8 @@ function validateAuthorityReductionRecord(record) {
       return assertPrivateContentEnvelope(record);
     case SWARM.RECORD_KIND.EVENT_FABRIC_ACCESS_CLASS:
       return assertEventFabricAccessClass(record);
+    case SWARM.RECORD_KIND.EVENT_FABRIC_PROCESSOR_CONTRACT:
+      return assertEventFabricProcessorContract(record);
     default:
       throw new Error(`unsupported authority record kind: ${kind || 'missing'}`);
   }

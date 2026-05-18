@@ -295,12 +295,16 @@ test('runtime retained logging dashboard declares security event fabric posture'
   assert.match(workerSource, /assertAccessGroup/);
   assert.match(workerSource, /assertAccessEpoch/);
   assert.match(workerSource, /assertEventFabricAccessClass/);
+  assert.match(workerSource, /assertEventFabricProcessorContract/);
   assert.match(workerSource, /function runtimeLoggingEventFabricPosture\(/);
+  assert.match(workerSource, /function runtimeLoggingEventFabricProcessorContracts\(/);
   assert.match(workerSource, /accessGroups: \[accessGroup\]/);
   assert.match(workerSource, /accessEpochs: \[accessEpoch\]/);
   assert.match(workerSource, /accessClasses,/);
+  assert.match(workerSource, /processorContracts,/);
   assert.match(workerSource, /eventFabricAccessGroups: Array\.isArray\(eventFabric\.accessGroups\) \? eventFabric\.accessGroups\.length : 0/);
   assert.match(workerSource, /eventFabricAccessClasses: Array\.isArray\(eventFabric\.accessClasses\) \? eventFabric\.accessClasses\.length : 0/);
+  assert.match(workerSource, /eventFabricProcessorContracts: Array\.isArray\(eventFabric\.processorContracts\) \? eventFabric\.processorContracts\.length : 0/);
   assert.match(workerSource, /processorRoles: \['role:logging\.processor', 'role:security\.processor'\]/);
   assert.match(workerSource, /contentClasses: \['encryptedDetail', 'diagnosticDetail'\]/);
 });
