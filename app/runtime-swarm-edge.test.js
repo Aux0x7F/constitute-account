@@ -633,6 +633,9 @@ test('runtime diagnostics stream replays recent events and snapshot debug payloa
 
 test('runtime attach declares snapshot materialization budget per surface', async () => {
   const runtime = loadRuntime(new Map());
+  for (let index = 0; index < 6; index += 1) {
+    await send(runtime.port, { type: 'swarm.frame.queue', payload: frameInput({ nonce: `attach-materialization-${index}` }) });
+  }
   runtime.port.onmessage({
     data: {
       type: 'runtime.attach',
@@ -646,9 +649,16 @@ test('runtime attach declares snapshot materialization budget per surface', asyn
   assert.equal(attached.materializationBudget.payloadClass, 'projection');
   assert.equal(attached.materializationBudget.copyRole, 'projection');
   assert.equal(attached.materializationBudget.privacyTier, 'safeProjection');
+  assert.equal(attached.snapshot.runtimeEvents.length <= 1, true);
+  assert.equal(attached.snapshot.materialization.delivery.droppedByReplayLimit >= 5, true);
+  assert.equal(attached.materializationBudget.limits.replayLimit, 1);
+  assert.equal(attached.materializationBudget.limits.deliveredRuntimeEventCount, attached.snapshot.runtimeEvents.length);
+  assert.equal(attached.materializationBudget.limits.estimatedSnapshotBytes > 0, true);
   assert.equal(attached.consumerFloor.kind, 'consumer.floor');
   assert.equal(attached.consumerFloor.materializationId, attached.materializationBudget.budgetId);
   const snapshot = await send(runtime.port, { type: 'runtime.snapshot.get' });
+  assert.equal(snapshot.result.runtimeEvents.length <= 1, true);
+  assert.equal(snapshot.result.materialization.delivery.deliveredRuntimeEventCount, snapshot.result.runtimeEvents.length);
   assert.equal(snapshot.result.diagnostics.materialization.some((entry) => (
     entry.budgetId === attached.materializationBudget.budgetId
       && entry.clientId === 'surface-materialization-test'
