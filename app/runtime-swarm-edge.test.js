@@ -2495,6 +2495,32 @@ test('runtime authority records reducer separates action, access, and witness pl
       issuedAt,
     },
     {
+      kind: protocol.SWARM.RECORD_KIND.AUTHORITY_ACTION_EXERCISE,
+      exerciseId: 'exercise:agent:nvr',
+      grantId: 'grant:agent:full',
+      actorRef: 'identity:agent',
+      subjectRef: 'member:agent-browser',
+      resourceRef: 'service:nvr',
+      action: 'service.fulfill',
+      state: protocol.AGREEMENT.ACTION_GRANT_STATE.APPLIED,
+      evidenceRefs: ['proof:exercise:agent:nvr'],
+      issuedAt,
+      observedAt: issuedAt + 1,
+    },
+    {
+      kind: protocol.SWARM.RECORD_KIND.AUTHORITY_GRANT_REVOCATION_POSTURE,
+      revocationId: 'revocation:agent:full:expiry',
+      targetGrantRef: 'grant:agent:full',
+      issuerRef: 'identity:aux',
+      authorityDomain: protocol.SWARM.AUTHORITY_DOMAIN.IDENTITY,
+      affectedGrantRefs: ['grant:agent:full'],
+      state: protocol.AGREEMENT.ACTION_GRANT_STATE.APPLIED,
+      reasonCode: 'expiry.available',
+      evidenceRefs: ['proof:revocation-path'],
+      issuedAt,
+      effectiveAt: expiresAt,
+    },
+    {
       kind: protocol.SWARM.RECORD_KIND.ACCESS_GROUP,
       groupId: 'access-group:agent-events',
       ownerRef: 'identity:aux',
@@ -2602,8 +2628,23 @@ test('runtime authority records reducer separates action, access, and witness pl
   assert.equal(reduced.result.actionability.futureReadable, true);
   assert.equal(reduced.result.actionability.rawReadable, true);
   assert.deepEqual(reduced.result.actionAuthority.grantRefs, ['grant:agent:full']);
+  assert.deepEqual(reduced.result.actionAuthority.exerciseRefs, ['exercise:agent:nvr']);
+  assert.deepEqual(reduced.result.actionAuthority.revocationRefs, ['revocation:agent:full:expiry']);
   assert.equal(reduced.result.accessAuthority.accessGroupRefs.includes('access-group:agent-events'), true);
   assert.equal(reduced.result.accessAuthority.privateEnvelopeRefs.includes('private-envelope:event-detail:1'), true);
+  assert.equal(reduced.result.walletPosture.kind, 'runtime.authority.wallet.posture');
+  assert.equal(reduced.result.walletPosture.ownerIdentityRef, 'identity:aux');
+  assert.equal(reduced.result.walletPosture.granteeIdentityRef, 'identity:agent');
+  assert.equal(reduced.result.walletPosture.granteeMemberRef, 'member:agent-browser');
+  assert.deepEqual(
+    reduced.result.walletPosture.rows.map((row) => [row.check, row.plane, row.state, row.actionable]),
+    [
+      ['sync', 'deliveryWitness', 'proved', true],
+      ['read', 'accessAuthority', 'proved', true],
+      ['writeReduce', 'actionAuthority', 'proved', true],
+      ['revokeExpire', 'actionAuthority', 'proved', true],
+    ],
+  );
 });
 
 test('runtime authority records reducer does not infer readability from an action grant', async () => {
@@ -2637,6 +2678,9 @@ test('runtime authority records reducer does not infer readability from an actio
   assert.equal(reduced.result.actionability.futureReadable, false);
   assert.equal(reduced.result.blockedReasons.includes('syncWitnessMissing'), true);
   assert.equal(reduced.result.blockedReasons.includes('accessAuthorityMissing'), true);
+  assert.equal(reduced.result.walletPosture.rows.length, 4);
+  assert.equal(reduced.result.walletPosture.rows.find((row) => row.check === 'sync').actionable, false);
+  assert.equal(reduced.result.walletPosture.rows.find((row) => row.check === 'read').actionable, false);
 });
 
 test('runtime activation waits for explicit device authority instead of relying on cache timing', async () => {

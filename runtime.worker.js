@@ -3354,9 +3354,123 @@ function authorityGrantUsable(state) {
   ].includes(state);
 }
 
+const RUNTIME_AUTHORITY_PROOF_ROW_DEFINITIONS = Object.freeze([
+  {
+    check: AGREEMENT.AUTHORITY_PROOF_CHECK.SYNC,
+    plane: AGREEMENT.PLANE.DELIVERY_WITNESS,
+    actionabilityKey: 'canSync',
+    missingReason: 'syncWitnessMissing',
+  },
+  {
+    check: AGREEMENT.AUTHORITY_PROOF_CHECK.READ,
+    plane: AGREEMENT.PLANE.ACCESS_AUTHORITY,
+    actionabilityKey: 'canRead',
+    missingReason: 'accessAuthorityMissing',
+  },
+  {
+    check: AGREEMENT.AUTHORITY_PROOF_CHECK.WRITE_REDUCE,
+    plane: AGREEMENT.PLANE.ACTION_AUTHORITY,
+    actionabilityKey: 'canWriteReduce',
+    missingReason: 'actionAuthorityMissing',
+  },
+  {
+    check: AGREEMENT.AUTHORITY_PROOF_CHECK.REVOKE_EXPIRE,
+    plane: AGREEMENT.PLANE.ACTION_AUTHORITY,
+    actionabilityKey: 'canRevokeExpire',
+    missingReason: 'revokeExpireMissing',
+  },
+]);
+
+function runtimeAuthorityProofRow(definition, reduction) {
+  return {
+    check: definition.check,
+    plane: definition.plane,
+    state: 'blocked',
+    actionable: false,
+    targetRefs: [],
+    grantRefs: [],
+    accessGroupRefs: [],
+    accessEpochRefs: [],
+    exerciseRefs: [],
+    evidenceRefs: [],
+    expiresAt: 0,
+    blockedReason: definition.missingReason,
+    updatedAt: reduction.updatedAt,
+  };
+}
+
+function mergeAuthorityProofRow(row, check) {
+  const state = String(check?.state || '').trim();
+  if (row.state !== AGREEMENT.AUTHORITY_PROOF_STATE.PROVED || state === AGREEMENT.AUTHORITY_PROOF_STATE.PROVED) {
+    row.state = state || row.state;
+  }
+  if (check?.targetRef && !row.targetRefs.includes(check.targetRef)) row.targetRefs.push(check.targetRef);
+  for (const ref of normalizeArray(check?.grantRefs)) {
+    if (ref && !row.grantRefs.includes(ref)) row.grantRefs.push(ref);
+  }
+  for (const ref of normalizeArray(check?.accessGroupRefs)) {
+    if (ref && !row.accessGroupRefs.includes(ref)) row.accessGroupRefs.push(ref);
+  }
+  for (const ref of normalizeArray(check?.accessEpochRefs)) {
+    if (ref && !row.accessEpochRefs.includes(ref)) row.accessEpochRefs.push(ref);
+  }
+  for (const ref of normalizeArray(check?.exerciseRefs)) {
+    if (ref && !row.exerciseRefs.includes(ref)) row.exerciseRefs.push(ref);
+  }
+  for (const ref of normalizeArray(check?.evidenceRefs)) {
+    if (ref && !row.evidenceRefs.includes(ref)) row.evidenceRefs.push(ref);
+  }
+  row.expiresAt = Math.max(row.expiresAt, Number(check?.expiresAt || 0) || 0);
+  row.blockedReason = String(check?.blockedReason || '').trim() || row.blockedReason;
+  return row;
+}
+
+function runtimeAuthorityWalletPosture(validRecords, reduction) {
+  const proofRecords = validRecords.filter((record) => record.kind === SWARM.RECORD_KIND.AUTHORITY_MULTI_IDENTITY_PROOF);
+  const rows = RUNTIME_AUTHORITY_PROOF_ROW_DEFINITIONS.map((definition) => runtimeAuthorityProofRow(definition, reduction));
+  const rowByCheck = new Map(rows.map((row) => [row.check, row]));
+  for (const proof of proofRecords) {
+    for (const check of normalizeArray(proof.checks)) {
+      const row = rowByCheck.get(check?.check);
+      if (!row) continue;
+      mergeAuthorityProofRow(row, check);
+    }
+  }
+  for (const definition of RUNTIME_AUTHORITY_PROOF_ROW_DEFINITIONS) {
+    const row = rowByCheck.get(definition.check);
+    row.actionable = Boolean(reduction.actionability[definition.actionabilityKey]);
+    if (row.actionable && row.state === 'blocked') {
+      row.state = AGREEMENT.AUTHORITY_PROOF_STATE.DEGRADED;
+      row.blockedReason = 'proofCheckMissing';
+    }
+    if (row.state === AGREEMENT.AUTHORITY_PROOF_STATE.PROVED) row.blockedReason = '';
+  }
+  const primaryProof = proofRecords[0] || {};
+  return {
+    kind: 'runtime.authority.wallet.posture',
+    state: reduction.state,
+    ownerIdentityRef: String(primaryProof.ownerIdentityRef || '').trim(),
+    granteeIdentityRef: String(primaryProof.granteeIdentityRef || '').trim(),
+    granteeMemberRef: String(primaryProof.granteeMemberRef || '').trim(),
+    subjectRefs: uniqueTrimmedStrings(proofRecords.flatMap((record) => normalizeArray(record.subjectRefs))),
+    actionGrantRefs: safeClone(reduction.actionAuthority.grantRefs),
+    actionExerciseRefs: safeClone(reduction.actionAuthority.exerciseRefs),
+    accessGroupRefs: safeClone(reduction.accessAuthority.accessGroupRefs),
+    accessEpochRefs: safeClone(reduction.accessAuthority.accessEpochRefs),
+    privateEnvelopeRefs: safeClone(reduction.accessAuthority.privateEnvelopeRefs),
+    revocationRefs: safeClone(reduction.actionAuthority.revocationRefs),
+    proofRefs: uniqueTrimmedStrings(proofRecords.map((record) => record.proofId)),
+    rows,
+    actionability: safeClone(reduction.actionability),
+    blockedReasons: safeClone(reduction.blockedReasons),
+    updatedAt: reduction.updatedAt,
+  };
+}
+
 function reduceRuntimeAuthorityRecords(message = {}) {
   const records = runtimeAuthorityRecordsFromMessage(message);
   const now = nowMs();
+  const validRecords = [];
   const reduction = {
     kind: 'runtime.authority.reduction',
     state: 'blocked',
@@ -3410,6 +3524,7 @@ function reduceRuntimeAuthorityRecords(message = {}) {
       reduction.blockedReasons.push(reason);
       continue;
     }
+    validRecords.push(record);
 
     const ref = runtimeAuthorityRecordRef(record);
     if (ref && !reduction.recordRefs.includes(ref)) reduction.recordRefs.push(ref);
@@ -3538,6 +3653,7 @@ function reduceRuntimeAuthorityRecords(message = {}) {
   if (reduction.actionAuthority.state === 'blocked' && reduction.actionAuthority.refs.length) reduction.actionAuthority.state = 'degraded';
   if (reduction.accessAuthority.state === 'blocked' && reduction.accessAuthority.refs.length) reduction.accessAuthority.state = 'degraded';
   if (reduction.deliveryWitness.state === 'blocked' && reduction.deliveryWitness.refs.length) reduction.deliveryWitness.state = 'degraded';
+  reduction.walletPosture = runtimeAuthorityWalletPosture(validRecords, reduction);
 
   return reduction;
 }
