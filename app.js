@@ -664,8 +664,8 @@ function bootFromRuntimeSnapshot() {
     return null;
   }
   runtimeBridge.whenReady(SHELL_BOOT_RUNTIME_ATTACH_TIMEOUT_MS)
-    .then(() => {
-      markShellBoot('shell.runtime-attached');
+    .then((snapshot) => {
+      markShellBoot(snapshot ? 'shell.runtime-attached' : 'shell.runtime-attach.unavailable');
     })
     .catch((err) => {
       if (!runtimeAttachWarningLogged) {
@@ -2121,22 +2121,31 @@ function startPlatformRuntimeBridge() {
       bridge.rejectReady = null;
       bridge.resolveReady = null;
     },
+    onAttachPosture: (posture) => {
+      if (!posture || posture.severity === 'info') return;
+      if (!runtimeAttachWarningLogged) {
+        runtimeAttachWarningLogged = true;
+        console.info('[runtime] SharedWorker attach fallback', {
+          state: posture.state,
+          severity: posture.severity,
+          reason: posture.reason,
+        });
+      }
+    },
     onAttachError: (err) => {
       bridge.attachTimedOut = true;
       bridge.attachError = err;
-      bridge.rejectReady?.(err);
-      bridge.rejectReady = null;
+      bridge.resolveReady?.(null);
       bridge.resolveReady = null;
-      console.error('[runtime] SharedWorker attach failed', err);
+      bridge.rejectReady = null;
     },
     onWorkerError: (event) => {
       const error = new Error(String(event?.message || 'shared worker failure'));
       bridge.attachTimedOut = true;
       bridge.attachError = error;
-      bridge.rejectReady?.(error);
-      bridge.rejectReady = null;
+      bridge.resolveReady?.(null);
       bridge.resolveReady = null;
-      console.error('[runtime] SharedWorker error', event?.message || event);
+      bridge.rejectReady = null;
     },
   });
   bridge.client = runtimeClient;
