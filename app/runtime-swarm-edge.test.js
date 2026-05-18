@@ -129,7 +129,7 @@ function loadRuntime(store = new Map(), options = {}) {
     });
   }
   const source = `${shellStateSource}\n${raw
-    .replace(/^import[\s\S]*?from "constitute-protocol";/, 'const { PROJECTION, SERVICE_REGISTRY, SWARM, STREAM_SESSION_LIFECYCLE_PHASE, applyProjectionDelta, assertAccessGroup, assertAccessEpoch, assertConsumerFloor, assertEventAdmissionEnvelope, assertEventFabricAccessClass, assertMaterializationBudget, assertProjectionDelta, assertProjectionPolicy, assertProjectionRecord, assertProjectionSnapshot, assertResolvedMemberRef, assertProjectionRepairPosture, assertResourcePosture, assertResourceProfile, assertRetentionReleasePosture, assertRoutePromise, assertRuntimeActivationRequest, assertSelfCapabilityAssessment, assertMediaFulfillmentEvidence, assertMediaTransportObservation, assertContributionLifecycle, assertServiceRegistryClaim, assertServiceRegistryMaterialization, assertStreamSessionCandidate, assertSubscriptionContract, assertSwarmActivation, assertSwarmFrame, assertSwarmInteraction, makeLogEventEnvelope, openEnvelope, makeProjectionRepairRequest, makeSwarmFrame, pubkeyFromSecretKey, sealEnvelope, eventPlaneForRecordKind, streamSessionLifecycleRecordFromCarrier, streamSessionLifecyclePhase } = __protocol;')
+    .replace(/^import[\s\S]*?from "constitute-protocol";/, 'const { AGREEMENT, PROJECTION, SERVICE_REGISTRY, SWARM, STREAM_SESSION_LIFECYCLE_PHASE, applyProjectionDelta, assertActionAuthorityExercise, assertActionAuthorityGrant, assertAccessGroup, assertAccessEpoch, assertAuthorityGrantRevocationPosture, assertAuthorityMultiIdentityProof, assertAuthorityRootOperation, assertConsumerFloor, assertEventAdmissionEnvelope, assertEventFabricAccessClass, assertMaterializationBudget, assertPrivateContentEnvelope, assertProjectionDelta, assertProjectionPolicy, assertProjectionRecord, assertProjectionSnapshot, assertResolvedMemberRef, assertProjectionRepairPosture, assertResourcePosture, assertResourceProfile, assertRetentionReleasePosture, assertRoutePromise, assertRuntimeActivationRequest, assertSelfCapabilityAssessment, assertMediaFulfillmentEvidence, assertMediaTransportObservation, assertContributionLifecycle, assertServiceRegistryClaim, assertServiceRegistryMaterialization, assertStreamSessionCandidate, assertSubscriptionContract, assertSwarmActivation, assertSwarmFrame, assertSwarmInteraction, makeLogEventEnvelope, openEnvelope, makeProjectionRepairRequest, makeSwarmFrame, pubkeyFromSecretKey, sealEnvelope, eventPlaneForRecordKind, streamSessionLifecycleRecordFromCarrier, streamSessionLifecyclePhase } = __protocol;')
     .replace(/^import \{ deriveRuntimeShellState \} from "\.\/runtime-shell-state\.js";\s*/m, '')}`;
   const runtimeTimers = makeRuntimeTimers();
   const webSockets = [];
@@ -2474,6 +2474,169 @@ test('runtime authority posture returns before stalled storage hydration complet
   assert.equal(response.result.reason, 'runtime authority storage lookup pending');
   assert.equal(response.result.blockedAuthorityDomain, protocol.SWARM.AUTHORITY_DOMAIN.RUNTIME);
   assert.ok(Date.now() - startedAt < 1000);
+});
+
+test('runtime authority records reducer separates action, access, and witness planes', async () => {
+  const runtime = loadRuntime(new Map());
+  await attach(runtime.port);
+  const issuedAt = Date.now();
+  const expiresAt = issuedAt + 60_000;
+  const records = [
+    {
+      kind: protocol.SWARM.RECORD_KIND.AUTHORITY_ACTION_GRANT,
+      grantId: 'grant:agent:full',
+      issuerRef: 'identity:aux',
+      subjectRef: 'identity:agent',
+      audienceRefs: ['member:agent-browser'],
+      authorityDomain: protocol.SWARM.AUTHORITY_DOMAIN.IDENTITY,
+      resourceRef: 'service:nvr',
+      action: 'service.fulfill',
+      state: protocol.AGREEMENT.ACTION_GRANT_STATE.ACCEPTED,
+      issuedAt,
+    },
+    {
+      kind: protocol.SWARM.RECORD_KIND.ACCESS_GROUP,
+      groupId: 'access-group:agent-events',
+      ownerRef: 'identity:aux',
+      subjectRef: 'event-fabric:identity:aux',
+      contentClasses: [protocol.AGREEMENT.CONTENT_CLASS.ENCRYPTED_DETAIL],
+      memberRefs: ['member:agent-browser'],
+      adminRefs: ['identity:aux'],
+      currentEpochId: 'epoch:agent-events:1',
+      issuedAt,
+    },
+    {
+      kind: protocol.SWARM.RECORD_KIND.ACCESS_EPOCH,
+      epochId: 'epoch:agent-events:1',
+      groupId: 'access-group:agent-events',
+      sequence: 1,
+      changeKind: protocol.AGREEMENT.ACCESS_EPOCH_CHANGE.ADD_MEMBER,
+      memberRefs: ['member:agent-browser'],
+      addedMemberRefs: ['member:agent-browser'],
+      keyRef: 'key:agent-events:1',
+      proofRefs: ['proof:epoch:agent-events:1'],
+      issuedAt,
+      expiresAt,
+    },
+    {
+      kind: protocol.SWARM.RECORD_KIND.PRIVATE_CONTENT_ENVELOPE,
+      envelopeId: 'private-envelope:event-detail:1',
+      contentClass: protocol.AGREEMENT.CONTENT_CLASS.ENCRYPTED_DETAIL,
+      accessGroupRef: 'access-group:agent-events',
+      epochId: 'epoch:agent-events:1',
+      subjectRef: 'logging:event:1',
+      issuerRef: 'logging:processor',
+      detailRef: 'storage:detail:1',
+      recipientRefs: ['member:agent-browser'],
+      issuedAt,
+      expiresAt,
+    },
+    {
+      kind: protocol.SWARM.RECORD_KIND.AUTHORITY_MULTI_IDENTITY_PROOF,
+      proofId: 'proof:agent-full-access',
+      ownerIdentityRef: 'identity:aux',
+      granteeIdentityRef: 'identity:agent',
+      granteeMemberRef: 'member:agent-browser',
+      subjectRefs: ['service:nvr', 'event-fabric:identity:aux'],
+      actionGrantRefs: ['grant:agent:full'],
+      accessGroupRefs: ['access-group:agent-events'],
+      accessEpochRefs: ['epoch:agent-events:1'],
+      privateEnvelopeRefs: ['private-envelope:event-detail:1'],
+      evidenceRefs: ['proof:browser:aux-agent'],
+      state: protocol.AGREEMENT.AUTHORITY_PROOF_STATE.PROVED,
+      checks: [
+        {
+          check: protocol.AGREEMENT.AUTHORITY_PROOF_CHECK.SYNC,
+          plane: protocol.AGREEMENT.PLANE.DELIVERY_WITNESS,
+          state: protocol.AGREEMENT.AUTHORITY_PROOF_STATE.PROVED,
+          targetRef: 'member:agent-browser',
+          evidenceRefs: ['proof:sync'],
+        },
+        {
+          check: protocol.AGREEMENT.AUTHORITY_PROOF_CHECK.READ,
+          plane: protocol.AGREEMENT.PLANE.ACCESS_AUTHORITY,
+          state: protocol.AGREEMENT.AUTHORITY_PROOF_STATE.PROVED,
+          targetRef: 'event-fabric:identity:aux',
+          accessGroupRefs: ['access-group:agent-events'],
+          accessEpochRefs: ['epoch:agent-events:1'],
+          evidenceRefs: ['proof:read'],
+        },
+        {
+          check: protocol.AGREEMENT.AUTHORITY_PROOF_CHECK.WRITE_REDUCE,
+          plane: protocol.AGREEMENT.PLANE.ACTION_AUTHORITY,
+          state: protocol.AGREEMENT.AUTHORITY_PROOF_STATE.PROVED,
+          targetRef: 'service:nvr',
+          grantRefs: ['grant:agent:full'],
+          exerciseRefs: ['exercise:agent:nvr'],
+          evidenceRefs: ['proof:write-reduce'],
+        },
+        {
+          check: protocol.AGREEMENT.AUTHORITY_PROOF_CHECK.REVOKE_EXPIRE,
+          plane: protocol.AGREEMENT.PLANE.ACTION_AUTHORITY,
+          state: protocol.AGREEMENT.AUTHORITY_PROOF_STATE.PROVED,
+          targetRef: 'grant:agent:full',
+          grantRefs: ['grant:agent:full'],
+          evidenceRefs: ['proof:revoke-expire'],
+          expiresAt,
+        },
+      ],
+      issuedAt,
+      expiresAt,
+    },
+  ];
+
+  const reduced = await send(runtime.port, {
+    type: 'runtime.authority.records.reduce',
+    records,
+  });
+
+  assert.equal(reduced.ok, true);
+  assert.equal(reduced.result.state, 'ready');
+  assert.equal(reduced.result.actionAuthority.state, 'ready');
+  assert.equal(reduced.result.accessAuthority.state, 'ready');
+  assert.equal(reduced.result.deliveryWitness.state, 'ready');
+  assert.equal(reduced.result.actionability.canSync, true);
+  assert.equal(reduced.result.actionability.canRead, true);
+  assert.equal(reduced.result.actionability.canWriteReduce, true);
+  assert.equal(reduced.result.actionability.canRevokeExpire, true);
+  assert.equal(reduced.result.actionability.futureReadable, true);
+  assert.equal(reduced.result.actionability.rawReadable, true);
+  assert.deepEqual(reduced.result.actionAuthority.grantRefs, ['grant:agent:full']);
+  assert.equal(reduced.result.accessAuthority.accessGroupRefs.includes('access-group:agent-events'), true);
+  assert.equal(reduced.result.accessAuthority.privateEnvelopeRefs.includes('private-envelope:event-detail:1'), true);
+});
+
+test('runtime authority records reducer does not infer readability from an action grant', async () => {
+  const runtime = loadRuntime(new Map());
+  await attach(runtime.port);
+  const issuedAt = Date.now();
+
+  const reduced = await send(runtime.port, {
+    type: 'runtime.authority.records.reduce',
+    records: [{
+      kind: protocol.SWARM.RECORD_KIND.AUTHORITY_ACTION_GRANT,
+      grantId: 'grant:action-only',
+      issuerRef: 'identity:aux',
+      subjectRef: 'identity:agent',
+      audienceRefs: ['member:agent-browser'],
+      authorityDomain: protocol.SWARM.AUTHORITY_DOMAIN.IDENTITY,
+      resourceRef: 'service:nvr',
+      action: 'service.fulfill',
+      state: protocol.AGREEMENT.ACTION_GRANT_STATE.ACCEPTED,
+      issuedAt,
+    }],
+  });
+
+  assert.equal(reduced.ok, true);
+  assert.equal(reduced.result.state, 'degraded');
+  assert.equal(reduced.result.actionAuthority.state, 'ready');
+  assert.equal(reduced.result.accessAuthority.state, 'blocked');
+  assert.equal(reduced.result.actionability.canAct, true);
+  assert.equal(reduced.result.actionability.canSync, false);
+  assert.equal(reduced.result.actionability.canRead, false);
+  assert.equal(reduced.result.actionability.futureReadable, false);
+  assert.equal(reduced.result.blockedReasons.includes('syncWitnessMissing'), true);
+  assert.equal(reduced.result.blockedReasons.includes('accessAuthorityMissing'), true);
 });
 
 test('runtime activation waits for explicit device authority instead of relying on cache timing', async () => {

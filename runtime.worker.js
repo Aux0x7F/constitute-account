@@ -1,16 +1,23 @@
 import {
+  AGREEMENT,
   PROJECTION,
   SERVICE_REGISTRY,
   SWARM,
   STREAM_SESSION_LIFECYCLE_PHASE,
   applyProjectionDelta,
+  assertActionAuthorityExercise,
+  assertActionAuthorityGrant,
   assertProjectionDelta,
   assertAccessGroup,
   assertAccessEpoch,
+  assertAuthorityGrantRevocationPosture,
+  assertAuthorityMultiIdentityProof,
+  assertAuthorityRootOperation,
   assertEventAdmissionEnvelope,
   assertEventFabricAccessClass,
   assertConsumerFloor,
   assertMaterializationBudget,
+  assertPrivateContentEnvelope,
   assertProjectionPolicy,
   assertProjectionRecord,
   assertProjectionSnapshot,
@@ -56,6 +63,7 @@ const PROJECTION_PUT = 'projection.put';
 const PROJECTION_POLICY_PUT = 'projection.policy.put';
 const RUNTIME_AUTHORITY_DEVICE_PUT = 'runtime.authority.device.put';
 const RUNTIME_AUTHORITY_POSTURE_GET = 'runtime.authority.posture.get';
+const RUNTIME_AUTHORITY_RECORDS_REDUCE = 'runtime.authority.records.reduce';
 const RUNTIME_MEDIA_TRANSPORT_PROFILE_GET = 'runtime.media.transport.profile.get';
 const RUNTIME_MEDIA_TRANSPORT_OBSERVATION_PUT = 'runtime.media.transport.observation.put';
 const RUNTIME_MEDIA_FULFILLMENT_EVIDENCE_PUT = 'runtime.media.fulfillment.evidence.put';
@@ -3227,6 +3235,327 @@ async function handleRuntimeAuthorityDevicePut(message) {
   broadcastSnapshot();
   void flushPendingAuthorityIntents('runtime.authority.device.ready');
   return { ok: true, result: { devicePk: String(device?.nostr?.pk || '').trim(), posture: safeClone(runtimeAuthorityPostureState) } };
+}
+
+function runtimeAuthorityRecordRef(record) {
+  const kind = String(record?.kind || record?.recordKind || '').trim();
+  switch (kind) {
+    case SWARM.RECORD_KIND.AUTHORITY_ROOT_OPERATION:
+      return String(record?.operationId || '').trim();
+    case SWARM.RECORD_KIND.AUTHORITY_ACTION_GRANT:
+      return String(record?.grantId || '').trim();
+    case SWARM.RECORD_KIND.AUTHORITY_ACTION_EXERCISE:
+      return String(record?.exerciseId || '').trim();
+    case SWARM.RECORD_KIND.AUTHORITY_GRANT_REVOCATION_POSTURE:
+      return String(record?.revocationId || '').trim();
+    case SWARM.RECORD_KIND.ACCESS_GROUP:
+      return String(record?.groupId || '').trim();
+    case SWARM.RECORD_KIND.ACCESS_EPOCH:
+      return String(record?.epochId || '').trim();
+    case SWARM.RECORD_KIND.PRIVATE_CONTENT_ENVELOPE:
+      return String(record?.envelopeId || '').trim();
+    case SWARM.RECORD_KIND.AUTHORITY_MULTI_IDENTITY_PROOF:
+      return String(record?.proofId || '').trim();
+    case SWARM.RECORD_KIND.EVENT_FABRIC_ACCESS_CLASS:
+      return String(record?.classId || '').trim();
+    default:
+      break;
+  }
+  return String(
+    record?.operationId
+    || record?.grantId
+    || record?.exerciseId
+    || record?.revocationId
+    || record?.groupId
+    || record?.epochId
+    || record?.envelopeId
+    || record?.proofId
+    || record?.classId
+    || record?.id
+    || '',
+  ).trim();
+}
+
+function runtimeAuthorityRecordsFromMessage(message) {
+  const payload = message?.payload && typeof message.payload === 'object' ? message.payload : {};
+  if (Array.isArray(message?.records)) return message.records;
+  if (Array.isArray(payload.records)) return payload.records;
+  if (message?.record && typeof message.record === 'object') return [message.record];
+  if (payload.record && typeof payload.record === 'object') return [payload.record];
+  return [];
+}
+
+function authorityPlane(state = 'blocked', reason = '', extra = {}) {
+  return {
+    state,
+    reason: String(reason || '').trim(),
+    refs: [],
+    blockedReasons: [],
+    ...extra,
+  };
+}
+
+function markAuthorityPlaneReady(plane, ref) {
+  if (ref && !plane.refs.includes(ref)) plane.refs.push(ref);
+  if (plane.state !== 'blocked') {
+    plane.state = 'ready';
+  } else if (!plane.blockedReasons.length) {
+    plane.state = 'ready';
+    plane.reason = '';
+  }
+}
+
+function markAuthorityPlaneBlocked(plane, reason) {
+  const value = String(reason || '').trim();
+  if (value && !plane.blockedReasons.includes(value)) plane.blockedReasons.push(value);
+  if (plane.state !== 'ready') {
+    plane.state = 'blocked';
+    plane.reason = plane.reason || value;
+  } else {
+    plane.state = 'degraded';
+    plane.reason = plane.reason || value;
+  }
+}
+
+function validateAuthorityReductionRecord(record) {
+  const kind = String(record?.kind || record?.recordKind || '').trim();
+  switch (kind) {
+    case SWARM.RECORD_KIND.AUTHORITY_ROOT_OPERATION:
+      return assertAuthorityRootOperation(record);
+    case SWARM.RECORD_KIND.AUTHORITY_ACTION_GRANT:
+      return assertActionAuthorityGrant(record);
+    case SWARM.RECORD_KIND.AUTHORITY_ACTION_EXERCISE:
+      return assertActionAuthorityExercise(record);
+    case SWARM.RECORD_KIND.AUTHORITY_GRANT_REVOCATION_POSTURE:
+      return assertAuthorityGrantRevocationPosture(record);
+    case SWARM.RECORD_KIND.AUTHORITY_MULTI_IDENTITY_PROOF:
+      return assertAuthorityMultiIdentityProof(record);
+    case SWARM.RECORD_KIND.ACCESS_GROUP:
+      return assertAccessGroup(record);
+    case SWARM.RECORD_KIND.ACCESS_EPOCH:
+      return assertAccessEpoch(record);
+    case SWARM.RECORD_KIND.PRIVATE_CONTENT_ENVELOPE:
+      return assertPrivateContentEnvelope(record);
+    case SWARM.RECORD_KIND.EVENT_FABRIC_ACCESS_CLASS:
+      return assertEventFabricAccessClass(record);
+    default:
+      throw new Error(`unsupported authority record kind: ${kind || 'missing'}`);
+  }
+}
+
+function provedAuthorityCheck(check) {
+  return check?.state === AGREEMENT.AUTHORITY_PROOF_STATE.PROVED;
+}
+
+function authorityGrantUsable(state) {
+  return [
+    AGREEMENT.ACTION_GRANT_STATE.ACCEPTED,
+    AGREEMENT.ACTION_GRANT_STATE.APPLIED,
+  ].includes(state);
+}
+
+function reduceRuntimeAuthorityRecords(message = {}) {
+  const records = runtimeAuthorityRecordsFromMessage(message);
+  const now = nowMs();
+  const reduction = {
+    kind: 'runtime.authority.reduction',
+    state: 'blocked',
+    actionAuthority: authorityPlane('blocked', 'action authority missing', {
+      grantRefs: [],
+      exerciseRefs: [],
+      rootOperationRefs: [],
+      revocationRefs: [],
+      actions: [],
+      resourceRefs: [],
+    }),
+    accessAuthority: authorityPlane('blocked', 'access authority missing', {
+      accessGroupRefs: [],
+      accessEpochRefs: [],
+      privateEnvelopeRefs: [],
+      contentClasses: [],
+      currentEpochRefs: [],
+      futureReadable: false,
+      rawReadable: false,
+    }),
+    deliveryWitness: authorityPlane('blocked', 'delivery witness missing', {
+      proofRefs: [],
+      witnessRefs: [],
+    }),
+    materialization: authorityPlane('notRequired', '', {
+      eventFabricAccessClassRefs: [],
+      processorRoleRefs: [],
+    }),
+    actionability: {
+      canSync: false,
+      canRead: false,
+      canWriteReduce: false,
+      canRevokeExpire: false,
+      canAct: false,
+      futureReadable: false,
+      rawReadable: false,
+    },
+    recordRefs: [],
+    invalidRecords: [],
+    blockedReasons: [],
+    updatedAt: now,
+  };
+
+  for (const [index, raw] of records.entries()) {
+    let record;
+    try {
+      record = validateAuthorityReductionRecord(raw);
+    } catch (error) {
+      const reason = String(error?.message || error || 'invalid authority record').trim();
+      reduction.invalidRecords.push({ index, kind: String(raw?.kind || raw?.recordKind || '').trim(), reason });
+      reduction.blockedReasons.push(reason);
+      continue;
+    }
+
+    const ref = runtimeAuthorityRecordRef(record);
+    if (ref && !reduction.recordRefs.includes(ref)) reduction.recordRefs.push(ref);
+
+    switch (record.kind) {
+      case SWARM.RECORD_KIND.AUTHORITY_ROOT_OPERATION:
+        if (authorityGrantUsable(record.state)) {
+          markAuthorityPlaneReady(reduction.actionAuthority, ref);
+          if (!reduction.actionAuthority.rootOperationRefs.includes(ref)) reduction.actionAuthority.rootOperationRefs.push(ref);
+        } else {
+          markAuthorityPlaneBlocked(reduction.actionAuthority, record.blockedReason || record.state);
+        }
+        break;
+      case SWARM.RECORD_KIND.AUTHORITY_ACTION_GRANT:
+        if (authorityGrantUsable(record.state)) {
+          markAuthorityPlaneReady(reduction.actionAuthority, ref);
+          if (!reduction.actionAuthority.grantRefs.includes(ref)) reduction.actionAuthority.grantRefs.push(ref);
+          if (record.action && !reduction.actionAuthority.actions.includes(record.action)) reduction.actionAuthority.actions.push(record.action);
+          if (record.resourceRef && !reduction.actionAuthority.resourceRefs.includes(record.resourceRef)) reduction.actionAuthority.resourceRefs.push(record.resourceRef);
+        } else {
+          markAuthorityPlaneBlocked(reduction.actionAuthority, record.blockedReason || record.state);
+        }
+        break;
+      case SWARM.RECORD_KIND.AUTHORITY_ACTION_EXERCISE:
+        if (authorityGrantUsable(record.state)) {
+          markAuthorityPlaneReady(reduction.actionAuthority, ref);
+          if (!reduction.actionAuthority.exerciseRefs.includes(ref)) reduction.actionAuthority.exerciseRefs.push(ref);
+        } else {
+          markAuthorityPlaneBlocked(reduction.actionAuthority, record.blockedReason || record.state);
+        }
+        break;
+      case SWARM.RECORD_KIND.AUTHORITY_GRANT_REVOCATION_POSTURE:
+        markAuthorityPlaneReady(reduction.actionAuthority, ref);
+        if (!reduction.actionAuthority.revocationRefs.includes(ref)) reduction.actionAuthority.revocationRefs.push(ref);
+        reduction.actionability.canRevokeExpire = true;
+        break;
+      case SWARM.RECORD_KIND.ACCESS_GROUP:
+        markAuthorityPlaneReady(reduction.accessAuthority, ref);
+        if (!reduction.accessAuthority.accessGroupRefs.includes(ref)) reduction.accessAuthority.accessGroupRefs.push(ref);
+        for (const contentClass of normalizeArray(record.contentClasses)) {
+          if (contentClass && !reduction.accessAuthority.contentClasses.includes(contentClass)) reduction.accessAuthority.contentClasses.push(contentClass);
+        }
+        if (record.currentEpochId && !reduction.accessAuthority.currentEpochRefs.includes(record.currentEpochId)) {
+          reduction.accessAuthority.currentEpochRefs.push(record.currentEpochId);
+        }
+        reduction.accessAuthority.futureReadable = true;
+        reduction.actionability.futureReadable = true;
+        break;
+      case SWARM.RECORD_KIND.ACCESS_EPOCH:
+        markAuthorityPlaneReady(reduction.accessAuthority, ref);
+        if (!reduction.accessAuthority.accessEpochRefs.includes(ref)) reduction.accessAuthority.accessEpochRefs.push(ref);
+        reduction.accessAuthority.futureReadable = true;
+        reduction.actionability.futureReadable = true;
+        break;
+      case SWARM.RECORD_KIND.PRIVATE_CONTENT_ENVELOPE:
+        markAuthorityPlaneReady(reduction.accessAuthority, ref);
+        if (!reduction.accessAuthority.privateEnvelopeRefs.includes(ref)) reduction.accessAuthority.privateEnvelopeRefs.push(ref);
+        if (record.contentClass && !reduction.accessAuthority.contentClasses.includes(record.contentClass)) reduction.accessAuthority.contentClasses.push(record.contentClass);
+        reduction.accessAuthority.rawReadable = true;
+        reduction.actionability.rawReadable = true;
+        break;
+      case SWARM.RECORD_KIND.EVENT_FABRIC_ACCESS_CLASS:
+        reduction.materialization.state = 'ready';
+        if (ref && !reduction.materialization.refs.includes(ref)) reduction.materialization.refs.push(ref);
+        if (!reduction.materialization.eventFabricAccessClassRefs.includes(ref)) reduction.materialization.eventFabricAccessClassRefs.push(ref);
+        for (const roleRef of normalizeArray(record.processorRoleRefs)) {
+          if (roleRef && !reduction.materialization.processorRoleRefs.includes(roleRef)) reduction.materialization.processorRoleRefs.push(roleRef);
+        }
+        break;
+      case SWARM.RECORD_KIND.AUTHORITY_MULTI_IDENTITY_PROOF:
+        if (record.state !== AGREEMENT.AUTHORITY_PROOF_STATE.PROVED) {
+          markAuthorityPlaneBlocked(reduction.actionAuthority, normalizeArray(record.blockedReasons)[0] || record.state);
+        }
+        if (ref && !reduction.deliveryWitness.proofRefs.includes(ref)) reduction.deliveryWitness.proofRefs.push(ref);
+        for (const check of normalizeArray(record.checks)) {
+          if (check.check === AGREEMENT.AUTHORITY_PROOF_CHECK.SYNC && provedAuthorityCheck(check)) {
+            reduction.actionability.canSync = true;
+            markAuthorityPlaneReady(reduction.deliveryWitness, ref);
+          }
+          if (check.check === AGREEMENT.AUTHORITY_PROOF_CHECK.READ && provedAuthorityCheck(check)) {
+            reduction.actionability.canRead = true;
+            markAuthorityPlaneReady(reduction.accessAuthority, ref);
+            for (const groupRef of normalizeArray(check.accessGroupRefs)) {
+              if (groupRef && !reduction.accessAuthority.accessGroupRefs.includes(groupRef)) reduction.accessAuthority.accessGroupRefs.push(groupRef);
+            }
+          }
+          if (check.check === AGREEMENT.AUTHORITY_PROOF_CHECK.WRITE_REDUCE && provedAuthorityCheck(check)) {
+            reduction.actionability.canWriteReduce = true;
+            markAuthorityPlaneReady(reduction.actionAuthority, ref);
+          }
+          if (check.check === AGREEMENT.AUTHORITY_PROOF_CHECK.REVOKE_EXPIRE && provedAuthorityCheck(check)) {
+            reduction.actionability.canRevokeExpire = true;
+            markAuthorityPlaneReady(reduction.actionAuthority, ref);
+          }
+        }
+        break;
+      default:
+        break;
+    }
+  }
+
+  reduction.actionability.canAct = reduction.actionAuthority.state === 'ready' || reduction.actionability.canWriteReduce || reduction.actionability.canRevokeExpire;
+  reduction.actionability.canRead = reduction.actionability.canRead && reduction.accessAuthority.state !== 'blocked';
+
+  const missing = [];
+  if (!records.length) missing.push('authorityRecordsMissing');
+  if (!reduction.actionability.canSync) missing.push('syncWitnessMissing');
+  if (!reduction.actionability.canAct) missing.push('actionAuthorityMissing');
+  if (!reduction.actionability.canRead && !reduction.actionability.rawReadable && !reduction.actionability.futureReadable) missing.push('accessAuthorityMissing');
+
+  reduction.blockedReasons = uniqueTrimmedStrings([
+    ...reduction.blockedReasons,
+    ...missing,
+    ...reduction.actionAuthority.blockedReasons,
+    ...reduction.accessAuthority.blockedReasons,
+    ...reduction.deliveryWitness.blockedReasons,
+  ]);
+  if (reduction.invalidRecords.length) {
+    reduction.state = 'blocked';
+  } else if (missing.length) {
+    reduction.state = records.length ? 'degraded' : 'blocked';
+  } else {
+    reduction.state = 'ready';
+  }
+
+  if (reduction.actionAuthority.state === 'blocked' && reduction.actionAuthority.refs.length) reduction.actionAuthority.state = 'degraded';
+  if (reduction.accessAuthority.state === 'blocked' && reduction.accessAuthority.refs.length) reduction.accessAuthority.state = 'degraded';
+  if (reduction.deliveryWitness.state === 'blocked' && reduction.deliveryWitness.refs.length) reduction.deliveryWitness.state = 'degraded';
+
+  return reduction;
+}
+
+function handleRuntimeAuthorityRecordsReduce(message) {
+  const result = reduceRuntimeAuthorityRecords(message);
+  recordRuntimeEvent('runtime.authority.records.reduced', {
+    state: result.state,
+    recordCount: runtimeAuthorityRecordsFromMessage(message).length,
+    actionAuthorityState: result.actionAuthority.state,
+    accessAuthorityState: result.accessAuthority.state,
+    deliveryWitnessState: result.deliveryWitness.state,
+    canSync: result.actionability.canSync,
+    canRead: result.actionability.canRead,
+    canWriteReduce: result.actionability.canWriteReduce,
+    canRevokeExpire: result.actionability.canRevokeExpire,
+  });
+  return { ok: true, result };
 }
 
 function appIntentRecipientPks(intent, authority) {
@@ -9752,6 +10081,15 @@ async function handleControlMessage(message, endpoint) {
         kind: RUNTIME_AUTHORITY_POSTURE_GET,
         ok: true,
         result: await runtimeAuthorityPosture(),
+      };
+      break;
+    }
+    case RUNTIME_AUTHORITY_RECORDS_REDUCE: {
+      response = {
+        type: 'runtime.response',
+        requestId: String(message.requestId || '').trim(),
+        kind: RUNTIME_AUTHORITY_RECORDS_REDUCE,
+        ...handleRuntimeAuthorityRecordsReduce(message),
       };
       break;
     }
