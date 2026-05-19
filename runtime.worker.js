@@ -5513,6 +5513,30 @@ function zoneScopeLooksLocalOnly(zoneScope) {
   return !zoneId || zoneId === 'local' || zoneId === 'runtime.local' || zoneId.startsWith('identity:');
 }
 
+function runtimeRetainedDiscoveryScope() {
+  const runtimeDiscovery = runtimeStatus.discovery && typeof runtimeStatus.discovery === 'object' ? runtimeStatus.discovery : {};
+  const runtimeZones = runtimeStatus.zones && typeof runtimeStatus.zones === 'object' ? runtimeStatus.zones : {};
+  const shell = runtimeStatus.shell && typeof runtimeStatus.shell === 'object' ? runtimeStatus.shell : {};
+  const shellDiscovery = shell.discovery && typeof shell.discovery === 'object' ? shell.discovery : {};
+  const zones = shell.zones && typeof shell.zones === 'object' ? shell.zones : {};
+  return normalizeServiceZoneScope(runtimeDiscovery.scope || runtimeDiscovery.discoveryScope || runtimeDiscovery.discovery_scope)
+    || normalizeServiceZoneScope(runtimeStatus.discoveryScope || runtimeStatus.discovery_scope)
+    || normalizeServiceZoneScope({
+      zoneId: runtimeZones.activeZoneKey || runtimeZones.active_zone_key,
+      privacy: 'rawIds',
+    })
+    || firstServiceZoneScopeFromList(runtimeZones.joined)
+    || firstServiceZoneScopeFromList(runtimeZones.zoneKeys || runtimeZones.zone_keys)
+    || normalizeServiceZoneScope(shellDiscovery.scope || shellDiscovery.discoveryScope || shellDiscovery.discovery_scope)
+    || normalizeServiceZoneScope(shell.discoveryScope || shell.discovery_scope)
+    || normalizeServiceZoneScope({
+      zoneId: zones.activeZoneKey || zones.active_zone_key,
+      privacy: 'rawIds',
+    })
+    || firstServiceZoneScopeFromList(zones.joined)
+    || firstServiceZoneScopeFromList(zones.zoneKeys || zones.zone_keys);
+}
+
 function routeChannelMatches(candidate, targetChannel) {
   const channelId = String(candidate?.channelId || candidate?.channel_id || '').trim();
   const channelRefs = normalizeArray(candidate?.channelRefs || candidate?.channel_refs)
@@ -5570,7 +5594,8 @@ function directoryRoutingBaseline({ zoneScope, channelId = '', capability = '', 
     return score;
   };
   let sawDirectory = false;
-  let sawZone = false;
+  let sawDiscoveryScope = false;
+  let sawPreferredScope = false;
   let best = null;
   for (const [projectionKey, projection] of retainedProjections.entries()) {
     const projectionId = String(projection?.projectionId || '').trim();
@@ -5603,20 +5628,24 @@ function directoryRoutingBaseline({ zoneScope, channelId = '', capability = '', 
     }).filter(Boolean);
     for (const { entry, advertisement } of candidates) {
       const entryZoneScope = normalizeServiceZoneScope(entry?.zoneScope || entry?.zone_scope || advertisement?.zoneScope || advertisement?.zone_scope);
-      if (String(entryZoneScope?.zoneId || '').trim() !== zoneId) continue;
-      sawZone = true;
+      const entryZoneId = String(entryZoneScope?.zoneId || '').trim();
+      if (entryZoneId) sawDiscoveryScope = true;
+      const preferredScope = Boolean(entryZoneId && entryZoneId === zoneId);
+      if (preferredScope) sawPreferredScope = true;
       const candidate = { ...safeClone(advertisement || {}), ...safeClone(entry || {}) };
       if (!routeChannelMatches(candidate, targetChannel)) continue;
       if (!routeCapabilityMatches(candidate, targetCapability)) continue;
       if (!routeServiceMatches(candidate, { servicePk: targetServicePk, service: targetService, serviceRef: targetServiceRef })) continue;
+      const selectedZoneScope = entryZoneScope || zoneScope;
       const selected = {
         state: SWARM.ROUTING_SCOPE_STATE.READY,
         source: 'swarm.directory',
         baselineRef,
         selectedMemberRef: String(entry?.memberRef || '').trim(),
         serviceMemberRef: String(entry?.memberRef || '').trim(),
+        zoneScope: selectedZoneScope,
         updatedAt,
-        score: candidateServiceScore(candidate),
+        score: candidateServiceScore(candidate) + (preferredScope ? 30 : entryZoneId ? 5 : 0),
       };
       if (!best || selected.score > best.score) best = selected;
     }
@@ -5628,9 +5657,13 @@ function directoryRoutingBaseline({ zoneScope, channelId = '', capability = '', 
   if (!sawDirectory) return null;
   return {
     state: SWARM.ROUTING_SCOPE_STATE.SYNCING,
-    source: sawZone ? 'swarm.directory.partial' : 'swarm.directory.pendingZone',
+    source: sawPreferredScope
+      ? 'swarm.directory.partial'
+      : sawDiscoveryScope
+        ? 'swarm.directory.pendingCoverage'
+        : 'swarm.directory.pendingDiscovery',
     baselineRef: `projection:${RUNTIME_DIRECTORY_OBSERVE_CHANNEL}`,
-    blockedReason: sawZone
+    blockedReason: sawPreferredScope || sawDiscoveryScope
       ? SWARM.ROUTING_BLOCKED_REASON.NO_MEMBER_IN_ZONE
       : SWARM.ROUTING_BLOCKED_REASON.MISSING_ZONE_BASELINE,
     updatedAt: nowMs(),
@@ -5722,10 +5755,26 @@ function appIntentRoutingScopePosture(method, intent, options = {}) {
   }
   const derived = deriveServiceContextForIntent(method, intent);
   const selectedNode = derived?.selectedNode && typeof derived.selectedNode === 'object' ? derived.selectedNode : null;
-  let zoneScope = normalizeServiceZoneScope(intent?.zoneScope)
-    || normalizeServiceZoneScope(selectedNode?.zoneScope || selectedNode?.zone_scope)
-    || normalizeServiceZoneScope(derived?.zoneScope || derived?.zone_scope)
-    || normalizeServiceZoneScope(swarmEdge.zoneScope);
+  const intentZoneScope = normalizeServiceZoneScope(intent?.zoneScope);
+  const selectedNodeZoneScope = normalizeServiceZoneScope(selectedNode?.zoneScope || selectedNode?.zone_scope);
+  const derivedZoneScope = normalizeServiceZoneScope(derived?.zoneScope || derived?.zone_scope);
+  const edgeZoneScope = normalizeServiceZoneScope(swarmEdge.zoneScope);
+  const retainedDiscoveryScope = runtimeRetainedDiscoveryScope();
+  let zoneScope = intentZoneScope
+    || selectedNodeZoneScope
+    || derivedZoneScope
+    || edgeZoneScope
+    || retainedDiscoveryScope;
+  const zoneScopeSource = intentZoneScope
+    ? 'intent'
+    : selectedNodeZoneScope || derivedZoneScope
+      ? 'retainedServiceBaseline'
+      : edgeZoneScope
+        ? 'edgeSession'
+        : retainedDiscoveryScope
+          ? 'retainedDiscoveryBaseline'
+          : 'runtime.route';
+  const explicitZoneScopeSource = String(intent?.zoneScopeSource || intent?.zone_scope_source || '').trim();
   if (
     zoneScope
     && (zoneScopeLooksLocalOnly(zoneScope) || (isRuntimeStreamIntent(method) && Number(zoneScope.maxHops || 0) <= 0))
@@ -5761,9 +5810,9 @@ function appIntentRoutingScopePosture(method, intent, options = {}) {
     kind,
     required: true,
     state: directoryBaseline?.state || SWARM.ROUTING_SCOPE_STATE.SYNCING,
-    zoneScope,
-    source: directoryBaseline?.source || (derived?.zoneScope || selectedNode?.zoneScope ? 'retainedServiceBaseline' : 'edgeSession'),
-    baselineRef: directoryBaseline?.baselineRef || (servicePk ? `service:${servicePk}` : `zone:${zoneScope.zoneId}`),
+    zoneScope: directoryBaseline?.zoneScope || zoneScope,
+    source: directoryBaseline?.source || explicitZoneScopeSource || zoneScopeSource,
+    baselineRef: directoryBaseline?.baselineRef || (servicePk ? `service:${servicePk}` : `discovery:${zoneScope.zoneId}`),
     ...(serviceMemberRef ? { serviceMemberRef, selectedMemberRef: serviceMemberRef } : {}),
     ...(directoryBaseline?.blockedReason ? { blockedReason: directoryBaseline.blockedReason } : {}),
     updatedAt: directoryBaseline?.updatedAt || nowMs(),
@@ -5997,9 +6046,25 @@ function appIntentResolvedRoute(method, intent) {
   const selectedNode = derived?.selectedNode && typeof derived.selectedNode === 'object' ? derived.selectedNode : null;
   const contractBaseline = streamServiceContractBaseline(method, intent, derived);
   const resolvedNodeRef = contractBaseline?.nodeRef || appIntentNodeRef(method, intent);
-  const zoneScope = normalizeServiceZoneScope(intent?.zoneScope)
-    || normalizeServiceZoneScope(selectedNode?.zoneScope || selectedNode?.zone_scope)
-    || normalizeServiceZoneScope(derived?.zoneScope || derived?.zone_scope);
+  const intentZoneScope = normalizeServiceZoneScope(intent?.zoneScope);
+  const selectedNodeZoneScope = normalizeServiceZoneScope(selectedNode?.zoneScope || selectedNode?.zone_scope);
+  const derivedZoneScope = normalizeServiceZoneScope(derived?.zoneScope || derived?.zone_scope);
+  const edgeZoneScope = normalizeServiceZoneScope(swarmEdge.zoneScope);
+  const retainedDiscoveryScope = runtimeRetainedDiscoveryScope();
+  const zoneScope = intentZoneScope
+    || selectedNodeZoneScope
+    || derivedZoneScope
+    || edgeZoneScope
+    || retainedDiscoveryScope;
+  const zoneScopeSource = intentZoneScope
+    ? 'intent'
+    : selectedNodeZoneScope || derivedZoneScope
+      ? 'retainedServiceBaseline'
+      : edgeZoneScope
+        ? 'edgeSession'
+        : retainedDiscoveryScope
+          ? 'retainedDiscoveryBaseline'
+          : '';
   const servicePk = String(intent?.servicePk || derived?.servicePk || '').trim();
   const service = String(intent?.service || derived?.service || 'nvr').trim();
   const serviceRef = String(intent?.serviceRef || derived?.serviceRef || '').trim() || defaultServiceRefForService(service, servicePk);
@@ -6023,7 +6088,7 @@ function appIntentResolvedRoute(method, intent) {
     identityId: String(intent?.identityId || derived?.identityId || defaultIdentityId()).trim(),
     capability: appIntentCapability(method, intent),
     selectedNode,
-    ...(zoneScope ? { zoneScope } : {}),
+    ...(zoneScope ? { zoneScope, zoneScopeSource } : {}),
     channelId: String(
       intent?.channelId
       || selectedNode?.channelId
@@ -7176,7 +7241,7 @@ async function queueRuntimeAppIntent(method, message) {
     kind: appIntentFrameKind(method, resolvedIntent),
     issuer: authority.publicKey,
     audience: appIntentAudience(method, resolvedIntent),
-    zoneScope: appIntentZoneScope(resolvedIntent, { requirePropagation: true }),
+    zoneScope: appIntentZoneScope({ ...resolvedIntent, zoneScope: routingScope?.zoneScope || resolvedIntent.zoneScope }, { requirePropagation: true }),
     issuedAt,
     expiresAt,
     nonce,
@@ -9451,6 +9516,7 @@ function handleStatusPut(message, endpoint) {
     };
     schedulePersist();
     broadcastSnapshot();
+    void flushPendingRouteIntents('runtime.status.shell');
     return { ok: true, result: runtimeSnapshot() };
   }
 

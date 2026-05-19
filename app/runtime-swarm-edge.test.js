@@ -2255,6 +2255,101 @@ test('source-less stream route waits for directory member before frame emission'
   assert.ok(opened.routePromise.audienceRefs.includes(routeMemberPk));
 });
 
+test('runtime stream activation derives route zone from shell posture', async () => {
+  const runtime = loadRuntime(new Map());
+  await attach(runtime.port);
+  await seedNvrServiceCatalog(runtime.port);
+  await seedNvrEdgeDirectory(runtime.port, { zoneScope: { zoneId: 'zone_lab', privacy: 'rawIds', ttl: 30, maxHops: 2 } });
+  await send(runtime.port, {
+    type: 'runtime.status.put',
+    role: 'shell',
+    status: {
+      zones: {
+        activeZoneKey: 'zone_lab',
+        joined: [{ key: 'zone_lab', name: 'Lab' }],
+      },
+    },
+  });
+  await send(runtime.port, { type: 'swarm.edge.test.connect' });
+
+  const queued = await send(runtime.port, {
+    type: 'runtime.stream.open',
+    payload: {
+      nodeRef: 'nvr.streams',
+      capabilityRef: protocol.SWARM.CORE_CAPABILITY.MEDIA_STREAM_PREVIEW,
+      transport: 'webrtc',
+      intentId: 'shell-zone-stream-open',
+      offer: { description: { type: 'offer', sdp: 'v=0\r\n' }, sourceIds: [] },
+    },
+  });
+
+  assert.equal(queued.ok, true);
+  assert.equal(queued.result.frame.channelId, 'nvr.streams');
+  assert.deepEqual(queued.result.frame.zoneScope, {
+    zoneId: 'zone_lab',
+    privacy: 'rawIds',
+    ttl: 30,
+    maxHops: 2,
+  });
+  assert.equal(queued.result.routingScope.source, 'swarm.directory');
+  assert.equal(queued.result.routingScope.state, protocol.SWARM.ROUTING_SCOPE_STATE.READY);
+  const opened = protocol.openEnvelope(queued.result.frame.body.envelope, SERVICE_SK, { now: Date.now() });
+  assert.deepEqual(opened.routePromise.zoneScope, {
+    zoneId: 'zone_lab',
+    privacy: 'rawIds',
+    ttl: 30,
+    maxHops: 2,
+  });
+});
+
+test('runtime treats discovery scopes as additive route coverage', async () => {
+  const runtime = loadRuntime(new Map());
+  await attach(runtime.port);
+  await seedNvrServiceCatalog(runtime.port);
+  await seedNvrEdgeDirectory(runtime.port, { zoneScope: { zoneId: 'zone_lab', privacy: 'rawIds', ttl: 30, maxHops: 2 } });
+  await send(runtime.port, {
+    type: 'runtime.status.put',
+    role: 'shell',
+    status: {
+      zones: {
+        activeZoneKey: 'zone_home',
+        joined: [{ key: 'zone_home', name: 'Home' }],
+      },
+    },
+  });
+  await send(runtime.port, {
+    type: 'swarm.edge.test.connect',
+    zoneScope: { zoneId: 'zone_home', privacy: 'rawIds', ttl: 30, maxHops: 2 },
+  });
+
+  const queued = await send(runtime.port, {
+    type: 'runtime.stream.open',
+    payload: {
+      nodeRef: 'nvr.streams',
+      capabilityRef: protocol.SWARM.CORE_CAPABILITY.MEDIA_STREAM_PREVIEW,
+      transport: 'webrtc',
+      intentId: 'additive-discovery-stream-open',
+      offer: { description: { type: 'offer', sdp: 'v=0\r\n' }, sourceIds: [] },
+    },
+  });
+
+  assert.equal(queued.ok, true);
+  assert.equal(queued.result.routingScope.source, 'swarm.directory');
+  assert.equal(queued.result.routingScope.state, protocol.SWARM.ROUTING_SCOPE_STATE.READY);
+  assert.deepEqual(queued.result.routingScope.zoneScope, {
+    zoneId: 'zone_lab',
+    privacy: 'rawIds',
+    ttl: 30,
+    maxHops: 2,
+  });
+  assert.deepEqual(queued.result.frame.zoneScope, {
+    zoneId: 'zone_lab',
+    privacy: 'rawIds',
+    ttl: 30,
+    maxHops: 2,
+  });
+});
+
 test('stream route baseline prefers resolved service member over generic channel carrier', async () => {
   const runtime = loadRuntime(new Map());
   await attach(runtime.port);
