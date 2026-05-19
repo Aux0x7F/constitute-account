@@ -107,6 +107,7 @@ export const accountSurfaceAppContract = assertSurfaceAppContract({
   },
   releasePosture: {
     state: SURFACE_APP.RELEASE_POSTURE.STATIC,
+    releaseRef: "release:account-ui:local",
     evidenceRefs: ["build:account-ui:local"],
   },
   issuedAt: ISSUED_AT,

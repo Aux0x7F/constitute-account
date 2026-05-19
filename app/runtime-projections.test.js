@@ -296,7 +296,7 @@ test('runtime retained logging dashboard declares security event fabric posture'
   assert.match(workerSource, /assertAccessEpoch/);
   assert.match(workerSource, /assertEventFabricAccessClass/);
   assert.match(workerSource, /assertEventFabricProcessorContract/);
-  assert.match(workerSource, /assertSecurityProcessorSeed/);
+  assert.match(workerSource, /assertCybersecProcessorSeed/);
   assert.match(workerSource, /function runtimeLoggingEventFabricPosture\(/);
   assert.match(workerSource, /function runtimeLoggingEventFabricProcessorContracts\(/);
   assert.match(workerSource, /function runtimeLoggingSecurityProcessorSeed\(/);

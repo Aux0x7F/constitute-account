@@ -1,4 +1,7 @@
-import { preparedServiceRegistry } from 'constitute-ui';
+import {
+  deriveRuntimeMaterializationPosture,
+  preparedServiceRegistry,
+} from 'constitute-ui';
 
 function normalizeArray(value) {
   return Array.isArray(value) ? value : [];
@@ -139,6 +142,7 @@ function preparedPostureStatus(posture = {}, fallbackState = 'unknown') {
 
 export function buildRuntimeSnapshotView(snapshot = {}) {
   const serviceRegistry = preparedServiceRegistry(snapshot);
+  const materialization = deriveRuntimeMaterializationPosture(snapshot);
   const catalog = preparedRuntimeServiceCatalog(snapshot);
   const edge = preparedSwarmEdgeStatus(snapshot);
   const projections = preparedRuntimeProjectionStatus(snapshot);
@@ -150,6 +154,7 @@ export function buildRuntimeSnapshotView(snapshot = {}) {
     serviceRegistry,
     edge,
     projections,
+    materialization,
     resource,
     retention,
   };

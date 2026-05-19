@@ -16,7 +16,7 @@ import {
   assertEventAdmissionEnvelope,
   assertEventFabricAccessClass,
   assertEventFabricProcessorContract,
-  assertSecurityProcessorSeed,
+  assertCybersecProcessorSeed,
   assertConsumerFloor,
   assertMaterializationBudget,
   assertPrivateContentEnvelope,
@@ -2774,7 +2774,7 @@ function runtimeLoggingSecurityProcessorSeed(accessClasses, processorContracts, 
     .filter(Boolean)
     .sort();
   const accessGroupRefs = ['access-group:runtime.logging.security.default'];
-  return assertSecurityProcessorSeed({
+  return assertCybersecProcessorSeed({
     kind: SWARM.RECORD_KIND.SECURITY_PROCESSOR_SEED,
     seedId: 'security-seed:runtime.logging.default',
     fabricRef: 'event-fabric:runtime.logging.default',
@@ -3617,7 +3617,7 @@ function validateAuthorityReductionRecord(record) {
     case SWARM.RECORD_KIND.EVENT_FABRIC_PROCESSOR_CONTRACT:
       return assertEventFabricProcessorContract(record);
     case SWARM.RECORD_KIND.SECURITY_PROCESSOR_SEED:
-      return assertSecurityProcessorSeed(record);
+      return assertCybersecProcessorSeed(record);
     default:
       throw new Error(`unsupported authority record kind: ${kind || 'missing'}`);
   }

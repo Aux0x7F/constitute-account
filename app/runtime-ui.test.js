@@ -69,6 +69,10 @@ function runtimeElements() {
 
 test('runtime service catalog view renders retained snapshot services', () => {
   const snapshot = {
+    materializationBudget: {
+      budgetId: 'runtime.account.snapshot',
+      limits: { estimatedSnapshotBytes: 4096 },
+    },
     serviceCatalog: {
       updatedAt: 1710000000000,
       registry: {
@@ -105,6 +109,8 @@ test('runtime service catalog view renders retained snapshot services', () => {
   const view = renderRuntimeSnapshotView(elements, snapshot, fakeDocument());
 
   assert.equal(view.catalogLabel, '1 service');
+  assert.equal(view.materialization.state, 'withinBudget');
+  assert.equal(view.materialization.budgetId, 'runtime.account.snapshot');
   assert.equal(view.serviceRegistry.source, 'serviceRegistry');
   assert.equal(view.serviceRegistry.claimCount, 1);
   assert.equal(elements.catalogStatusEl.textContent, '1 service');
