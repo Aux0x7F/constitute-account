@@ -421,6 +421,9 @@ let runtimeStatusSnapshot = {
   projections: {},
   managedServiceIssue: null,
 };
+let runtimeSnapshotMaterializationBudget = null;
+let runtimeSnapshotConsumerFloor = null;
+let runtimeSnapshotMaterializationPosture = null;
 let lastManagedServiceIssue = null;
 let lastRuntimeShellStatusKey = '';
 let runtimeAttachWarningLogged = false;
@@ -759,7 +762,13 @@ function renderRuntimeStatusSnapshot() {
     resourceStatusEl: runtimeResourceStatusEl,
     retentionStatusEl: runtimeRetentionStatusEl,
     runtimeStatusDetailEl,
-  }, runtimeStatusSnapshot, document);
+  }, runtimeStatusSnapshot, document, {
+    clientId: runtimeBridge?.clientId || 'runtime-shell',
+    surface: 'shell',
+    materializationBudget: runtimeSnapshotMaterializationBudget || undefined,
+    consumerFloor: runtimeSnapshotConsumerFloor || undefined,
+    materializationPosture: runtimeSnapshotMaterializationPosture || undefined,
+  });
 }
 
 function updateBootSplash(reason = '') {
@@ -2114,6 +2123,15 @@ function startPlatformRuntimeBridge() {
     },
     onMessage: handleBridgeRuntimeMessage,
     onSnapshot: absorbBridgeRuntimeSnapshot,
+    onMaterializationBudget: (budget) => {
+      runtimeSnapshotMaterializationBudget = budget && typeof budget === 'object' ? budget : null;
+    },
+    onConsumerFloor: (floor) => {
+      runtimeSnapshotConsumerFloor = floor && typeof floor === 'object' ? floor : null;
+    },
+    onMaterializationPosture: (posture) => {
+      runtimeSnapshotMaterializationPosture = posture && typeof posture === 'object' ? posture : null;
+    },
     onAttachTimeout: () => {
       bridge.attachTimedOut = true;
       bridge.attachError = new Error('runtime.attach timed out');

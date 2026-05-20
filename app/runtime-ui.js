@@ -140,9 +140,9 @@ function preparedPostureStatus(posture = {}, fallbackState = 'unknown') {
   };
 }
 
-export function buildRuntimeSnapshotView(snapshot = {}) {
+export function buildRuntimeSnapshotView(snapshot = {}, options = {}) {
   const serviceRegistry = preparedServiceRegistry(snapshot);
-  const materialization = deriveRuntimeMaterializationPosture(snapshot);
+  const materialization = deriveRuntimeMaterializationPosture(snapshot, options);
   const catalog = preparedRuntimeServiceCatalog(snapshot);
   const edge = preparedSwarmEdgeStatus(snapshot);
   const projections = preparedRuntimeProjectionStatus(snapshot);
@@ -175,8 +175,8 @@ function appendTextLine(documentRef, parent, className, value) {
   return el;
 }
 
-export function renderRuntimeSnapshotView(elements, snapshot = {}, documentRef = globalThis.document) {
-  const view = buildRuntimeSnapshotView(snapshot);
+export function renderRuntimeSnapshotView(elements, snapshot = {}, documentRef = globalThis.document, options = {}) {
+  const view = buildRuntimeSnapshotView(snapshot, options);
   if (!elements || !documentRef) return view;
 
   if (elements.catalogStatusEl) elements.catalogStatusEl.textContent = view.catalogLabel;

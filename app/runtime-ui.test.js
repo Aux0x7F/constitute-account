@@ -118,6 +118,40 @@ test('runtime service catalog view renders retained snapshot services', () => {
   assert.match(elements.catalogListEl.textContent, /Nodes: Events, Health/);
 });
 
+test('runtime service catalog view consumes runtime materialization envelope', () => {
+  const snapshot = {
+    serviceCatalog: { services: [] },
+    runtimeEvents: [{ eventId: 'event:a' }],
+  };
+  const view = buildRuntimeSnapshotView(snapshot, {
+    clientId: 'runtime-shell-test',
+    surface: 'shell',
+    materializationBudget: {
+      kind: 'materialization.budget',
+      budgetId: 'materialization:runtime-shell-test:runtime-snapshot',
+      state: 'withinBudget',
+      payloadClass: 'projection',
+      copyRole: 'projection',
+      privacyTier: 'safeProjection',
+      limits: {
+        replayLimit: 1,
+        estimatedSnapshotBytes: 512,
+      },
+      consumerFloor: {
+        kind: 'consumer.floor',
+        floorId: 'floor:materialization:runtime-shell-test:runtime-snapshot',
+        materializationId: 'materialization:runtime-shell-test:runtime-snapshot',
+        lagState: 'current',
+      },
+    },
+  });
+
+  assert.equal(view.materialization.state, 'withinBudget');
+  assert.equal(view.materialization.budgetId, 'materialization:runtime-shell-test:runtime-snapshot');
+  assert.equal(view.materialization.consumerFloorId, 'floor:materialization:runtime-shell-test:runtime-snapshot');
+  assert.equal(view.materialization.payloadClass, 'projection');
+});
+
 test('runtime service catalog omits missing health posture from service title', () => {
   const snapshot = {
     serviceCatalog: {
