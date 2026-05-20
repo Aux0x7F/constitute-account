@@ -3656,6 +3656,31 @@ function effectiveRevokedGrantRefs(records, now) {
   return revoked;
 }
 
+function collectAuthorityRefs(target, values) {
+  for (const ref of normalizeArray(values)) {
+    if (ref && !target.includes(ref)) target.push(ref);
+  }
+}
+
+function rootOperationBucket(operation) {
+  switch (operation) {
+    case AGREEMENT.ROOT_OPERATION.ADD_ROOT:
+      return 'addRootRefs';
+    case AGREEMENT.ROOT_OPERATION.REFRESH_ROOT:
+      return 'refreshRootRefs';
+    case AGREEMENT.ROOT_OPERATION.ROTATE_ROOT:
+      return 'rotateRootRefs';
+    case AGREEMENT.ROOT_OPERATION.REVOKE_ROOT:
+      return 'revokeRootRefs';
+    case AGREEMENT.ROOT_OPERATION.ENROLL_DEVICE:
+      return 'enrollDeviceRefs';
+    case AGREEMENT.ROOT_OPERATION.REVOKE_DEVICE:
+      return 'revokeDeviceRefs';
+    default:
+      return '';
+  }
+}
+
 const RUNTIME_AUTHORITY_PROOF_ROW_DEFINITIONS = Object.freeze([
   {
     check: AGREEMENT.AUTHORITY_PROOF_CHECK.SYNC,
@@ -3799,6 +3824,20 @@ function reduceRuntimeAuthorityRecords(message = {}) {
       proofRefs: [],
       witnessRefs: [],
     }),
+    rootDeviceAuthority: authorityPlane('notRequired', '', {
+      operationRefs: [],
+      addRootRefs: [],
+      refreshRootRefs: [],
+      rotateRootRefs: [],
+      revokeRootRefs: [],
+      enrollDeviceRefs: [],
+      revokeDeviceRefs: [],
+      rootRefs: [],
+      deviceRefs: [],
+      adminGrantRefs: [],
+      notificationRefs: [],
+      evidenceRefs: [],
+    }),
     materialization: authorityPlane('notRequired', '', {
       eventFabricAccessClassRefs: [],
       processorRoleRefs: [],
@@ -3843,9 +3882,19 @@ function reduceRuntimeAuthorityRecords(message = {}) {
       case SWARM.RECORD_KIND.AUTHORITY_ROOT_OPERATION:
         if (authorityGrantUsable(record.state)) {
           markAuthorityPlaneReady(reduction.actionAuthority, ref);
+          markAuthorityPlaneReady(reduction.rootDeviceAuthority, ref);
           if (!reduction.actionAuthority.rootOperationRefs.includes(ref)) reduction.actionAuthority.rootOperationRefs.push(ref);
+          if (!reduction.rootDeviceAuthority.operationRefs.includes(ref)) reduction.rootDeviceAuthority.operationRefs.push(ref);
+          const bucket = rootOperationBucket(record.operation);
+          if (bucket && !reduction.rootDeviceAuthority[bucket].includes(ref)) reduction.rootDeviceAuthority[bucket].push(ref);
+          collectAuthorityRefs(reduction.rootDeviceAuthority.rootRefs, record.rootRefs);
+          collectAuthorityRefs(reduction.rootDeviceAuthority.deviceRefs, record.deviceRefs);
+          collectAuthorityRefs(reduction.rootDeviceAuthority.adminGrantRefs, record.adminGrantRefs);
+          collectAuthorityRefs(reduction.rootDeviceAuthority.notificationRefs, record.notificationRefs);
+          collectAuthorityRefs(reduction.rootDeviceAuthority.evidenceRefs, record.evidenceRefs);
         } else {
           markAuthorityPlaneBlocked(reduction.actionAuthority, record.blockedReason || record.state);
+          markAuthorityPlaneBlocked(reduction.rootDeviceAuthority, record.blockedReason || record.state);
         }
         break;
       case SWARM.RECORD_KIND.AUTHORITY_ACTION_GRANT:
@@ -3963,6 +4012,7 @@ function reduceRuntimeAuthorityRecords(message = {}) {
     ...reduction.actionAuthority.blockedReasons,
     ...reduction.accessAuthority.blockedReasons,
     ...reduction.deliveryWitness.blockedReasons,
+    ...reduction.rootDeviceAuthority.blockedReasons,
   ]);
   if (reduction.invalidRecords.length) {
     reduction.state = 'blocked';

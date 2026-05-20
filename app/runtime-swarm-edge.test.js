@@ -3061,6 +3061,102 @@ test('runtime authority records reducer blocks expired and revoked action grants
   assert.equal(revoked.result.blockedReasons.includes('grantRevoked'), true);
 });
 
+test('runtime authority records reducer exposes root and device lifecycle posture', async () => {
+  const runtime = loadRuntime(new Map());
+  await attach(runtime.port);
+  const issuedAt = Date.now();
+  const rootRef = 'root:aux';
+  const rotatedRootRef = 'root:aux:rotated';
+  const deviceRef = 'device:aux-browser';
+  const adminGrantRef = 'grant:root:admin';
+
+  const reduced = await send(runtime.port, {
+    type: 'runtime.authority.records.reduce',
+    records: [
+      {
+        kind: protocol.SWARM.RECORD_KIND.AUTHORITY_ACTION_GRANT,
+        grantId: adminGrantRef,
+        issuerRef: 'identity:aux',
+        subjectRef: 'identity:aux',
+        audienceRefs: [rootRef],
+        authorityDomain: protocol.SWARM.AUTHORITY_DOMAIN.IDENTITY,
+        resourceRef: 'identity:aux',
+        action: 'authority.root.rotate',
+        state: protocol.AGREEMENT.ACTION_GRANT_STATE.ACCEPTED,
+        rootRefs: [rootRef],
+        elevated: true,
+        issuedAt,
+      },
+      {
+        kind: protocol.SWARM.RECORD_KIND.AUTHORITY_ROOT_OPERATION,
+        operationId: 'root-op:add-aux',
+        operation: protocol.AGREEMENT.ROOT_OPERATION.ADD_ROOT,
+        identityRef: 'identity:aux',
+        actorRef: rootRef,
+        targetRef: rootRef,
+        adminGrantRefs: [adminGrantRef],
+        rootRefs: [rootRef],
+        notificationRefs: ['notification:root:add-aux'],
+        evidenceRefs: ['evidence:root:add-aux'],
+        state: protocol.AGREEMENT.ACTION_GRANT_STATE.APPLIED,
+        issuedAt,
+      },
+      {
+        kind: protocol.SWARM.RECORD_KIND.AUTHORITY_ROOT_OPERATION,
+        operationId: 'root-op:refresh-aux',
+        operation: protocol.AGREEMENT.ROOT_OPERATION.REFRESH_ROOT,
+        identityRef: 'identity:aux',
+        actorRef: rootRef,
+        targetRef: rootRef,
+        adminGrantRefs: [adminGrantRef],
+        evidenceRefs: ['evidence:root:refresh-aux'],
+        state: protocol.AGREEMENT.ACTION_GRANT_STATE.APPLIED,
+        issuedAt: issuedAt + 1,
+      },
+      {
+        kind: protocol.SWARM.RECORD_KIND.AUTHORITY_ROOT_OPERATION,
+        operationId: 'root-op:rotate-aux',
+        operation: protocol.AGREEMENT.ROOT_OPERATION.ROTATE_ROOT,
+        identityRef: 'identity:aux',
+        actorRef: rootRef,
+        targetRef: rotatedRootRef,
+        adminGrantRefs: [adminGrantRef],
+        rootRefs: [rotatedRootRef],
+        notificationRefs: ['notification:root:rotate-aux'],
+        evidenceRefs: ['evidence:root:rotate-aux'],
+        state: protocol.AGREEMENT.ACTION_GRANT_STATE.APPLIED,
+        issuedAt: issuedAt + 2,
+      },
+      {
+        kind: protocol.SWARM.RECORD_KIND.AUTHORITY_ROOT_OPERATION,
+        operationId: 'root-op:enroll-browser',
+        operation: protocol.AGREEMENT.ROOT_OPERATION.ENROLL_DEVICE,
+        identityRef: 'identity:aux',
+        actorRef: rotatedRootRef,
+        targetRef: deviceRef,
+        adminGrantRefs: [adminGrantRef],
+        deviceRefs: [deviceRef],
+        notificationRefs: ['notification:device:enroll-browser'],
+        evidenceRefs: ['evidence:device:enroll-browser'],
+        state: protocol.AGREEMENT.ACTION_GRANT_STATE.APPLIED,
+        issuedAt: issuedAt + 3,
+      },
+    ],
+  });
+
+  assert.equal(reduced.ok, true);
+  assert.equal(reduced.result.rootDeviceAuthority.state, 'ready');
+  assert.deepEqual(reduced.result.rootDeviceAuthority.addRootRefs, ['root-op:add-aux']);
+  assert.deepEqual(reduced.result.rootDeviceAuthority.refreshRootRefs, ['root-op:refresh-aux']);
+  assert.deepEqual(reduced.result.rootDeviceAuthority.rotateRootRefs, ['root-op:rotate-aux']);
+  assert.deepEqual(reduced.result.rootDeviceAuthority.enrollDeviceRefs, ['root-op:enroll-browser']);
+  assert.deepEqual(reduced.result.rootDeviceAuthority.rootRefs, [rootRef, rotatedRootRef]);
+  assert.deepEqual(reduced.result.rootDeviceAuthority.deviceRefs, [deviceRef]);
+  assert.deepEqual(reduced.result.rootDeviceAuthority.adminGrantRefs, [adminGrantRef]);
+  assert.equal(reduced.result.rootDeviceAuthority.notificationRefs.length, 3);
+  assert.equal(reduced.result.rootDeviceAuthority.evidenceRefs.length, 4);
+});
+
 test('runtime activation waits for explicit device authority instead of relying on cache timing', async () => {
   const runtime = loadRuntime(new Map(), { noDevice: true });
   await attach(runtime.port);
