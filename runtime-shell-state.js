@@ -74,6 +74,64 @@ function serviceCount(snapshot) {
   return count;
 }
 
+export function deriveRuntimeMaterializationPosture(snapshot = {}, options = {}) {
+  const snap = record(snapshot);
+  const materialization = record(snap.materialization);
+  const materializationBudget = record(
+    options.materializationBudget
+      || snap.materializationBudget
+      || materialization.materializationBudget
+      || materialization.budget,
+  );
+  const consumerFloor = record(
+    options.consumerFloor
+      || materialization.consumerFloor
+      || materializationBudget.consumerFloor,
+  );
+  const budgets = Array.isArray(materialization.budgets)
+    ? materialization.budgets
+    : (materializationBudget.budgetId ? [materializationBudget] : []);
+  const runtimeEventCount = Array.isArray(snap.runtimeEvents)
+    ? snap.runtimeEvents.length
+    : Number(materialization.runtimeEventCount || materializationBudget?.limits?.deliveredRuntimeEventCount || 0) || 0;
+  const projectionMaterialized = projectionCount(snap) > 0;
+  const lagState = firstText(consumerFloor.lagState);
+  const blockedReasons = Array.isArray(materializationBudget.blockedReasons)
+    ? materializationBudget.blockedReasons.map((entry) => text(entry)).filter(Boolean)
+    : [];
+  const state = firstText(
+    materialization.state,
+    materializationBudget.state,
+    lagState === "lagging" ? "lagging" : "",
+    materializationBudget.budgetId ? "withinBudget" : "",
+    projectionMaterialized ? "materialized" : "",
+    "unknown",
+  );
+  return Object.freeze({
+    kind: "runtime.materialization.posture",
+    state,
+    reason: firstText(
+      materialization.reason,
+      materializationBudget.reason,
+      consumerFloor.reason,
+      blockedReasons[0],
+    ),
+    budgetId: firstText(materializationBudget.budgetId),
+    budgetCount: budgets.length,
+    consumerFloorId: firstText(consumerFloor.floorId),
+    lagState: lagState || "unknown",
+    fanout: Number(materialization.fanout || materializationBudget?.limits?.fanout || 0) || 0,
+    projectionCount: Number(materialization.projectionCount || projectionCount(snap) || 0) || 0,
+    runtimeEventCount,
+    estimatedSnapshotBytes: Number(materializationBudget?.limits?.estimatedSnapshotBytes || 0) || 0,
+    replayLimit: Number(materializationBudget?.limits?.replayLimit || 0) || 0,
+    copyRole: firstText(materializationBudget.copyRole),
+    payloadClass: firstText(materializationBudget.payloadClass),
+    privacyTier: firstText(materializationBudget.privacyTier),
+    blockedReasons: Object.freeze(blockedReasons),
+  });
+}
+
 function normalizeRole(value) {
   return text(value).toLowerCase();
 }
@@ -201,7 +259,7 @@ export function deriveRuntimeShellState(snapshot = {}, options = {}) {
   const authority = record(snap.authority);
   const resource = record(snap.resource);
   const retention = record(snap.retention);
-  const materialization = record(snap.materialization);
+  const materializationPosture = deriveRuntimeMaterializationPosture(snap, options);
 
   const identityId = firstText(
     identity.identityId,
@@ -362,12 +420,20 @@ export function deriveRuntimeShellState(snapshot = {}, options = {}) {
       cleanupReason: firstText(resource.cleanupReason),
     }),
     materialization: Object.freeze({
-      state: firstText(materialization.state, "unknown"),
-      reason: firstText(materialization.reason),
-      budgetCount: Array.isArray(materialization.budgets) ? materialization.budgets.length : 0,
-      fanout: Number(materialization.fanout || 0) || 0,
-      projectionCount: Number(materialization.projectionCount || 0) || 0,
-      runtimeEventCount: Number(materialization.runtimeEventCount || 0) || 0,
+      state: materializationPosture.state,
+      reason: materializationPosture.reason,
+      budgetId: materializationPosture.budgetId,
+      budgetCount: materializationPosture.budgetCount,
+      consumerFloorId: materializationPosture.consumerFloorId,
+      lagState: materializationPosture.lagState,
+      fanout: materializationPosture.fanout,
+      projectionCount: materializationPosture.projectionCount,
+      runtimeEventCount: materializationPosture.runtimeEventCount,
+      estimatedSnapshotBytes: materializationPosture.estimatedSnapshotBytes,
+      replayLimit: materializationPosture.replayLimit,
+      copyRole: materializationPosture.copyRole,
+      payloadClass: materializationPosture.payloadClass,
+      privacyTier: materializationPosture.privacyTier,
     }),
     retention: Object.freeze({
       state: firstText(retention.state, "unknown"),
