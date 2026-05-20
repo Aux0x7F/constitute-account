@@ -3157,6 +3157,76 @@ test('runtime authority records reducer exposes root and device lifecycle postur
   assert.equal(reduced.result.rootDeviceAuthority.evidenceRefs.length, 4);
 });
 
+test('runtime authority records reducer blocks root operations without usable admin grants', async () => {
+  const runtime = loadRuntime(new Map());
+  await attach(runtime.port);
+  const issuedAt = Date.now();
+  const rootRef = 'root:aux';
+
+  const missingAdmin = await send(runtime.port, {
+    type: 'runtime.authority.records.reduce',
+    records: [{
+      kind: protocol.SWARM.RECORD_KIND.AUTHORITY_ROOT_OPERATION,
+      operationId: 'root-op:refresh-missing-admin',
+      operation: protocol.AGREEMENT.ROOT_OPERATION.REFRESH_ROOT,
+      identityRef: 'identity:aux',
+      actorRef: rootRef,
+      targetRef: rootRef,
+      adminGrantRefs: ['grant:root:missing'],
+      evidenceRefs: ['evidence:root:refresh-missing-admin'],
+      state: protocol.AGREEMENT.ACTION_GRANT_STATE.APPLIED,
+      issuedAt,
+    }],
+  });
+
+  assert.equal(missingAdmin.ok, true);
+  assert.equal(missingAdmin.result.rootDeviceAuthority.state, 'blocked');
+  assert.deepEqual(missingAdmin.result.rootDeviceAuthority.operationRefs, []);
+  assert.deepEqual(missingAdmin.result.rootDeviceAuthority.refreshRootRefs, []);
+  assert.deepEqual(missingAdmin.result.rootDeviceAuthority.blockedOperationRefs, ['root-op:refresh-missing-admin']);
+  assert.deepEqual(missingAdmin.result.rootDeviceAuthority.unusableAdminGrantRefs, ['grant:root:missing']);
+  assert.equal(missingAdmin.result.blockedReasons.includes('adminGrantUnavailable'), true);
+
+  const nonAdminGrantRef = 'grant:service:fulfill';
+  const nonAdminGrant = await send(runtime.port, {
+    type: 'runtime.authority.records.reduce',
+    records: [
+      {
+        kind: protocol.SWARM.RECORD_KIND.AUTHORITY_ACTION_GRANT,
+        grantId: nonAdminGrantRef,
+        issuerRef: 'identity:aux',
+        subjectRef: 'identity:aux',
+        audienceRefs: [rootRef],
+        authorityDomain: protocol.SWARM.AUTHORITY_DOMAIN.IDENTITY,
+        resourceRef: 'service:nvr',
+        action: 'service.fulfill',
+        state: protocol.AGREEMENT.ACTION_GRANT_STATE.ACCEPTED,
+        issuedAt,
+      },
+      {
+        kind: protocol.SWARM.RECORD_KIND.AUTHORITY_ROOT_OPERATION,
+        operationId: 'root-op:refresh-non-admin',
+        operation: protocol.AGREEMENT.ROOT_OPERATION.REFRESH_ROOT,
+        identityRef: 'identity:aux',
+        actorRef: rootRef,
+        targetRef: rootRef,
+        adminGrantRefs: [nonAdminGrantRef],
+        evidenceRefs: ['evidence:root:refresh-non-admin'],
+        state: protocol.AGREEMENT.ACTION_GRANT_STATE.APPLIED,
+        issuedAt: issuedAt + 1,
+      },
+    ],
+  });
+
+  assert.equal(nonAdminGrant.ok, true);
+  assert.equal(nonAdminGrant.result.rootDeviceAuthority.state, 'blocked');
+  assert.deepEqual(nonAdminGrant.result.rootDeviceAuthority.operationRefs, []);
+  assert.deepEqual(nonAdminGrant.result.rootDeviceAuthority.refreshRootRefs, []);
+  assert.deepEqual(nonAdminGrant.result.rootDeviceAuthority.blockedOperationRefs, ['root-op:refresh-non-admin']);
+  assert.deepEqual(nonAdminGrant.result.rootDeviceAuthority.unusableAdminGrantRefs, [nonAdminGrantRef]);
+  assert.equal(nonAdminGrant.result.blockedReasons.includes('adminGrantUnavailable'), true);
+});
+
 test('runtime activation waits for explicit device authority instead of relying on cache timing', async () => {
   const runtime = loadRuntime(new Map(), { noDevice: true });
   await attach(runtime.port);

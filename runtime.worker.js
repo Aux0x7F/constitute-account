@@ -3656,6 +3656,43 @@ function effectiveRevokedGrantRefs(records, now) {
   return revoked;
 }
 
+function usableAuthorityGrantMap(records, revokedGrantRefs, now) {
+  const grants = new Map();
+  for (const record of records) {
+    if (record?.kind !== SWARM.RECORD_KIND.AUTHORITY_ACTION_GRANT) continue;
+    const ref = runtimeAuthorityRecordRef(record);
+    if (!ref) continue;
+    if (authorityRecordExpired(record, now)) continue;
+    if (revokedGrantRefs.has(ref)) continue;
+    if (!authorityGrantUsable(record.state)) continue;
+    grants.set(ref, record);
+  }
+  return grants;
+}
+
+function authorityGrantRootAdminUsable(grant) {
+  if (!grant) return false;
+  const action = String(grant.action || '').trim();
+  return grant.elevated === true || action.startsWith('authority.root.');
+}
+
+function rootOperationAdminGrantUsable(record, usableGrantMap) {
+  for (const grantRef of uniqueTrimmedStrings(record?.adminGrantRefs)) {
+    const grant = usableGrantMap.get(grantRef);
+    if (!grant) continue;
+    if (authorityGrantRootAdminUsable(grant)) return true;
+  }
+  return false;
+}
+
+function collectUnusableRootAdminGrantRefs(target, refs, usableGrantMap) {
+  for (const ref of uniqueTrimmedStrings(refs)) {
+    const grant = usableGrantMap.get(ref);
+    if (!ref || authorityGrantRootAdminUsable(grant) || target.includes(ref)) continue;
+    target.push(ref);
+  }
+}
+
 function collectAuthorityRefs(target, values) {
   for (const ref of normalizeArray(values)) {
     if (ref && !target.includes(ref)) target.push(ref);
@@ -3835,8 +3872,10 @@ function reduceRuntimeAuthorityRecords(message = {}) {
       rootRefs: [],
       deviceRefs: [],
       adminGrantRefs: [],
+      unusableAdminGrantRefs: [],
       notificationRefs: [],
       evidenceRefs: [],
+      blockedOperationRefs: [],
     }),
     materialization: authorityPlane('notRequired', '', {
       eventFabricAccessClassRefs: [],
@@ -3872,6 +3911,7 @@ function reduceRuntimeAuthorityRecords(message = {}) {
   }
 
   const revokedGrantRefs = effectiveRevokedGrantRefs(validRecords, now);
+  const usableGrantMap = usableAuthorityGrantMap(validRecords, revokedGrantRefs, now);
 
   for (const record of validRecords) {
 
@@ -3881,6 +3921,19 @@ function reduceRuntimeAuthorityRecords(message = {}) {
     switch (record.kind) {
       case SWARM.RECORD_KIND.AUTHORITY_ROOT_OPERATION:
         if (authorityGrantUsable(record.state)) {
+          if (!rootOperationAdminGrantUsable(record, usableGrantMap)) {
+            markAuthorityPlaneBlocked(reduction.actionAuthority, 'adminGrantUnavailable');
+            markAuthorityPlaneBlocked(reduction.rootDeviceAuthority, 'adminGrantUnavailable');
+            if (ref && !reduction.rootDeviceAuthority.blockedOperationRefs.includes(ref)) {
+              reduction.rootDeviceAuthority.blockedOperationRefs.push(ref);
+            }
+            collectUnusableRootAdminGrantRefs(
+              reduction.rootDeviceAuthority.unusableAdminGrantRefs,
+              record.adminGrantRefs,
+              usableGrantMap,
+            );
+            break;
+          }
           markAuthorityPlaneReady(reduction.actionAuthority, ref);
           markAuthorityPlaneReady(reduction.rootDeviceAuthority, ref);
           if (!reduction.actionAuthority.rootOperationRefs.includes(ref)) reduction.actionAuthority.rootOperationRefs.push(ref);
