@@ -3634,6 +3634,28 @@ function authorityGrantUsable(state) {
   ].includes(state);
 }
 
+function authorityRecordExpired(record, now) {
+  const expiresAt = Number(record?.expiresAt || 0) || 0;
+  return expiresAt > 0 && expiresAt <= now;
+}
+
+function effectiveRevokedGrantRefs(records, now) {
+  const revoked = new Set();
+  for (const record of records) {
+    if (record?.kind !== SWARM.RECORD_KIND.AUTHORITY_GRANT_REVOCATION_POSTURE) continue;
+    if (![AGREEMENT.ACTION_GRANT_STATE.APPLIED, AGREEMENT.ACTION_GRANT_STATE.REVOKED].includes(record.state)) continue;
+    const effectiveAt = Number(record.effectiveAt || record.issuedAt || 0) || 0;
+    if (effectiveAt > now) continue;
+    for (const ref of uniqueTrimmedStrings([
+      record.targetGrantRef,
+      ...normalizeArray(record.affectedGrantRefs),
+    ])) {
+      revoked.add(ref);
+    }
+  }
+  return revoked;
+}
+
 const RUNTIME_AUTHORITY_PROOF_ROW_DEFINITIONS = Object.freeze([
   {
     check: AGREEMENT.AUTHORITY_PROOF_CHECK.SYNC,
@@ -3759,6 +3781,8 @@ function reduceRuntimeAuthorityRecords(message = {}) {
       exerciseRefs: [],
       rootOperationRefs: [],
       revocationRefs: [],
+      expiredGrantRefs: [],
+      revokedGrantRefs: [],
       actions: [],
       resourceRefs: [],
     }),
@@ -3787,6 +3811,7 @@ function reduceRuntimeAuthorityRecords(message = {}) {
       canAct: false,
       futureReadable: false,
       rawReadable: false,
+      canUseActionGrant: false,
     },
     recordRefs: [],
     invalidRecords: [],
@@ -3805,6 +3830,11 @@ function reduceRuntimeAuthorityRecords(message = {}) {
       continue;
     }
     validRecords.push(record);
+  }
+
+  const revokedGrantRefs = effectiveRevokedGrantRefs(validRecords, now);
+
+  for (const record of validRecords) {
 
     const ref = runtimeAuthorityRecordRef(record);
     if (ref && !reduction.recordRefs.includes(ref)) reduction.recordRefs.push(ref);
@@ -3819,11 +3849,18 @@ function reduceRuntimeAuthorityRecords(message = {}) {
         }
         break;
       case SWARM.RECORD_KIND.AUTHORITY_ACTION_GRANT:
-        if (authorityGrantUsable(record.state)) {
+        if (authorityRecordExpired(record, now)) {
+          if (ref && !reduction.actionAuthority.expiredGrantRefs.includes(ref)) reduction.actionAuthority.expiredGrantRefs.push(ref);
+          markAuthorityPlaneBlocked(reduction.actionAuthority, 'grantExpired');
+        } else if (revokedGrantRefs.has(ref)) {
+          if (ref && !reduction.actionAuthority.revokedGrantRefs.includes(ref)) reduction.actionAuthority.revokedGrantRefs.push(ref);
+          markAuthorityPlaneBlocked(reduction.actionAuthority, 'grantRevoked');
+        } else if (authorityGrantUsable(record.state)) {
           markAuthorityPlaneReady(reduction.actionAuthority, ref);
           if (!reduction.actionAuthority.grantRefs.includes(ref)) reduction.actionAuthority.grantRefs.push(ref);
           if (record.action && !reduction.actionAuthority.actions.includes(record.action)) reduction.actionAuthority.actions.push(record.action);
           if (record.resourceRef && !reduction.actionAuthority.resourceRefs.includes(record.resourceRef)) reduction.actionAuthority.resourceRefs.push(record.resourceRef);
+          reduction.actionability.canUseActionGrant = true;
         } else {
           markAuthorityPlaneBlocked(reduction.actionAuthority, record.blockedReason || record.state);
         }
@@ -3839,6 +3876,11 @@ function reduceRuntimeAuthorityRecords(message = {}) {
       case SWARM.RECORD_KIND.AUTHORITY_GRANT_REVOCATION_POSTURE:
         markAuthorityPlaneReady(reduction.actionAuthority, ref);
         if (!reduction.actionAuthority.revocationRefs.includes(ref)) reduction.actionAuthority.revocationRefs.push(ref);
+        for (const grantRef of uniqueTrimmedStrings([record.targetGrantRef, ...normalizeArray(record.affectedGrantRefs)])) {
+          if (revokedGrantRefs.has(grantRef) && !reduction.actionAuthority.revokedGrantRefs.includes(grantRef)) {
+            reduction.actionAuthority.revokedGrantRefs.push(grantRef);
+          }
+        }
         reduction.actionability.canRevokeExpire = true;
         break;
       case SWARM.RECORD_KIND.ACCESS_GROUP:
@@ -3906,7 +3948,7 @@ function reduceRuntimeAuthorityRecords(message = {}) {
     }
   }
 
-  reduction.actionability.canAct = reduction.actionAuthority.state === 'ready' || reduction.actionability.canWriteReduce || reduction.actionability.canRevokeExpire;
+  reduction.actionability.canAct = reduction.actionability.canUseActionGrant || reduction.actionability.canWriteReduce || reduction.actionability.canRevokeExpire;
   reduction.actionability.canRead = reduction.actionability.canRead && reduction.accessAuthority.state !== 'blocked';
 
   const missing = [];
