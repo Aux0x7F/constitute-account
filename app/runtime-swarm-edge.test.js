@@ -2613,6 +2613,36 @@ test('runtime authority records reducer separates action, access, and witness pl
   await attach(runtime.port);
   const issuedAt = Date.now();
   const expiresAt = issuedAt + 60_000;
+  const subjectRefs = [
+    'service:gateway',
+    'service:nvr',
+    'service:logging',
+    'event-fabric:identity:aux',
+    'storage:identity:aux',
+    'source:identity:aux',
+    'build:identity:aux',
+    'app:constitute-cybersec',
+  ];
+  const actionGrantRefs = [
+    'grant:agent:full',
+    'grant:agent:gateway-route',
+    'grant:agent:logging-writer',
+    'grant:agent:storage-pin',
+    'grant:agent:source-update',
+    'grant:agent:build-run',
+  ];
+  const accessGroupRefs = [
+    'access-group:agent-events',
+    'access-group:agent-source-build',
+  ];
+  const accessEpochRefs = [
+    'epoch:agent-events:1',
+    'epoch:agent-source-build:1',
+  ];
+  const privateEnvelopeRefs = [
+    'private-envelope:event-detail:1',
+    'private-envelope:source-build:1',
+  ];
   const records = [
     {
       kind: protocol.SWARM.RECORD_KIND.AUTHORITY_ACTION_GRANT,
@@ -2623,6 +2653,66 @@ test('runtime authority records reducer separates action, access, and witness pl
       authorityDomain: protocol.SWARM.AUTHORITY_DOMAIN.IDENTITY,
       resourceRef: 'service:nvr',
       action: 'service.fulfill',
+      state: protocol.AGREEMENT.ACTION_GRANT_STATE.ACCEPTED,
+      issuedAt,
+    },
+    {
+      kind: protocol.SWARM.RECORD_KIND.AUTHORITY_ACTION_GRANT,
+      grantId: 'grant:agent:gateway-route',
+      issuerRef: 'identity:aux',
+      subjectRef: 'identity:agent',
+      audienceRefs: ['member:agent-browser'],
+      authorityDomain: protocol.SWARM.AUTHORITY_DOMAIN.IDENTITY,
+      resourceRef: 'service:gateway',
+      action: 'gateway.route.use',
+      state: protocol.AGREEMENT.ACTION_GRANT_STATE.ACCEPTED,
+      issuedAt,
+    },
+    {
+      kind: protocol.SWARM.RECORD_KIND.AUTHORITY_ACTION_GRANT,
+      grantId: 'grant:agent:logging-writer',
+      issuerRef: 'identity:aux',
+      subjectRef: 'identity:agent',
+      audienceRefs: ['member:agent-browser'],
+      authorityDomain: protocol.SWARM.AUTHORITY_DOMAIN.IDENTITY,
+      resourceRef: 'service:logging',
+      action: 'event.fabric.process',
+      state: protocol.AGREEMENT.ACTION_GRANT_STATE.ACCEPTED,
+      issuedAt,
+    },
+    {
+      kind: protocol.SWARM.RECORD_KIND.AUTHORITY_ACTION_GRANT,
+      grantId: 'grant:agent:storage-pin',
+      issuerRef: 'identity:aux',
+      subjectRef: 'identity:agent',
+      audienceRefs: ['member:agent-browser'],
+      authorityDomain: protocol.SWARM.AUTHORITY_DOMAIN.IDENTITY,
+      resourceRef: 'storage:identity:aux',
+      action: 'storage.pin',
+      state: protocol.AGREEMENT.ACTION_GRANT_STATE.ACCEPTED,
+      issuedAt,
+    },
+    {
+      kind: protocol.SWARM.RECORD_KIND.AUTHORITY_ACTION_GRANT,
+      grantId: 'grant:agent:source-update',
+      issuerRef: 'identity:aux',
+      subjectRef: 'identity:agent',
+      audienceRefs: ['member:agent-browser'],
+      authorityDomain: protocol.SWARM.AUTHORITY_DOMAIN.IDENTITY,
+      resourceRef: 'source:identity:aux',
+      action: 'source.ref.update',
+      state: protocol.AGREEMENT.ACTION_GRANT_STATE.ACCEPTED,
+      issuedAt,
+    },
+    {
+      kind: protocol.SWARM.RECORD_KIND.AUTHORITY_ACTION_GRANT,
+      grantId: 'grant:agent:build-run',
+      issuerRef: 'identity:aux',
+      subjectRef: 'identity:agent',
+      audienceRefs: ['member:agent-browser'],
+      authorityDomain: protocol.SWARM.AUTHORITY_DOMAIN.IDENTITY,
+      resourceRef: 'build:identity:aux',
+      action: 'build.run',
       state: protocol.AGREEMENT.ACTION_GRANT_STATE.ACCEPTED,
       issuedAt,
     },
@@ -2640,12 +2730,38 @@ test('runtime authority records reducer separates action, access, and witness pl
       observedAt: issuedAt + 1,
     },
     {
+      kind: protocol.SWARM.RECORD_KIND.AUTHORITY_ACTION_EXERCISE,
+      exerciseId: 'exercise:agent:logging',
+      grantId: 'grant:agent:logging-writer',
+      actorRef: 'identity:agent',
+      subjectRef: 'member:agent-browser',
+      resourceRef: 'event-fabric:identity:aux',
+      action: 'event.fabric.process',
+      state: protocol.AGREEMENT.ACTION_GRANT_STATE.APPLIED,
+      evidenceRefs: ['proof:exercise:agent:logging'],
+      issuedAt,
+      observedAt: issuedAt + 2,
+    },
+    {
+      kind: protocol.SWARM.RECORD_KIND.AUTHORITY_ACTION_EXERCISE,
+      exerciseId: 'exercise:agent:build',
+      grantId: 'grant:agent:build-run',
+      actorRef: 'identity:agent',
+      subjectRef: 'member:agent-browser',
+      resourceRef: 'build:identity:aux',
+      action: 'build.run',
+      state: protocol.AGREEMENT.ACTION_GRANT_STATE.APPLIED,
+      evidenceRefs: ['proof:exercise:agent:build'],
+      issuedAt,
+      observedAt: issuedAt + 3,
+    },
+    {
       kind: protocol.SWARM.RECORD_KIND.AUTHORITY_GRANT_REVOCATION_POSTURE,
       revocationId: 'revocation:agent:full:expiry',
       targetGrantRef: 'grant:agent:full',
       issuerRef: 'identity:aux',
       authorityDomain: protocol.SWARM.AUTHORITY_DOMAIN.IDENTITY,
-      affectedGrantRefs: ['grant:agent:full'],
+      affectedGrantRefs: actionGrantRefs,
       state: protocol.AGREEMENT.ACTION_GRANT_STATE.APPLIED,
       reasonCode: 'expiry.available',
       evidenceRefs: ['proof:revocation-path'],
@@ -2677,6 +2793,30 @@ test('runtime authority records reducer separates action, access, and witness pl
       expiresAt,
     },
     {
+      kind: protocol.SWARM.RECORD_KIND.ACCESS_GROUP,
+      groupId: 'access-group:agent-source-build',
+      ownerRef: 'identity:aux',
+      subjectRef: 'source:identity:aux',
+      contentClasses: [protocol.AGREEMENT.CONTENT_CLASS.ENCRYPTED_DETAIL],
+      memberRefs: ['member:agent-browser'],
+      adminRefs: ['identity:aux'],
+      currentEpochId: 'epoch:agent-source-build:1',
+      issuedAt,
+    },
+    {
+      kind: protocol.SWARM.RECORD_KIND.ACCESS_EPOCH,
+      epochId: 'epoch:agent-source-build:1',
+      groupId: 'access-group:agent-source-build',
+      sequence: 1,
+      changeKind: protocol.AGREEMENT.ACCESS_EPOCH_CHANGE.ADD_MEMBER,
+      memberRefs: ['member:agent-browser'],
+      addedMemberRefs: ['member:agent-browser'],
+      keyRef: 'key:agent-source-build:1',
+      proofRefs: ['proof:epoch:agent-source-build:1'],
+      issuedAt,
+      expiresAt,
+    },
+    {
       kind: protocol.SWARM.RECORD_KIND.PRIVATE_CONTENT_ENVELOPE,
       envelopeId: 'private-envelope:event-detail:1',
       contentClass: protocol.AGREEMENT.CONTENT_CLASS.ENCRYPTED_DETAIL,
@@ -2690,16 +2830,29 @@ test('runtime authority records reducer separates action, access, and witness pl
       expiresAt,
     },
     {
+      kind: protocol.SWARM.RECORD_KIND.PRIVATE_CONTENT_ENVELOPE,
+      envelopeId: 'private-envelope:source-build:1',
+      contentClass: protocol.AGREEMENT.CONTENT_CLASS.ENCRYPTED_DETAIL,
+      accessGroupRef: 'access-group:agent-source-build',
+      epochId: 'epoch:agent-source-build:1',
+      subjectRef: 'source:identity:aux',
+      issuerRef: 'source:processor',
+      detailRef: 'storage:source-build:1',
+      recipientRefs: ['member:agent-browser'],
+      issuedAt,
+      expiresAt,
+    },
+    {
       kind: protocol.SWARM.RECORD_KIND.AUTHORITY_MULTI_IDENTITY_PROOF,
       proofId: 'proof:agent-full-access',
       ownerIdentityRef: 'identity:aux',
       granteeIdentityRef: 'identity:agent',
       granteeMemberRef: 'member:agent-browser',
-      subjectRefs: ['service:nvr', 'event-fabric:identity:aux'],
-      actionGrantRefs: ['grant:agent:full'],
-      accessGroupRefs: ['access-group:agent-events'],
-      accessEpochRefs: ['epoch:agent-events:1'],
-      privateEnvelopeRefs: ['private-envelope:event-detail:1'],
+      subjectRefs,
+      actionGrantRefs,
+      accessGroupRefs,
+      accessEpochRefs,
+      privateEnvelopeRefs,
       evidenceRefs: ['proof:browser:aux-agent'],
       state: protocol.AGREEMENT.AUTHORITY_PROOF_STATE.PROVED,
       checks: [
@@ -2715,17 +2868,17 @@ test('runtime authority records reducer separates action, access, and witness pl
           plane: protocol.AGREEMENT.PLANE.ACCESS_AUTHORITY,
           state: protocol.AGREEMENT.AUTHORITY_PROOF_STATE.PROVED,
           targetRef: 'event-fabric:identity:aux',
-          accessGroupRefs: ['access-group:agent-events'],
-          accessEpochRefs: ['epoch:agent-events:1'],
+          accessGroupRefs,
+          accessEpochRefs,
           evidenceRefs: ['proof:read'],
         },
         {
           check: protocol.AGREEMENT.AUTHORITY_PROOF_CHECK.WRITE_REDUCE,
           plane: protocol.AGREEMENT.PLANE.ACTION_AUTHORITY,
           state: protocol.AGREEMENT.AUTHORITY_PROOF_STATE.PROVED,
-          targetRef: 'service:nvr',
-          grantRefs: ['grant:agent:full'],
-          exerciseRefs: ['exercise:agent:nvr'],
+          targetRef: 'event-fabric:identity:aux',
+          grantRefs: actionGrantRefs,
+          exerciseRefs: ['exercise:agent:nvr', 'exercise:agent:logging', 'exercise:agent:build'],
           evidenceRefs: ['proof:write-reduce'],
         },
         {
@@ -2733,7 +2886,7 @@ test('runtime authority records reducer separates action, access, and witness pl
           plane: protocol.AGREEMENT.PLANE.ACTION_AUTHORITY,
           state: protocol.AGREEMENT.AUTHORITY_PROOF_STATE.PROVED,
           targetRef: 'grant:agent:full',
-          grantRefs: ['grant:agent:full'],
+          grantRefs: actionGrantRefs,
           evidenceRefs: ['proof:revoke-expire'],
           expiresAt,
         },
@@ -2759,15 +2912,40 @@ test('runtime authority records reducer separates action, access, and witness pl
   assert.equal(reduced.result.actionability.canRevokeExpire, true);
   assert.equal(reduced.result.actionability.futureReadable, true);
   assert.equal(reduced.result.actionability.rawReadable, true);
-  assert.deepEqual(reduced.result.actionAuthority.grantRefs, ['grant:agent:full']);
-  assert.deepEqual(reduced.result.actionAuthority.exerciseRefs, ['exercise:agent:nvr']);
+  assert.deepEqual(reduced.result.actionAuthority.grantRefs, actionGrantRefs);
+  assert.deepEqual(reduced.result.actionAuthority.exerciseRefs, [
+    'exercise:agent:nvr',
+    'exercise:agent:logging',
+    'exercise:agent:build',
+  ]);
   assert.deepEqual(reduced.result.actionAuthority.revocationRefs, ['revocation:agent:full:expiry']);
   assert.equal(reduced.result.accessAuthority.accessGroupRefs.includes('access-group:agent-events'), true);
+  assert.equal(reduced.result.accessAuthority.accessGroupRefs.includes('access-group:agent-source-build'), true);
   assert.equal(reduced.result.accessAuthority.privateEnvelopeRefs.includes('private-envelope:event-detail:1'), true);
+  assert.equal(reduced.result.accessAuthority.privateEnvelopeRefs.includes('private-envelope:source-build:1'), true);
   assert.equal(reduced.result.walletPosture.kind, 'runtime.authority.wallet.posture');
   assert.equal(reduced.result.walletPosture.ownerIdentityRef, 'identity:aux');
   assert.equal(reduced.result.walletPosture.granteeIdentityRef, 'identity:agent');
   assert.equal(reduced.result.walletPosture.granteeMemberRef, 'member:agent-browser');
+  assert.deepEqual(reduced.result.walletPosture.subjectRefs, subjectRefs);
+  assert.deepEqual(reduced.result.walletPosture.subjectCoverage.serviceRefs, [
+    'service:gateway',
+    'service:nvr',
+    'service:logging',
+  ]);
+  assert.deepEqual(reduced.result.walletPosture.subjectCoverage.eventFabricRefs, ['event-fabric:identity:aux']);
+  assert.deepEqual(reduced.result.walletPosture.subjectCoverage.storageRefs, ['storage:identity:aux']);
+  assert.deepEqual(reduced.result.walletPosture.subjectCoverage.sourceRefs, ['source:identity:aux']);
+  assert.deepEqual(reduced.result.walletPosture.subjectCoverage.buildRefs, ['build:identity:aux']);
+  assert.deepEqual(reduced.result.walletPosture.subjectCoverage.appRefs, ['app:constitute-cybersec']);
+  assert.deepEqual(reduced.result.walletPosture.resourceCoverage.serviceRefs, [
+    'service:nvr',
+    'service:gateway',
+    'service:logging',
+  ]);
+  assert.deepEqual(reduced.result.walletPosture.resourceCoverage.storageRefs, ['storage:identity:aux']);
+  assert.deepEqual(reduced.result.walletPosture.resourceCoverage.sourceRefs, ['source:identity:aux']);
+  assert.deepEqual(reduced.result.walletPosture.resourceCoverage.buildRefs, ['build:identity:aux']);
   assert.deepEqual(
     reduced.result.walletPosture.rows.map((row) => [row.check, row.plane, row.state, row.actionable]),
     [

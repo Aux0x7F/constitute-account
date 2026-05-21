@@ -3789,6 +3789,37 @@ function mergeAuthorityProofRow(row, check) {
   return row;
 }
 
+function runtimeAuthorityRefCoverage(refs = []) {
+  const coverage = {
+    contractRefs: [],
+    serviceRefs: [],
+    eventFabricRefs: [],
+    storageRefs: [],
+    sourceRefs: [],
+    buildRefs: [],
+    appRefs: [],
+    moduleRefs: [],
+    runnerRefs: [],
+    otherRefs: [],
+  };
+  const push = (bucket, ref) => {
+    if (ref && !coverage[bucket].includes(ref)) coverage[bucket].push(ref);
+  };
+  for (const ref of uniqueTrimmedStrings(refs)) {
+    if (ref.startsWith('contract:')) push('contractRefs', ref);
+    else if (ref.startsWith('service:')) push('serviceRefs', ref);
+    else if (ref.startsWith('event-fabric:')) push('eventFabricRefs', ref);
+    else if (ref.startsWith('storage:')) push('storageRefs', ref);
+    else if (ref.startsWith('source:')) push('sourceRefs', ref);
+    else if (ref.startsWith('build:')) push('buildRefs', ref);
+    else if (ref.startsWith('app:')) push('appRefs', ref);
+    else if (ref.startsWith('module:')) push('moduleRefs', ref);
+    else if (ref.startsWith('runner:')) push('runnerRefs', ref);
+    else push('otherRefs', ref);
+  }
+  return coverage;
+}
+
 function runtimeAuthorityWalletPosture(validRecords, reduction) {
   const proofRecords = validRecords.filter((record) => record.kind === SWARM.RECORD_KIND.AUTHORITY_MULTI_IDENTITY_PROOF);
   const rows = RUNTIME_AUTHORITY_PROOF_ROW_DEFINITIONS.map((definition) => runtimeAuthorityProofRow(definition, reduction));
@@ -3810,13 +3841,16 @@ function runtimeAuthorityWalletPosture(validRecords, reduction) {
     if (row.state === AGREEMENT.AUTHORITY_PROOF_STATE.PROVED) row.blockedReason = '';
   }
   const primaryProof = proofRecords[0] || {};
+  const subjectRefs = uniqueTrimmedStrings(proofRecords.flatMap((record) => normalizeArray(record.subjectRefs)));
   return {
     kind: 'runtime.authority.wallet.posture',
     state: reduction.state,
     ownerIdentityRef: String(primaryProof.ownerIdentityRef || '').trim(),
     granteeIdentityRef: String(primaryProof.granteeIdentityRef || '').trim(),
     granteeMemberRef: String(primaryProof.granteeMemberRef || '').trim(),
-    subjectRefs: uniqueTrimmedStrings(proofRecords.flatMap((record) => normalizeArray(record.subjectRefs))),
+    subjectRefs,
+    subjectCoverage: runtimeAuthorityRefCoverage(subjectRefs),
+    resourceCoverage: runtimeAuthorityRefCoverage(reduction.actionAuthority.resourceRefs),
     actionGrantRefs: safeClone(reduction.actionAuthority.grantRefs),
     actionExerciseRefs: safeClone(reduction.actionAuthority.exerciseRefs),
     accessGroupRefs: safeClone(reduction.accessAuthority.accessGroupRefs),
