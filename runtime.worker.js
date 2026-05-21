@@ -16,7 +16,7 @@ import {
   assertEventAdmissionEnvelope,
   assertEventFabricAccessClass,
   assertEventFabricProcessorContract,
-  assertSecurityProcessorSeed,
+  assertCybersecProcessorSeed,
   assertConsumerFloor,
   assertMaterializationBudget,
   assertPrivateContentEnvelope,
@@ -2774,7 +2774,7 @@ function runtimeLoggingSecurityProcessorSeed(accessClasses, processorContracts, 
     .filter(Boolean)
     .sort();
   const accessGroupRefs = ['access-group:runtime.logging.security.default'];
-  return assertSecurityProcessorSeed({
+  return assertCybersecProcessorSeed({
     kind: SWARM.RECORD_KIND.SECURITY_PROCESSOR_SEED,
     seedId: 'security-seed:runtime.logging.default',
     fabricRef: 'event-fabric:runtime.logging.default',
@@ -3617,7 +3617,7 @@ function validateAuthorityReductionRecord(record) {
     case SWARM.RECORD_KIND.EVENT_FABRIC_PROCESSOR_CONTRACT:
       return assertEventFabricProcessorContract(record);
     case SWARM.RECORD_KIND.SECURITY_PROCESSOR_SEED:
-      return assertSecurityProcessorSeed(record);
+      return assertCybersecProcessorSeed(record);
     default:
       throw new Error(`unsupported authority record kind: ${kind || 'missing'}`);
   }
@@ -3632,6 +3632,90 @@ function authorityGrantUsable(state) {
     AGREEMENT.ACTION_GRANT_STATE.ACCEPTED,
     AGREEMENT.ACTION_GRANT_STATE.APPLIED,
   ].includes(state);
+}
+
+function authorityRecordExpired(record, now) {
+  const expiresAt = Number(record?.expiresAt || 0) || 0;
+  return expiresAt > 0 && expiresAt <= now;
+}
+
+function effectiveRevokedGrantRefs(records, now) {
+  const revoked = new Set();
+  for (const record of records) {
+    if (record?.kind !== SWARM.RECORD_KIND.AUTHORITY_GRANT_REVOCATION_POSTURE) continue;
+    if (![AGREEMENT.ACTION_GRANT_STATE.APPLIED, AGREEMENT.ACTION_GRANT_STATE.REVOKED].includes(record.state)) continue;
+    const effectiveAt = Number(record.effectiveAt || record.issuedAt || 0) || 0;
+    if (effectiveAt > now) continue;
+    for (const ref of uniqueTrimmedStrings([
+      record.targetGrantRef,
+      ...normalizeArray(record.affectedGrantRefs),
+    ])) {
+      revoked.add(ref);
+    }
+  }
+  return revoked;
+}
+
+function usableAuthorityGrantMap(records, revokedGrantRefs, now) {
+  const grants = new Map();
+  for (const record of records) {
+    if (record?.kind !== SWARM.RECORD_KIND.AUTHORITY_ACTION_GRANT) continue;
+    const ref = runtimeAuthorityRecordRef(record);
+    if (!ref) continue;
+    if (authorityRecordExpired(record, now)) continue;
+    if (revokedGrantRefs.has(ref)) continue;
+    if (!authorityGrantUsable(record.state)) continue;
+    grants.set(ref, record);
+  }
+  return grants;
+}
+
+function authorityGrantRootAdminUsable(grant) {
+  if (!grant) return false;
+  const action = String(grant.action || '').trim();
+  return grant.elevated === true || action.startsWith('authority.root.');
+}
+
+function rootOperationAdminGrantUsable(record, usableGrantMap) {
+  for (const grantRef of uniqueTrimmedStrings(record?.adminGrantRefs)) {
+    const grant = usableGrantMap.get(grantRef);
+    if (!grant) continue;
+    if (authorityGrantRootAdminUsable(grant)) return true;
+  }
+  return false;
+}
+
+function collectUnusableRootAdminGrantRefs(target, refs, usableGrantMap) {
+  for (const ref of uniqueTrimmedStrings(refs)) {
+    const grant = usableGrantMap.get(ref);
+    if (!ref || authorityGrantRootAdminUsable(grant) || target.includes(ref)) continue;
+    target.push(ref);
+  }
+}
+
+function collectAuthorityRefs(target, values) {
+  for (const ref of normalizeArray(values)) {
+    if (ref && !target.includes(ref)) target.push(ref);
+  }
+}
+
+function rootOperationBucket(operation) {
+  switch (operation) {
+    case AGREEMENT.ROOT_OPERATION.ADD_ROOT:
+      return 'addRootRefs';
+    case AGREEMENT.ROOT_OPERATION.REFRESH_ROOT:
+      return 'refreshRootRefs';
+    case AGREEMENT.ROOT_OPERATION.ROTATE_ROOT:
+      return 'rotateRootRefs';
+    case AGREEMENT.ROOT_OPERATION.REVOKE_ROOT:
+      return 'revokeRootRefs';
+    case AGREEMENT.ROOT_OPERATION.ENROLL_DEVICE:
+      return 'enrollDeviceRefs';
+    case AGREEMENT.ROOT_OPERATION.REVOKE_DEVICE:
+      return 'revokeDeviceRefs';
+    default:
+      return '';
+  }
 }
 
 const RUNTIME_AUTHORITY_PROOF_ROW_DEFINITIONS = Object.freeze([
@@ -3705,6 +3789,37 @@ function mergeAuthorityProofRow(row, check) {
   return row;
 }
 
+function runtimeAuthorityRefCoverage(refs = []) {
+  const coverage = {
+    contractRefs: [],
+    serviceRefs: [],
+    eventFabricRefs: [],
+    storageRefs: [],
+    sourceRefs: [],
+    buildRefs: [],
+    appRefs: [],
+    moduleRefs: [],
+    runnerRefs: [],
+    otherRefs: [],
+  };
+  const push = (bucket, ref) => {
+    if (ref && !coverage[bucket].includes(ref)) coverage[bucket].push(ref);
+  };
+  for (const ref of uniqueTrimmedStrings(refs)) {
+    if (ref.startsWith('contract:')) push('contractRefs', ref);
+    else if (ref.startsWith('service:')) push('serviceRefs', ref);
+    else if (ref.startsWith('event-fabric:')) push('eventFabricRefs', ref);
+    else if (ref.startsWith('storage:')) push('storageRefs', ref);
+    else if (ref.startsWith('source:')) push('sourceRefs', ref);
+    else if (ref.startsWith('build:')) push('buildRefs', ref);
+    else if (ref.startsWith('app:')) push('appRefs', ref);
+    else if (ref.startsWith('module:')) push('moduleRefs', ref);
+    else if (ref.startsWith('runner:')) push('runnerRefs', ref);
+    else push('otherRefs', ref);
+  }
+  return coverage;
+}
+
 function runtimeAuthorityWalletPosture(validRecords, reduction) {
   const proofRecords = validRecords.filter((record) => record.kind === SWARM.RECORD_KIND.AUTHORITY_MULTI_IDENTITY_PROOF);
   const rows = RUNTIME_AUTHORITY_PROOF_ROW_DEFINITIONS.map((definition) => runtimeAuthorityProofRow(definition, reduction));
@@ -3726,13 +3841,16 @@ function runtimeAuthorityWalletPosture(validRecords, reduction) {
     if (row.state === AGREEMENT.AUTHORITY_PROOF_STATE.PROVED) row.blockedReason = '';
   }
   const primaryProof = proofRecords[0] || {};
+  const subjectRefs = uniqueTrimmedStrings(proofRecords.flatMap((record) => normalizeArray(record.subjectRefs)));
   return {
     kind: 'runtime.authority.wallet.posture',
     state: reduction.state,
     ownerIdentityRef: String(primaryProof.ownerIdentityRef || '').trim(),
     granteeIdentityRef: String(primaryProof.granteeIdentityRef || '').trim(),
     granteeMemberRef: String(primaryProof.granteeMemberRef || '').trim(),
-    subjectRefs: uniqueTrimmedStrings(proofRecords.flatMap((record) => normalizeArray(record.subjectRefs))),
+    subjectRefs,
+    subjectCoverage: runtimeAuthorityRefCoverage(subjectRefs),
+    resourceCoverage: runtimeAuthorityRefCoverage(reduction.actionAuthority.resourceRefs),
     actionGrantRefs: safeClone(reduction.actionAuthority.grantRefs),
     actionExerciseRefs: safeClone(reduction.actionAuthority.exerciseRefs),
     accessGroupRefs: safeClone(reduction.accessAuthority.accessGroupRefs),
@@ -3759,6 +3877,8 @@ function reduceRuntimeAuthorityRecords(message = {}) {
       exerciseRefs: [],
       rootOperationRefs: [],
       revocationRefs: [],
+      expiredGrantRefs: [],
+      revokedGrantRefs: [],
       actions: [],
       resourceRefs: [],
     }),
@@ -3775,6 +3895,22 @@ function reduceRuntimeAuthorityRecords(message = {}) {
       proofRefs: [],
       witnessRefs: [],
     }),
+    rootDeviceAuthority: authorityPlane('notRequired', '', {
+      operationRefs: [],
+      addRootRefs: [],
+      refreshRootRefs: [],
+      rotateRootRefs: [],
+      revokeRootRefs: [],
+      enrollDeviceRefs: [],
+      revokeDeviceRefs: [],
+      rootRefs: [],
+      deviceRefs: [],
+      adminGrantRefs: [],
+      unusableAdminGrantRefs: [],
+      notificationRefs: [],
+      evidenceRefs: [],
+      blockedOperationRefs: [],
+    }),
     materialization: authorityPlane('notRequired', '', {
       eventFabricAccessClassRefs: [],
       processorRoleRefs: [],
@@ -3787,6 +3923,7 @@ function reduceRuntimeAuthorityRecords(message = {}) {
       canAct: false,
       futureReadable: false,
       rawReadable: false,
+      canUseActionGrant: false,
     },
     recordRefs: [],
     invalidRecords: [],
@@ -3805,6 +3942,12 @@ function reduceRuntimeAuthorityRecords(message = {}) {
       continue;
     }
     validRecords.push(record);
+  }
+
+  const revokedGrantRefs = effectiveRevokedGrantRefs(validRecords, now);
+  const usableGrantMap = usableAuthorityGrantMap(validRecords, revokedGrantRefs, now);
+
+  for (const record of validRecords) {
 
     const ref = runtimeAuthorityRecordRef(record);
     if (ref && !reduction.recordRefs.includes(ref)) reduction.recordRefs.push(ref);
@@ -3812,18 +3955,48 @@ function reduceRuntimeAuthorityRecords(message = {}) {
     switch (record.kind) {
       case SWARM.RECORD_KIND.AUTHORITY_ROOT_OPERATION:
         if (authorityGrantUsable(record.state)) {
+          if (!rootOperationAdminGrantUsable(record, usableGrantMap)) {
+            markAuthorityPlaneBlocked(reduction.actionAuthority, 'adminGrantUnavailable');
+            markAuthorityPlaneBlocked(reduction.rootDeviceAuthority, 'adminGrantUnavailable');
+            if (ref && !reduction.rootDeviceAuthority.blockedOperationRefs.includes(ref)) {
+              reduction.rootDeviceAuthority.blockedOperationRefs.push(ref);
+            }
+            collectUnusableRootAdminGrantRefs(
+              reduction.rootDeviceAuthority.unusableAdminGrantRefs,
+              record.adminGrantRefs,
+              usableGrantMap,
+            );
+            break;
+          }
           markAuthorityPlaneReady(reduction.actionAuthority, ref);
+          markAuthorityPlaneReady(reduction.rootDeviceAuthority, ref);
           if (!reduction.actionAuthority.rootOperationRefs.includes(ref)) reduction.actionAuthority.rootOperationRefs.push(ref);
+          if (!reduction.rootDeviceAuthority.operationRefs.includes(ref)) reduction.rootDeviceAuthority.operationRefs.push(ref);
+          const bucket = rootOperationBucket(record.operation);
+          if (bucket && !reduction.rootDeviceAuthority[bucket].includes(ref)) reduction.rootDeviceAuthority[bucket].push(ref);
+          collectAuthorityRefs(reduction.rootDeviceAuthority.rootRefs, record.rootRefs);
+          collectAuthorityRefs(reduction.rootDeviceAuthority.deviceRefs, record.deviceRefs);
+          collectAuthorityRefs(reduction.rootDeviceAuthority.adminGrantRefs, record.adminGrantRefs);
+          collectAuthorityRefs(reduction.rootDeviceAuthority.notificationRefs, record.notificationRefs);
+          collectAuthorityRefs(reduction.rootDeviceAuthority.evidenceRefs, record.evidenceRefs);
         } else {
           markAuthorityPlaneBlocked(reduction.actionAuthority, record.blockedReason || record.state);
+          markAuthorityPlaneBlocked(reduction.rootDeviceAuthority, record.blockedReason || record.state);
         }
         break;
       case SWARM.RECORD_KIND.AUTHORITY_ACTION_GRANT:
-        if (authorityGrantUsable(record.state)) {
+        if (authorityRecordExpired(record, now)) {
+          if (ref && !reduction.actionAuthority.expiredGrantRefs.includes(ref)) reduction.actionAuthority.expiredGrantRefs.push(ref);
+          markAuthorityPlaneBlocked(reduction.actionAuthority, 'grantExpired');
+        } else if (revokedGrantRefs.has(ref)) {
+          if (ref && !reduction.actionAuthority.revokedGrantRefs.includes(ref)) reduction.actionAuthority.revokedGrantRefs.push(ref);
+          markAuthorityPlaneBlocked(reduction.actionAuthority, 'grantRevoked');
+        } else if (authorityGrantUsable(record.state)) {
           markAuthorityPlaneReady(reduction.actionAuthority, ref);
           if (!reduction.actionAuthority.grantRefs.includes(ref)) reduction.actionAuthority.grantRefs.push(ref);
           if (record.action && !reduction.actionAuthority.actions.includes(record.action)) reduction.actionAuthority.actions.push(record.action);
           if (record.resourceRef && !reduction.actionAuthority.resourceRefs.includes(record.resourceRef)) reduction.actionAuthority.resourceRefs.push(record.resourceRef);
+          reduction.actionability.canUseActionGrant = true;
         } else {
           markAuthorityPlaneBlocked(reduction.actionAuthority, record.blockedReason || record.state);
         }
@@ -3839,6 +4012,11 @@ function reduceRuntimeAuthorityRecords(message = {}) {
       case SWARM.RECORD_KIND.AUTHORITY_GRANT_REVOCATION_POSTURE:
         markAuthorityPlaneReady(reduction.actionAuthority, ref);
         if (!reduction.actionAuthority.revocationRefs.includes(ref)) reduction.actionAuthority.revocationRefs.push(ref);
+        for (const grantRef of uniqueTrimmedStrings([record.targetGrantRef, ...normalizeArray(record.affectedGrantRefs)])) {
+          if (revokedGrantRefs.has(grantRef) && !reduction.actionAuthority.revokedGrantRefs.includes(grantRef)) {
+            reduction.actionAuthority.revokedGrantRefs.push(grantRef);
+          }
+        }
         reduction.actionability.canRevokeExpire = true;
         break;
       case SWARM.RECORD_KIND.ACCESS_GROUP:
@@ -3906,7 +4084,7 @@ function reduceRuntimeAuthorityRecords(message = {}) {
     }
   }
 
-  reduction.actionability.canAct = reduction.actionAuthority.state === 'ready' || reduction.actionability.canWriteReduce || reduction.actionability.canRevokeExpire;
+  reduction.actionability.canAct = reduction.actionability.canUseActionGrant || reduction.actionability.canWriteReduce || reduction.actionability.canRevokeExpire;
   reduction.actionability.canRead = reduction.actionability.canRead && reduction.accessAuthority.state !== 'blocked';
 
   const missing = [];
@@ -3921,6 +4099,7 @@ function reduceRuntimeAuthorityRecords(message = {}) {
     ...reduction.actionAuthority.blockedReasons,
     ...reduction.accessAuthority.blockedReasons,
     ...reduction.deliveryWitness.blockedReasons,
+    ...reduction.rootDeviceAuthority.blockedReasons,
   ]);
   if (reduction.invalidRecords.length) {
     reduction.state = 'blocked';
@@ -5513,6 +5692,30 @@ function zoneScopeLooksLocalOnly(zoneScope) {
   return !zoneId || zoneId === 'local' || zoneId === 'runtime.local' || zoneId.startsWith('identity:');
 }
 
+function runtimeRetainedDiscoveryScope() {
+  const runtimeDiscovery = runtimeStatus.discovery && typeof runtimeStatus.discovery === 'object' ? runtimeStatus.discovery : {};
+  const runtimeZones = runtimeStatus.zones && typeof runtimeStatus.zones === 'object' ? runtimeStatus.zones : {};
+  const shell = runtimeStatus.shell && typeof runtimeStatus.shell === 'object' ? runtimeStatus.shell : {};
+  const shellDiscovery = shell.discovery && typeof shell.discovery === 'object' ? shell.discovery : {};
+  const zones = shell.zones && typeof shell.zones === 'object' ? shell.zones : {};
+  return normalizeServiceZoneScope(runtimeDiscovery.scope || runtimeDiscovery.discoveryScope || runtimeDiscovery.discovery_scope)
+    || normalizeServiceZoneScope(runtimeStatus.discoveryScope || runtimeStatus.discovery_scope)
+    || normalizeServiceZoneScope({
+      zoneId: runtimeZones.activeZoneKey || runtimeZones.active_zone_key,
+      privacy: 'rawIds',
+    })
+    || firstServiceZoneScopeFromList(runtimeZones.joined)
+    || firstServiceZoneScopeFromList(runtimeZones.zoneKeys || runtimeZones.zone_keys)
+    || normalizeServiceZoneScope(shellDiscovery.scope || shellDiscovery.discoveryScope || shellDiscovery.discovery_scope)
+    || normalizeServiceZoneScope(shell.discoveryScope || shell.discovery_scope)
+    || normalizeServiceZoneScope({
+      zoneId: zones.activeZoneKey || zones.active_zone_key,
+      privacy: 'rawIds',
+    })
+    || firstServiceZoneScopeFromList(zones.joined)
+    || firstServiceZoneScopeFromList(zones.zoneKeys || zones.zone_keys);
+}
+
 function routeChannelMatches(candidate, targetChannel) {
   const channelId = String(candidate?.channelId || candidate?.channel_id || '').trim();
   const channelRefs = normalizeArray(candidate?.channelRefs || candidate?.channel_refs)
@@ -5570,7 +5773,8 @@ function directoryRoutingBaseline({ zoneScope, channelId = '', capability = '', 
     return score;
   };
   let sawDirectory = false;
-  let sawZone = false;
+  let sawDiscoveryScope = false;
+  let sawPreferredScope = false;
   let best = null;
   for (const [projectionKey, projection] of retainedProjections.entries()) {
     const projectionId = String(projection?.projectionId || '').trim();
@@ -5603,20 +5807,24 @@ function directoryRoutingBaseline({ zoneScope, channelId = '', capability = '', 
     }).filter(Boolean);
     for (const { entry, advertisement } of candidates) {
       const entryZoneScope = normalizeServiceZoneScope(entry?.zoneScope || entry?.zone_scope || advertisement?.zoneScope || advertisement?.zone_scope);
-      if (String(entryZoneScope?.zoneId || '').trim() !== zoneId) continue;
-      sawZone = true;
+      const entryZoneId = String(entryZoneScope?.zoneId || '').trim();
+      if (entryZoneId) sawDiscoveryScope = true;
+      const preferredScope = Boolean(entryZoneId && entryZoneId === zoneId);
+      if (preferredScope) sawPreferredScope = true;
       const candidate = { ...safeClone(advertisement || {}), ...safeClone(entry || {}) };
       if (!routeChannelMatches(candidate, targetChannel)) continue;
       if (!routeCapabilityMatches(candidate, targetCapability)) continue;
       if (!routeServiceMatches(candidate, { servicePk: targetServicePk, service: targetService, serviceRef: targetServiceRef })) continue;
+      const selectedZoneScope = entryZoneScope || zoneScope;
       const selected = {
         state: SWARM.ROUTING_SCOPE_STATE.READY,
         source: 'swarm.directory',
         baselineRef,
         selectedMemberRef: String(entry?.memberRef || '').trim(),
         serviceMemberRef: String(entry?.memberRef || '').trim(),
+        zoneScope: selectedZoneScope,
         updatedAt,
-        score: candidateServiceScore(candidate),
+        score: candidateServiceScore(candidate) + (preferredScope ? 30 : entryZoneId ? 5 : 0),
       };
       if (!best || selected.score > best.score) best = selected;
     }
@@ -5628,9 +5836,13 @@ function directoryRoutingBaseline({ zoneScope, channelId = '', capability = '', 
   if (!sawDirectory) return null;
   return {
     state: SWARM.ROUTING_SCOPE_STATE.SYNCING,
-    source: sawZone ? 'swarm.directory.partial' : 'swarm.directory.pendingZone',
+    source: sawPreferredScope
+      ? 'swarm.directory.partial'
+      : sawDiscoveryScope
+        ? 'swarm.directory.pendingCoverage'
+        : 'swarm.directory.pendingDiscovery',
     baselineRef: `projection:${RUNTIME_DIRECTORY_OBSERVE_CHANNEL}`,
-    blockedReason: sawZone
+    blockedReason: sawPreferredScope || sawDiscoveryScope
       ? SWARM.ROUTING_BLOCKED_REASON.NO_MEMBER_IN_ZONE
       : SWARM.ROUTING_BLOCKED_REASON.MISSING_ZONE_BASELINE,
     updatedAt: nowMs(),
@@ -5722,10 +5934,26 @@ function appIntentRoutingScopePosture(method, intent, options = {}) {
   }
   const derived = deriveServiceContextForIntent(method, intent);
   const selectedNode = derived?.selectedNode && typeof derived.selectedNode === 'object' ? derived.selectedNode : null;
-  let zoneScope = normalizeServiceZoneScope(intent?.zoneScope)
-    || normalizeServiceZoneScope(selectedNode?.zoneScope || selectedNode?.zone_scope)
-    || normalizeServiceZoneScope(derived?.zoneScope || derived?.zone_scope)
-    || normalizeServiceZoneScope(swarmEdge.zoneScope);
+  const intentZoneScope = normalizeServiceZoneScope(intent?.zoneScope);
+  const selectedNodeZoneScope = normalizeServiceZoneScope(selectedNode?.zoneScope || selectedNode?.zone_scope);
+  const derivedZoneScope = normalizeServiceZoneScope(derived?.zoneScope || derived?.zone_scope);
+  const edgeZoneScope = normalizeServiceZoneScope(swarmEdge.zoneScope);
+  const retainedDiscoveryScope = runtimeRetainedDiscoveryScope();
+  let zoneScope = intentZoneScope
+    || selectedNodeZoneScope
+    || derivedZoneScope
+    || edgeZoneScope
+    || retainedDiscoveryScope;
+  const zoneScopeSource = intentZoneScope
+    ? 'intent'
+    : selectedNodeZoneScope || derivedZoneScope
+      ? 'retainedServiceBaseline'
+      : edgeZoneScope
+        ? 'edgeSession'
+        : retainedDiscoveryScope
+          ? 'retainedDiscoveryBaseline'
+          : 'runtime.route';
+  const explicitZoneScopeSource = String(intent?.zoneScopeSource || intent?.zone_scope_source || '').trim();
   if (
     zoneScope
     && (zoneScopeLooksLocalOnly(zoneScope) || (isRuntimeStreamIntent(method) && Number(zoneScope.maxHops || 0) <= 0))
@@ -5761,9 +5989,9 @@ function appIntentRoutingScopePosture(method, intent, options = {}) {
     kind,
     required: true,
     state: directoryBaseline?.state || SWARM.ROUTING_SCOPE_STATE.SYNCING,
-    zoneScope,
-    source: directoryBaseline?.source || (derived?.zoneScope || selectedNode?.zoneScope ? 'retainedServiceBaseline' : 'edgeSession'),
-    baselineRef: directoryBaseline?.baselineRef || (servicePk ? `service:${servicePk}` : `zone:${zoneScope.zoneId}`),
+    zoneScope: directoryBaseline?.zoneScope || zoneScope,
+    source: directoryBaseline?.source || explicitZoneScopeSource || zoneScopeSource,
+    baselineRef: directoryBaseline?.baselineRef || (servicePk ? `service:${servicePk}` : `discovery:${zoneScope.zoneId}`),
     ...(serviceMemberRef ? { serviceMemberRef, selectedMemberRef: serviceMemberRef } : {}),
     ...(directoryBaseline?.blockedReason ? { blockedReason: directoryBaseline.blockedReason } : {}),
     updatedAt: directoryBaseline?.updatedAt || nowMs(),
@@ -5997,9 +6225,25 @@ function appIntentResolvedRoute(method, intent) {
   const selectedNode = derived?.selectedNode && typeof derived.selectedNode === 'object' ? derived.selectedNode : null;
   const contractBaseline = streamServiceContractBaseline(method, intent, derived);
   const resolvedNodeRef = contractBaseline?.nodeRef || appIntentNodeRef(method, intent);
-  const zoneScope = normalizeServiceZoneScope(intent?.zoneScope)
-    || normalizeServiceZoneScope(selectedNode?.zoneScope || selectedNode?.zone_scope)
-    || normalizeServiceZoneScope(derived?.zoneScope || derived?.zone_scope);
+  const intentZoneScope = normalizeServiceZoneScope(intent?.zoneScope);
+  const selectedNodeZoneScope = normalizeServiceZoneScope(selectedNode?.zoneScope || selectedNode?.zone_scope);
+  const derivedZoneScope = normalizeServiceZoneScope(derived?.zoneScope || derived?.zone_scope);
+  const edgeZoneScope = normalizeServiceZoneScope(swarmEdge.zoneScope);
+  const retainedDiscoveryScope = runtimeRetainedDiscoveryScope();
+  const zoneScope = intentZoneScope
+    || selectedNodeZoneScope
+    || derivedZoneScope
+    || edgeZoneScope
+    || retainedDiscoveryScope;
+  const zoneScopeSource = intentZoneScope
+    ? 'intent'
+    : selectedNodeZoneScope || derivedZoneScope
+      ? 'retainedServiceBaseline'
+      : edgeZoneScope
+        ? 'edgeSession'
+        : retainedDiscoveryScope
+          ? 'retainedDiscoveryBaseline'
+          : '';
   const servicePk = String(intent?.servicePk || derived?.servicePk || '').trim();
   const service = String(intent?.service || derived?.service || 'nvr').trim();
   const serviceRef = String(intent?.serviceRef || derived?.serviceRef || '').trim() || defaultServiceRefForService(service, servicePk);
@@ -6023,7 +6267,7 @@ function appIntentResolvedRoute(method, intent) {
     identityId: String(intent?.identityId || derived?.identityId || defaultIdentityId()).trim(),
     capability: appIntentCapability(method, intent),
     selectedNode,
-    ...(zoneScope ? { zoneScope } : {}),
+    ...(zoneScope ? { zoneScope, zoneScopeSource } : {}),
     channelId: String(
       intent?.channelId
       || selectedNode?.channelId
@@ -7176,7 +7420,7 @@ async function queueRuntimeAppIntent(method, message) {
     kind: appIntentFrameKind(method, resolvedIntent),
     issuer: authority.publicKey,
     audience: appIntentAudience(method, resolvedIntent),
-    zoneScope: appIntentZoneScope(resolvedIntent, { requirePropagation: true }),
+    zoneScope: appIntentZoneScope({ ...resolvedIntent, zoneScope: routingScope?.zoneScope || resolvedIntent.zoneScope }, { requirePropagation: true }),
     issuedAt,
     expiresAt,
     nonce,
@@ -9451,6 +9695,7 @@ function handleStatusPut(message, endpoint) {
     };
     schedulePersist();
     broadcastSnapshot();
+    void flushPendingRouteIntents('runtime.status.shell');
     return { ok: true, result: runtimeSnapshot() };
   }
 

@@ -129,7 +129,7 @@ function loadRuntime(store = new Map(), options = {}) {
     });
   }
   const source = `${shellStateSource}\n${raw
-    .replace(/^import[\s\S]*?from "constitute-protocol";/, 'const { AGREEMENT, PROJECTION, SERVICE_REGISTRY, SWARM, STREAM_SESSION_LIFECYCLE_PHASE, applyProjectionDelta, assertActionAuthorityExercise, assertActionAuthorityGrant, assertAccessGroup, assertAccessEpoch, assertAuthorityGrantRevocationPosture, assertAuthorityMultiIdentityProof, assertAuthorityRootOperation, assertConsumerFloor, assertEventAdmissionEnvelope, assertEventFabricAccessClass, assertEventFabricProcessorContract, assertSecurityProcessorSeed, assertMaterializationBudget, assertPrivateContentEnvelope, assertProjectionDelta, assertProjectionPolicy, assertProjectionRecord, assertProjectionSnapshot, assertResolvedMemberRef, assertProjectionRepairPosture, assertResourcePosture, assertResourceProfile, assertRetentionReleasePosture, assertRoutePromise, assertRuntimeActivationRequest, assertSelfCapabilityAssessment, assertMediaFulfillmentEvidence, assertMediaTransportObservation, assertContributionLifecycle, assertServiceRegistryClaim, assertServiceRegistryMaterialization, assertStreamSessionCandidate, assertSubscriptionContract, assertSwarmActivation, assertSwarmFrame, assertSwarmInteraction, makeLogEventEnvelope, openEnvelope, makeProjectionRepairRequest, makeSwarmFrame, pubkeyFromSecretKey, sealEnvelope, eventPlaneForRecordKind, streamSessionLifecycleRecordFromCarrier, streamSessionLifecyclePhase } = __protocol;')
+    .replace(/^import[\s\S]*?from "constitute-protocol";/, 'const { AGREEMENT, PROJECTION, SERVICE_REGISTRY, SWARM, STREAM_SESSION_LIFECYCLE_PHASE, applyProjectionDelta, assertActionAuthorityExercise, assertActionAuthorityGrant, assertAccessGroup, assertAccessEpoch, assertAuthorityGrantRevocationPosture, assertAuthorityMultiIdentityProof, assertAuthorityRootOperation, assertConsumerFloor, assertEventAdmissionEnvelope, assertEventFabricAccessClass, assertEventFabricProcessorContract, assertCybersecProcessorSeed, assertMaterializationBudget, assertPrivateContentEnvelope, assertProjectionDelta, assertProjectionPolicy, assertProjectionRecord, assertProjectionSnapshot, assertResolvedMemberRef, assertProjectionRepairPosture, assertResourcePosture, assertResourceProfile, assertRetentionReleasePosture, assertRoutePromise, assertRuntimeActivationRequest, assertSelfCapabilityAssessment, assertMediaFulfillmentEvidence, assertMediaTransportObservation, assertContributionLifecycle, assertServiceRegistryClaim, assertServiceRegistryMaterialization, assertStreamSessionCandidate, assertSubscriptionContract, assertSwarmActivation, assertSwarmFrame, assertSwarmInteraction, makeLogEventEnvelope, openEnvelope, makeProjectionRepairRequest, makeSwarmFrame, pubkeyFromSecretKey, sealEnvelope, eventPlaneForRecordKind, streamSessionLifecycleRecordFromCarrier, streamSessionLifecyclePhase } = __protocol;')
     .replace(/^import \{ deriveRuntimeShellState \} from "\.\/runtime-shell-state\.js";\s*/m, '')}`;
   const runtimeTimers = makeRuntimeTimers();
   const webSockets = [];
@@ -2255,6 +2255,101 @@ test('source-less stream route waits for directory member before frame emission'
   assert.ok(opened.routePromise.audienceRefs.includes(routeMemberPk));
 });
 
+test('runtime stream activation derives route zone from shell posture', async () => {
+  const runtime = loadRuntime(new Map());
+  await attach(runtime.port);
+  await seedNvrServiceCatalog(runtime.port);
+  await seedNvrEdgeDirectory(runtime.port, { zoneScope: { zoneId: 'zone_lab', privacy: 'rawIds', ttl: 30, maxHops: 2 } });
+  await send(runtime.port, {
+    type: 'runtime.status.put',
+    role: 'shell',
+    status: {
+      zones: {
+        activeZoneKey: 'zone_lab',
+        joined: [{ key: 'zone_lab', name: 'Lab' }],
+      },
+    },
+  });
+  await send(runtime.port, { type: 'swarm.edge.test.connect' });
+
+  const queued = await send(runtime.port, {
+    type: 'runtime.stream.open',
+    payload: {
+      nodeRef: 'nvr.streams',
+      capabilityRef: protocol.SWARM.CORE_CAPABILITY.MEDIA_STREAM_PREVIEW,
+      transport: 'webrtc',
+      intentId: 'shell-zone-stream-open',
+      offer: { description: { type: 'offer', sdp: 'v=0\r\n' }, sourceIds: [] },
+    },
+  });
+
+  assert.equal(queued.ok, true);
+  assert.equal(queued.result.frame.channelId, 'nvr.streams');
+  assert.deepEqual(queued.result.frame.zoneScope, {
+    zoneId: 'zone_lab',
+    privacy: 'rawIds',
+    ttl: 30,
+    maxHops: 2,
+  });
+  assert.equal(queued.result.routingScope.source, 'swarm.directory');
+  assert.equal(queued.result.routingScope.state, protocol.SWARM.ROUTING_SCOPE_STATE.READY);
+  const opened = protocol.openEnvelope(queued.result.frame.body.envelope, SERVICE_SK, { now: Date.now() });
+  assert.deepEqual(opened.routePromise.zoneScope, {
+    zoneId: 'zone_lab',
+    privacy: 'rawIds',
+    ttl: 30,
+    maxHops: 2,
+  });
+});
+
+test('runtime treats discovery scopes as additive route coverage', async () => {
+  const runtime = loadRuntime(new Map());
+  await attach(runtime.port);
+  await seedNvrServiceCatalog(runtime.port);
+  await seedNvrEdgeDirectory(runtime.port, { zoneScope: { zoneId: 'zone_lab', privacy: 'rawIds', ttl: 30, maxHops: 2 } });
+  await send(runtime.port, {
+    type: 'runtime.status.put',
+    role: 'shell',
+    status: {
+      zones: {
+        activeZoneKey: 'zone_home',
+        joined: [{ key: 'zone_home', name: 'Home' }],
+      },
+    },
+  });
+  await send(runtime.port, {
+    type: 'swarm.edge.test.connect',
+    zoneScope: { zoneId: 'zone_home', privacy: 'rawIds', ttl: 30, maxHops: 2 },
+  });
+
+  const queued = await send(runtime.port, {
+    type: 'runtime.stream.open',
+    payload: {
+      nodeRef: 'nvr.streams',
+      capabilityRef: protocol.SWARM.CORE_CAPABILITY.MEDIA_STREAM_PREVIEW,
+      transport: 'webrtc',
+      intentId: 'additive-discovery-stream-open',
+      offer: { description: { type: 'offer', sdp: 'v=0\r\n' }, sourceIds: [] },
+    },
+  });
+
+  assert.equal(queued.ok, true);
+  assert.equal(queued.result.routingScope.source, 'swarm.directory');
+  assert.equal(queued.result.routingScope.state, protocol.SWARM.ROUTING_SCOPE_STATE.READY);
+  assert.deepEqual(queued.result.routingScope.zoneScope, {
+    zoneId: 'zone_lab',
+    privacy: 'rawIds',
+    ttl: 30,
+    maxHops: 2,
+  });
+  assert.deepEqual(queued.result.frame.zoneScope, {
+    zoneId: 'zone_lab',
+    privacy: 'rawIds',
+    ttl: 30,
+    maxHops: 2,
+  });
+});
+
 test('stream route baseline prefers resolved service member over generic channel carrier', async () => {
   const runtime = loadRuntime(new Map());
   await attach(runtime.port);
@@ -2518,6 +2613,36 @@ test('runtime authority records reducer separates action, access, and witness pl
   await attach(runtime.port);
   const issuedAt = Date.now();
   const expiresAt = issuedAt + 60_000;
+  const subjectRefs = [
+    'service:gateway',
+    'service:nvr',
+    'service:logging',
+    'event-fabric:identity:aux',
+    'storage:identity:aux',
+    'source:identity:aux',
+    'build:identity:aux',
+    'app:constitute-cybersec',
+  ];
+  const actionGrantRefs = [
+    'grant:agent:full',
+    'grant:agent:gateway-route',
+    'grant:agent:logging-writer',
+    'grant:agent:storage-pin',
+    'grant:agent:source-update',
+    'grant:agent:build-run',
+  ];
+  const accessGroupRefs = [
+    'access-group:agent-events',
+    'access-group:agent-source-build',
+  ];
+  const accessEpochRefs = [
+    'epoch:agent-events:1',
+    'epoch:agent-source-build:1',
+  ];
+  const privateEnvelopeRefs = [
+    'private-envelope:event-detail:1',
+    'private-envelope:source-build:1',
+  ];
   const records = [
     {
       kind: protocol.SWARM.RECORD_KIND.AUTHORITY_ACTION_GRANT,
@@ -2528,6 +2653,66 @@ test('runtime authority records reducer separates action, access, and witness pl
       authorityDomain: protocol.SWARM.AUTHORITY_DOMAIN.IDENTITY,
       resourceRef: 'service:nvr',
       action: 'service.fulfill',
+      state: protocol.AGREEMENT.ACTION_GRANT_STATE.ACCEPTED,
+      issuedAt,
+    },
+    {
+      kind: protocol.SWARM.RECORD_KIND.AUTHORITY_ACTION_GRANT,
+      grantId: 'grant:agent:gateway-route',
+      issuerRef: 'identity:aux',
+      subjectRef: 'identity:agent',
+      audienceRefs: ['member:agent-browser'],
+      authorityDomain: protocol.SWARM.AUTHORITY_DOMAIN.IDENTITY,
+      resourceRef: 'service:gateway',
+      action: 'gateway.route.use',
+      state: protocol.AGREEMENT.ACTION_GRANT_STATE.ACCEPTED,
+      issuedAt,
+    },
+    {
+      kind: protocol.SWARM.RECORD_KIND.AUTHORITY_ACTION_GRANT,
+      grantId: 'grant:agent:logging-writer',
+      issuerRef: 'identity:aux',
+      subjectRef: 'identity:agent',
+      audienceRefs: ['member:agent-browser'],
+      authorityDomain: protocol.SWARM.AUTHORITY_DOMAIN.IDENTITY,
+      resourceRef: 'service:logging',
+      action: 'event.fabric.process',
+      state: protocol.AGREEMENT.ACTION_GRANT_STATE.ACCEPTED,
+      issuedAt,
+    },
+    {
+      kind: protocol.SWARM.RECORD_KIND.AUTHORITY_ACTION_GRANT,
+      grantId: 'grant:agent:storage-pin',
+      issuerRef: 'identity:aux',
+      subjectRef: 'identity:agent',
+      audienceRefs: ['member:agent-browser'],
+      authorityDomain: protocol.SWARM.AUTHORITY_DOMAIN.IDENTITY,
+      resourceRef: 'storage:identity:aux',
+      action: 'storage.pin',
+      state: protocol.AGREEMENT.ACTION_GRANT_STATE.ACCEPTED,
+      issuedAt,
+    },
+    {
+      kind: protocol.SWARM.RECORD_KIND.AUTHORITY_ACTION_GRANT,
+      grantId: 'grant:agent:source-update',
+      issuerRef: 'identity:aux',
+      subjectRef: 'identity:agent',
+      audienceRefs: ['member:agent-browser'],
+      authorityDomain: protocol.SWARM.AUTHORITY_DOMAIN.IDENTITY,
+      resourceRef: 'source:identity:aux',
+      action: 'source.ref.update',
+      state: protocol.AGREEMENT.ACTION_GRANT_STATE.ACCEPTED,
+      issuedAt,
+    },
+    {
+      kind: protocol.SWARM.RECORD_KIND.AUTHORITY_ACTION_GRANT,
+      grantId: 'grant:agent:build-run',
+      issuerRef: 'identity:aux',
+      subjectRef: 'identity:agent',
+      audienceRefs: ['member:agent-browser'],
+      authorityDomain: protocol.SWARM.AUTHORITY_DOMAIN.IDENTITY,
+      resourceRef: 'build:identity:aux',
+      action: 'build.run',
       state: protocol.AGREEMENT.ACTION_GRANT_STATE.ACCEPTED,
       issuedAt,
     },
@@ -2545,12 +2730,38 @@ test('runtime authority records reducer separates action, access, and witness pl
       observedAt: issuedAt + 1,
     },
     {
+      kind: protocol.SWARM.RECORD_KIND.AUTHORITY_ACTION_EXERCISE,
+      exerciseId: 'exercise:agent:logging',
+      grantId: 'grant:agent:logging-writer',
+      actorRef: 'identity:agent',
+      subjectRef: 'member:agent-browser',
+      resourceRef: 'event-fabric:identity:aux',
+      action: 'event.fabric.process',
+      state: protocol.AGREEMENT.ACTION_GRANT_STATE.APPLIED,
+      evidenceRefs: ['proof:exercise:agent:logging'],
+      issuedAt,
+      observedAt: issuedAt + 2,
+    },
+    {
+      kind: protocol.SWARM.RECORD_KIND.AUTHORITY_ACTION_EXERCISE,
+      exerciseId: 'exercise:agent:build',
+      grantId: 'grant:agent:build-run',
+      actorRef: 'identity:agent',
+      subjectRef: 'member:agent-browser',
+      resourceRef: 'build:identity:aux',
+      action: 'build.run',
+      state: protocol.AGREEMENT.ACTION_GRANT_STATE.APPLIED,
+      evidenceRefs: ['proof:exercise:agent:build'],
+      issuedAt,
+      observedAt: issuedAt + 3,
+    },
+    {
       kind: protocol.SWARM.RECORD_KIND.AUTHORITY_GRANT_REVOCATION_POSTURE,
       revocationId: 'revocation:agent:full:expiry',
       targetGrantRef: 'grant:agent:full',
       issuerRef: 'identity:aux',
       authorityDomain: protocol.SWARM.AUTHORITY_DOMAIN.IDENTITY,
-      affectedGrantRefs: ['grant:agent:full'],
+      affectedGrantRefs: actionGrantRefs,
       state: protocol.AGREEMENT.ACTION_GRANT_STATE.APPLIED,
       reasonCode: 'expiry.available',
       evidenceRefs: ['proof:revocation-path'],
@@ -2582,6 +2793,30 @@ test('runtime authority records reducer separates action, access, and witness pl
       expiresAt,
     },
     {
+      kind: protocol.SWARM.RECORD_KIND.ACCESS_GROUP,
+      groupId: 'access-group:agent-source-build',
+      ownerRef: 'identity:aux',
+      subjectRef: 'source:identity:aux',
+      contentClasses: [protocol.AGREEMENT.CONTENT_CLASS.ENCRYPTED_DETAIL],
+      memberRefs: ['member:agent-browser'],
+      adminRefs: ['identity:aux'],
+      currentEpochId: 'epoch:agent-source-build:1',
+      issuedAt,
+    },
+    {
+      kind: protocol.SWARM.RECORD_KIND.ACCESS_EPOCH,
+      epochId: 'epoch:agent-source-build:1',
+      groupId: 'access-group:agent-source-build',
+      sequence: 1,
+      changeKind: protocol.AGREEMENT.ACCESS_EPOCH_CHANGE.ADD_MEMBER,
+      memberRefs: ['member:agent-browser'],
+      addedMemberRefs: ['member:agent-browser'],
+      keyRef: 'key:agent-source-build:1',
+      proofRefs: ['proof:epoch:agent-source-build:1'],
+      issuedAt,
+      expiresAt,
+    },
+    {
       kind: protocol.SWARM.RECORD_KIND.PRIVATE_CONTENT_ENVELOPE,
       envelopeId: 'private-envelope:event-detail:1',
       contentClass: protocol.AGREEMENT.CONTENT_CLASS.ENCRYPTED_DETAIL,
@@ -2595,16 +2830,29 @@ test('runtime authority records reducer separates action, access, and witness pl
       expiresAt,
     },
     {
+      kind: protocol.SWARM.RECORD_KIND.PRIVATE_CONTENT_ENVELOPE,
+      envelopeId: 'private-envelope:source-build:1',
+      contentClass: protocol.AGREEMENT.CONTENT_CLASS.ENCRYPTED_DETAIL,
+      accessGroupRef: 'access-group:agent-source-build',
+      epochId: 'epoch:agent-source-build:1',
+      subjectRef: 'source:identity:aux',
+      issuerRef: 'source:processor',
+      detailRef: 'storage:source-build:1',
+      recipientRefs: ['member:agent-browser'],
+      issuedAt,
+      expiresAt,
+    },
+    {
       kind: protocol.SWARM.RECORD_KIND.AUTHORITY_MULTI_IDENTITY_PROOF,
       proofId: 'proof:agent-full-access',
       ownerIdentityRef: 'identity:aux',
       granteeIdentityRef: 'identity:agent',
       granteeMemberRef: 'member:agent-browser',
-      subjectRefs: ['service:nvr', 'event-fabric:identity:aux'],
-      actionGrantRefs: ['grant:agent:full'],
-      accessGroupRefs: ['access-group:agent-events'],
-      accessEpochRefs: ['epoch:agent-events:1'],
-      privateEnvelopeRefs: ['private-envelope:event-detail:1'],
+      subjectRefs,
+      actionGrantRefs,
+      accessGroupRefs,
+      accessEpochRefs,
+      privateEnvelopeRefs,
       evidenceRefs: ['proof:browser:aux-agent'],
       state: protocol.AGREEMENT.AUTHORITY_PROOF_STATE.PROVED,
       checks: [
@@ -2620,17 +2868,17 @@ test('runtime authority records reducer separates action, access, and witness pl
           plane: protocol.AGREEMENT.PLANE.ACCESS_AUTHORITY,
           state: protocol.AGREEMENT.AUTHORITY_PROOF_STATE.PROVED,
           targetRef: 'event-fabric:identity:aux',
-          accessGroupRefs: ['access-group:agent-events'],
-          accessEpochRefs: ['epoch:agent-events:1'],
+          accessGroupRefs,
+          accessEpochRefs,
           evidenceRefs: ['proof:read'],
         },
         {
           check: protocol.AGREEMENT.AUTHORITY_PROOF_CHECK.WRITE_REDUCE,
           plane: protocol.AGREEMENT.PLANE.ACTION_AUTHORITY,
           state: protocol.AGREEMENT.AUTHORITY_PROOF_STATE.PROVED,
-          targetRef: 'service:nvr',
-          grantRefs: ['grant:agent:full'],
-          exerciseRefs: ['exercise:agent:nvr'],
+          targetRef: 'event-fabric:identity:aux',
+          grantRefs: actionGrantRefs,
+          exerciseRefs: ['exercise:agent:nvr', 'exercise:agent:logging', 'exercise:agent:build'],
           evidenceRefs: ['proof:write-reduce'],
         },
         {
@@ -2638,7 +2886,7 @@ test('runtime authority records reducer separates action, access, and witness pl
           plane: protocol.AGREEMENT.PLANE.ACTION_AUTHORITY,
           state: protocol.AGREEMENT.AUTHORITY_PROOF_STATE.PROVED,
           targetRef: 'grant:agent:full',
-          grantRefs: ['grant:agent:full'],
+          grantRefs: actionGrantRefs,
           evidenceRefs: ['proof:revoke-expire'],
           expiresAt,
         },
@@ -2664,15 +2912,40 @@ test('runtime authority records reducer separates action, access, and witness pl
   assert.equal(reduced.result.actionability.canRevokeExpire, true);
   assert.equal(reduced.result.actionability.futureReadable, true);
   assert.equal(reduced.result.actionability.rawReadable, true);
-  assert.deepEqual(reduced.result.actionAuthority.grantRefs, ['grant:agent:full']);
-  assert.deepEqual(reduced.result.actionAuthority.exerciseRefs, ['exercise:agent:nvr']);
+  assert.deepEqual(reduced.result.actionAuthority.grantRefs, actionGrantRefs);
+  assert.deepEqual(reduced.result.actionAuthority.exerciseRefs, [
+    'exercise:agent:nvr',
+    'exercise:agent:logging',
+    'exercise:agent:build',
+  ]);
   assert.deepEqual(reduced.result.actionAuthority.revocationRefs, ['revocation:agent:full:expiry']);
   assert.equal(reduced.result.accessAuthority.accessGroupRefs.includes('access-group:agent-events'), true);
+  assert.equal(reduced.result.accessAuthority.accessGroupRefs.includes('access-group:agent-source-build'), true);
   assert.equal(reduced.result.accessAuthority.privateEnvelopeRefs.includes('private-envelope:event-detail:1'), true);
+  assert.equal(reduced.result.accessAuthority.privateEnvelopeRefs.includes('private-envelope:source-build:1'), true);
   assert.equal(reduced.result.walletPosture.kind, 'runtime.authority.wallet.posture');
   assert.equal(reduced.result.walletPosture.ownerIdentityRef, 'identity:aux');
   assert.equal(reduced.result.walletPosture.granteeIdentityRef, 'identity:agent');
   assert.equal(reduced.result.walletPosture.granteeMemberRef, 'member:agent-browser');
+  assert.deepEqual(reduced.result.walletPosture.subjectRefs, subjectRefs);
+  assert.deepEqual(reduced.result.walletPosture.subjectCoverage.serviceRefs, [
+    'service:gateway',
+    'service:nvr',
+    'service:logging',
+  ]);
+  assert.deepEqual(reduced.result.walletPosture.subjectCoverage.eventFabricRefs, ['event-fabric:identity:aux']);
+  assert.deepEqual(reduced.result.walletPosture.subjectCoverage.storageRefs, ['storage:identity:aux']);
+  assert.deepEqual(reduced.result.walletPosture.subjectCoverage.sourceRefs, ['source:identity:aux']);
+  assert.deepEqual(reduced.result.walletPosture.subjectCoverage.buildRefs, ['build:identity:aux']);
+  assert.deepEqual(reduced.result.walletPosture.subjectCoverage.appRefs, ['app:constitute-cybersec']);
+  assert.deepEqual(reduced.result.walletPosture.resourceCoverage.serviceRefs, [
+    'service:nvr',
+    'service:gateway',
+    'service:logging',
+  ]);
+  assert.deepEqual(reduced.result.walletPosture.resourceCoverage.storageRefs, ['storage:identity:aux']);
+  assert.deepEqual(reduced.result.walletPosture.resourceCoverage.sourceRefs, ['source:identity:aux']);
+  assert.deepEqual(reduced.result.walletPosture.resourceCoverage.buildRefs, ['build:identity:aux']);
   assert.deepEqual(
     reduced.result.walletPosture.rows.map((row) => [row.check, row.plane, row.state, row.actionable]),
     [
@@ -2718,6 +2991,418 @@ test('runtime authority records reducer does not infer readability from an actio
   assert.equal(reduced.result.walletPosture.rows.length, 4);
   assert.equal(reduced.result.walletPosture.rows.find((row) => row.check === 'sync').actionable, false);
   assert.equal(reduced.result.walletPosture.rows.find((row) => row.check === 'read').actionable, false);
+});
+
+test('runtime authority records reducer permits read posture without write grants', async () => {
+  const runtime = loadRuntime(new Map());
+  await attach(runtime.port);
+  const issuedAt = Date.now();
+  const expiresAt = issuedAt + 60_000;
+
+  const reduced = await send(runtime.port, {
+    type: 'runtime.authority.records.reduce',
+    records: [
+      {
+        kind: protocol.SWARM.RECORD_KIND.ACCESS_GROUP,
+        groupId: 'access-group:agent-events:read-only',
+        ownerRef: 'identity:aux',
+        subjectRef: 'event-fabric:identity:aux',
+        contentClasses: [protocol.AGREEMENT.CONTENT_CLASS.ENCRYPTED_DETAIL],
+        memberRefs: ['member:agent-browser'],
+        adminRefs: ['identity:aux'],
+        currentEpochId: 'epoch:agent-events:read-only:1',
+        issuedAt,
+      },
+      {
+        kind: protocol.SWARM.RECORD_KIND.ACCESS_EPOCH,
+        epochId: 'epoch:agent-events:read-only:1',
+        groupId: 'access-group:agent-events:read-only',
+        sequence: 1,
+        changeKind: protocol.AGREEMENT.ACCESS_EPOCH_CHANGE.ADD_MEMBER,
+        memberRefs: ['member:agent-browser'],
+        addedMemberRefs: ['member:agent-browser'],
+        keyRef: 'key:agent-events:read-only:1',
+        proofRefs: ['proof:epoch:read-only'],
+        issuedAt,
+        expiresAt,
+      },
+      {
+        kind: protocol.SWARM.RECORD_KIND.PRIVATE_CONTENT_ENVELOPE,
+        envelopeId: 'private-envelope:event-detail:read-only',
+        contentClass: protocol.AGREEMENT.CONTENT_CLASS.ENCRYPTED_DETAIL,
+        accessGroupRef: 'access-group:agent-events:read-only',
+        epochId: 'epoch:agent-events:read-only:1',
+        subjectRef: 'logging:event:read-only',
+        issuerRef: 'logging:processor',
+        detailRef: 'storage:detail:read-only',
+        recipientRefs: ['member:agent-browser'],
+        issuedAt,
+        expiresAt,
+      },
+      {
+        kind: protocol.SWARM.RECORD_KIND.AUTHORITY_MULTI_IDENTITY_PROOF,
+        proofId: 'proof:agent-read-only',
+        ownerIdentityRef: 'identity:aux',
+        granteeIdentityRef: 'identity:agent',
+        granteeMemberRef: 'member:agent-browser',
+        subjectRefs: ['event-fabric:identity:aux'],
+        actionGrantRefs: ['grant:agent:read-only-placeholder'],
+        accessGroupRefs: ['access-group:agent-events:read-only'],
+        accessEpochRefs: ['epoch:agent-events:read-only:1'],
+        privateEnvelopeRefs: ['private-envelope:event-detail:read-only'],
+        evidenceRefs: ['proof:browser:read-only'],
+        state: protocol.AGREEMENT.AUTHORITY_PROOF_STATE.DEGRADED,
+        blockedReasons: ['writeGrantMissing'],
+        checks: [
+          {
+            check: protocol.AGREEMENT.AUTHORITY_PROOF_CHECK.SYNC,
+            plane: protocol.AGREEMENT.PLANE.DELIVERY_WITNESS,
+            state: protocol.AGREEMENT.AUTHORITY_PROOF_STATE.PROVED,
+            targetRef: 'member:agent-browser',
+            evidenceRefs: ['proof:sync:read-only'],
+          },
+          {
+            check: protocol.AGREEMENT.AUTHORITY_PROOF_CHECK.READ,
+            plane: protocol.AGREEMENT.PLANE.ACCESS_AUTHORITY,
+            state: protocol.AGREEMENT.AUTHORITY_PROOF_STATE.PROVED,
+            targetRef: 'event-fabric:identity:aux',
+            accessGroupRefs: ['access-group:agent-events:read-only'],
+            accessEpochRefs: ['epoch:agent-events:read-only:1'],
+            evidenceRefs: ['proof:read:read-only'],
+          },
+          {
+            check: protocol.AGREEMENT.AUTHORITY_PROOF_CHECK.WRITE_REDUCE,
+            plane: protocol.AGREEMENT.PLANE.ACTION_AUTHORITY,
+            state: protocol.AGREEMENT.AUTHORITY_PROOF_STATE.BLOCKED,
+            targetRef: 'contract:logging.default',
+            blockedReason: 'write grant absent',
+          },
+          {
+            check: protocol.AGREEMENT.AUTHORITY_PROOF_CHECK.REVOKE_EXPIRE,
+            plane: protocol.AGREEMENT.PLANE.ACTION_AUTHORITY,
+            state: protocol.AGREEMENT.AUTHORITY_PROOF_STATE.BLOCKED,
+            targetRef: 'grant:agent:read-only-placeholder',
+            blockedReason: 'revoke grant absent',
+            expiresAt,
+          },
+        ],
+        issuedAt,
+        expiresAt,
+      },
+    ],
+  });
+
+  assert.equal(reduced.ok, true);
+  assert.equal(reduced.result.state, 'degraded');
+  assert.equal(reduced.result.actionability.canSync, true);
+  assert.equal(reduced.result.actionability.canRead, true);
+  assert.equal(reduced.result.actionability.rawReadable, true);
+  assert.equal(reduced.result.actionability.canUseActionGrant, false);
+  assert.equal(reduced.result.actionability.canWriteReduce, false);
+  assert.equal(reduced.result.actionability.canAct, false);
+  assert.equal(reduced.result.accessAuthority.state, 'ready');
+  assert.equal(reduced.result.actionAuthority.state, 'blocked');
+});
+
+test('runtime authority records reducer permits sync posture without readability', async () => {
+  const runtime = loadRuntime(new Map());
+  await attach(runtime.port);
+  const issuedAt = Date.now();
+  const expiresAt = issuedAt + 60_000;
+
+  const reduced = await send(runtime.port, {
+    type: 'runtime.authority.records.reduce',
+    records: [{
+      kind: protocol.SWARM.RECORD_KIND.AUTHORITY_MULTI_IDENTITY_PROOF,
+      proofId: 'proof:agent-sync-only',
+      ownerIdentityRef: 'identity:aux',
+      granteeIdentityRef: 'identity:agent',
+      granteeMemberRef: 'member:agent-browser',
+      subjectRefs: ['contract:gateway.default'],
+      actionGrantRefs: ['grant:agent:sync-placeholder'],
+      accessGroupRefs: ['access-group:agent-sync-placeholder'],
+      evidenceRefs: ['proof:browser:sync-only'],
+      state: protocol.AGREEMENT.AUTHORITY_PROOF_STATE.DEGRADED,
+      blockedReasons: ['readAccessMissing', 'writeGrantMissing'],
+      checks: [
+        {
+          check: protocol.AGREEMENT.AUTHORITY_PROOF_CHECK.SYNC,
+          plane: protocol.AGREEMENT.PLANE.DELIVERY_WITNESS,
+          state: protocol.AGREEMENT.AUTHORITY_PROOF_STATE.PROVED,
+          targetRef: 'contract:gateway.default',
+          evidenceRefs: ['witness:gateway:agent-sync'],
+        },
+        {
+          check: protocol.AGREEMENT.AUTHORITY_PROOF_CHECK.READ,
+          plane: protocol.AGREEMENT.PLANE.ACCESS_AUTHORITY,
+          state: protocol.AGREEMENT.AUTHORITY_PROOF_STATE.BLOCKED,
+          targetRef: 'event-fabric:identity:aux',
+          accessGroupRefs: ['access-group:agent-sync-placeholder'],
+          blockedReason: 'access group absent',
+        },
+        {
+          check: protocol.AGREEMENT.AUTHORITY_PROOF_CHECK.WRITE_REDUCE,
+          plane: protocol.AGREEMENT.PLANE.ACTION_AUTHORITY,
+          state: protocol.AGREEMENT.AUTHORITY_PROOF_STATE.BLOCKED,
+          targetRef: 'contract:logging.default',
+          blockedReason: 'write grant absent',
+        },
+        {
+          check: protocol.AGREEMENT.AUTHORITY_PROOF_CHECK.REVOKE_EXPIRE,
+          plane: protocol.AGREEMENT.PLANE.ACTION_AUTHORITY,
+          state: protocol.AGREEMENT.AUTHORITY_PROOF_STATE.BLOCKED,
+          targetRef: 'grant:agent:sync-placeholder',
+          blockedReason: 'revoke grant absent',
+          expiresAt,
+        },
+      ],
+      issuedAt,
+      expiresAt,
+    }],
+  });
+
+  assert.equal(reduced.ok, true);
+  assert.equal(reduced.result.state, 'degraded');
+  assert.equal(reduced.result.deliveryWitness.state, 'ready');
+  assert.equal(reduced.result.actionability.canSync, true);
+  assert.equal(reduced.result.actionability.canRead, false);
+  assert.equal(reduced.result.actionability.futureReadable, false);
+  assert.equal(reduced.result.actionability.rawReadable, false);
+  assert.equal(reduced.result.actionability.canUseActionGrant, false);
+  assert.equal(reduced.result.blockedReasons.includes('accessAuthorityMissing'), true);
+});
+
+test('runtime authority records reducer blocks expired and revoked action grants', async () => {
+  const runtime = loadRuntime(new Map());
+  await attach(runtime.port);
+  const issuedAt = Date.now() - 10_000;
+  const expiresAt = Date.now() - 1_000;
+
+  const expired = await send(runtime.port, {
+    type: 'runtime.authority.records.reduce',
+    records: [{
+      kind: protocol.SWARM.RECORD_KIND.AUTHORITY_ACTION_GRANT,
+      grantId: 'grant:agent:expired',
+      issuerRef: 'identity:aux',
+      subjectRef: 'identity:agent',
+      audienceRefs: ['member:agent-browser'],
+      authorityDomain: protocol.SWARM.AUTHORITY_DOMAIN.IDENTITY,
+      resourceRef: 'service:nvr',
+      action: 'service.fulfill',
+      state: protocol.AGREEMENT.ACTION_GRANT_STATE.ACCEPTED,
+      issuedAt,
+      expiresAt,
+    }],
+  });
+
+  assert.equal(expired.ok, true);
+  assert.equal(expired.result.actionability.canUseActionGrant, false);
+  assert.equal(expired.result.actionability.canAct, false);
+  assert.deepEqual(expired.result.actionAuthority.expiredGrantRefs, ['grant:agent:expired']);
+  assert.equal(expired.result.blockedReasons.includes('grantExpired'), true);
+
+  const revoked = await send(runtime.port, {
+    type: 'runtime.authority.records.reduce',
+    records: [
+      {
+        kind: protocol.SWARM.RECORD_KIND.AUTHORITY_ACTION_GRANT,
+        grantId: 'grant:agent:revoked',
+        issuerRef: 'identity:aux',
+        subjectRef: 'identity:agent',
+        audienceRefs: ['member:agent-browser'],
+        authorityDomain: protocol.SWARM.AUTHORITY_DOMAIN.IDENTITY,
+        resourceRef: 'service:nvr',
+        action: 'service.fulfill',
+        state: protocol.AGREEMENT.ACTION_GRANT_STATE.ACCEPTED,
+        issuedAt,
+      },
+      {
+        kind: protocol.SWARM.RECORD_KIND.AUTHORITY_GRANT_REVOCATION_POSTURE,
+        revocationId: 'revocation:agent:revoked',
+        targetGrantRef: 'grant:agent:revoked',
+        issuerRef: 'identity:aux',
+        authorityDomain: protocol.SWARM.AUTHORITY_DOMAIN.IDENTITY,
+        affectedGrantRefs: ['grant:agent:revoked'],
+        state: protocol.AGREEMENT.ACTION_GRANT_STATE.REVOKED,
+        reasonCode: 'operatorRevoked',
+        evidenceRefs: ['proof:revocation:agent:revoked'],
+        issuedAt,
+        effectiveAt: Date.now() - 500,
+      },
+    ],
+  });
+
+  assert.equal(revoked.ok, true);
+  assert.equal(revoked.result.actionability.canUseActionGrant, false);
+  assert.equal(revoked.result.actionability.canRevokeExpire, true);
+  assert.deepEqual(revoked.result.actionAuthority.revokedGrantRefs, ['grant:agent:revoked']);
+  assert.equal(revoked.result.blockedReasons.includes('grantRevoked'), true);
+});
+
+test('runtime authority records reducer exposes root and device lifecycle posture', async () => {
+  const runtime = loadRuntime(new Map());
+  await attach(runtime.port);
+  const issuedAt = Date.now();
+  const rootRef = 'root:aux';
+  const rotatedRootRef = 'root:aux:rotated';
+  const deviceRef = 'device:aux-browser';
+  const adminGrantRef = 'grant:root:admin';
+
+  const reduced = await send(runtime.port, {
+    type: 'runtime.authority.records.reduce',
+    records: [
+      {
+        kind: protocol.SWARM.RECORD_KIND.AUTHORITY_ACTION_GRANT,
+        grantId: adminGrantRef,
+        issuerRef: 'identity:aux',
+        subjectRef: 'identity:aux',
+        audienceRefs: [rootRef],
+        authorityDomain: protocol.SWARM.AUTHORITY_DOMAIN.IDENTITY,
+        resourceRef: 'identity:aux',
+        action: 'authority.root.rotate',
+        state: protocol.AGREEMENT.ACTION_GRANT_STATE.ACCEPTED,
+        rootRefs: [rootRef],
+        elevated: true,
+        issuedAt,
+      },
+      {
+        kind: protocol.SWARM.RECORD_KIND.AUTHORITY_ROOT_OPERATION,
+        operationId: 'root-op:add-aux',
+        operation: protocol.AGREEMENT.ROOT_OPERATION.ADD_ROOT,
+        identityRef: 'identity:aux',
+        actorRef: rootRef,
+        targetRef: rootRef,
+        adminGrantRefs: [adminGrantRef],
+        rootRefs: [rootRef],
+        notificationRefs: ['notification:root:add-aux'],
+        evidenceRefs: ['evidence:root:add-aux'],
+        state: protocol.AGREEMENT.ACTION_GRANT_STATE.APPLIED,
+        issuedAt,
+      },
+      {
+        kind: protocol.SWARM.RECORD_KIND.AUTHORITY_ROOT_OPERATION,
+        operationId: 'root-op:refresh-aux',
+        operation: protocol.AGREEMENT.ROOT_OPERATION.REFRESH_ROOT,
+        identityRef: 'identity:aux',
+        actorRef: rootRef,
+        targetRef: rootRef,
+        adminGrantRefs: [adminGrantRef],
+        evidenceRefs: ['evidence:root:refresh-aux'],
+        state: protocol.AGREEMENT.ACTION_GRANT_STATE.APPLIED,
+        issuedAt: issuedAt + 1,
+      },
+      {
+        kind: protocol.SWARM.RECORD_KIND.AUTHORITY_ROOT_OPERATION,
+        operationId: 'root-op:rotate-aux',
+        operation: protocol.AGREEMENT.ROOT_OPERATION.ROTATE_ROOT,
+        identityRef: 'identity:aux',
+        actorRef: rootRef,
+        targetRef: rotatedRootRef,
+        adminGrantRefs: [adminGrantRef],
+        rootRefs: [rotatedRootRef],
+        notificationRefs: ['notification:root:rotate-aux'],
+        evidenceRefs: ['evidence:root:rotate-aux'],
+        state: protocol.AGREEMENT.ACTION_GRANT_STATE.APPLIED,
+        issuedAt: issuedAt + 2,
+      },
+      {
+        kind: protocol.SWARM.RECORD_KIND.AUTHORITY_ROOT_OPERATION,
+        operationId: 'root-op:enroll-browser',
+        operation: protocol.AGREEMENT.ROOT_OPERATION.ENROLL_DEVICE,
+        identityRef: 'identity:aux',
+        actorRef: rotatedRootRef,
+        targetRef: deviceRef,
+        adminGrantRefs: [adminGrantRef],
+        deviceRefs: [deviceRef],
+        notificationRefs: ['notification:device:enroll-browser'],
+        evidenceRefs: ['evidence:device:enroll-browser'],
+        state: protocol.AGREEMENT.ACTION_GRANT_STATE.APPLIED,
+        issuedAt: issuedAt + 3,
+      },
+    ],
+  });
+
+  assert.equal(reduced.ok, true);
+  assert.equal(reduced.result.rootDeviceAuthority.state, 'ready');
+  assert.deepEqual(reduced.result.rootDeviceAuthority.addRootRefs, ['root-op:add-aux']);
+  assert.deepEqual(reduced.result.rootDeviceAuthority.refreshRootRefs, ['root-op:refresh-aux']);
+  assert.deepEqual(reduced.result.rootDeviceAuthority.rotateRootRefs, ['root-op:rotate-aux']);
+  assert.deepEqual(reduced.result.rootDeviceAuthority.enrollDeviceRefs, ['root-op:enroll-browser']);
+  assert.deepEqual(reduced.result.rootDeviceAuthority.rootRefs, [rootRef, rotatedRootRef]);
+  assert.deepEqual(reduced.result.rootDeviceAuthority.deviceRefs, [deviceRef]);
+  assert.deepEqual(reduced.result.rootDeviceAuthority.adminGrantRefs, [adminGrantRef]);
+  assert.equal(reduced.result.rootDeviceAuthority.notificationRefs.length, 3);
+  assert.equal(reduced.result.rootDeviceAuthority.evidenceRefs.length, 4);
+});
+
+test('runtime authority records reducer blocks root operations without usable admin grants', async () => {
+  const runtime = loadRuntime(new Map());
+  await attach(runtime.port);
+  const issuedAt = Date.now();
+  const rootRef = 'root:aux';
+
+  const missingAdmin = await send(runtime.port, {
+    type: 'runtime.authority.records.reduce',
+    records: [{
+      kind: protocol.SWARM.RECORD_KIND.AUTHORITY_ROOT_OPERATION,
+      operationId: 'root-op:refresh-missing-admin',
+      operation: protocol.AGREEMENT.ROOT_OPERATION.REFRESH_ROOT,
+      identityRef: 'identity:aux',
+      actorRef: rootRef,
+      targetRef: rootRef,
+      adminGrantRefs: ['grant:root:missing'],
+      evidenceRefs: ['evidence:root:refresh-missing-admin'],
+      state: protocol.AGREEMENT.ACTION_GRANT_STATE.APPLIED,
+      issuedAt,
+    }],
+  });
+
+  assert.equal(missingAdmin.ok, true);
+  assert.equal(missingAdmin.result.rootDeviceAuthority.state, 'blocked');
+  assert.deepEqual(missingAdmin.result.rootDeviceAuthority.operationRefs, []);
+  assert.deepEqual(missingAdmin.result.rootDeviceAuthority.refreshRootRefs, []);
+  assert.deepEqual(missingAdmin.result.rootDeviceAuthority.blockedOperationRefs, ['root-op:refresh-missing-admin']);
+  assert.deepEqual(missingAdmin.result.rootDeviceAuthority.unusableAdminGrantRefs, ['grant:root:missing']);
+  assert.equal(missingAdmin.result.blockedReasons.includes('adminGrantUnavailable'), true);
+
+  const nonAdminGrantRef = 'grant:service:fulfill';
+  const nonAdminGrant = await send(runtime.port, {
+    type: 'runtime.authority.records.reduce',
+    records: [
+      {
+        kind: protocol.SWARM.RECORD_KIND.AUTHORITY_ACTION_GRANT,
+        grantId: nonAdminGrantRef,
+        issuerRef: 'identity:aux',
+        subjectRef: 'identity:aux',
+        audienceRefs: [rootRef],
+        authorityDomain: protocol.SWARM.AUTHORITY_DOMAIN.IDENTITY,
+        resourceRef: 'service:nvr',
+        action: 'service.fulfill',
+        state: protocol.AGREEMENT.ACTION_GRANT_STATE.ACCEPTED,
+        issuedAt,
+      },
+      {
+        kind: protocol.SWARM.RECORD_KIND.AUTHORITY_ROOT_OPERATION,
+        operationId: 'root-op:refresh-non-admin',
+        operation: protocol.AGREEMENT.ROOT_OPERATION.REFRESH_ROOT,
+        identityRef: 'identity:aux',
+        actorRef: rootRef,
+        targetRef: rootRef,
+        adminGrantRefs: [nonAdminGrantRef],
+        evidenceRefs: ['evidence:root:refresh-non-admin'],
+        state: protocol.AGREEMENT.ACTION_GRANT_STATE.APPLIED,
+        issuedAt: issuedAt + 1,
+      },
+    ],
+  });
+
+  assert.equal(nonAdminGrant.ok, true);
+  assert.equal(nonAdminGrant.result.rootDeviceAuthority.state, 'blocked');
+  assert.deepEqual(nonAdminGrant.result.rootDeviceAuthority.operationRefs, []);
+  assert.deepEqual(nonAdminGrant.result.rootDeviceAuthority.refreshRootRefs, []);
+  assert.deepEqual(nonAdminGrant.result.rootDeviceAuthority.blockedOperationRefs, ['root-op:refresh-non-admin']);
+  assert.deepEqual(nonAdminGrant.result.rootDeviceAuthority.unusableAdminGrantRefs, [nonAdminGrantRef]);
+  assert.equal(nonAdminGrant.result.blockedReasons.includes('adminGrantUnavailable'), true);
 });
 
 test('runtime activation waits for explicit device authority instead of relying on cache timing', async () => {

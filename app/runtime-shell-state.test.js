@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   browserStorageShellContext,
+  deriveRuntimeMaterializationPosture,
   deriveRuntimeShellState,
   runtimeShellConnectionToneClass,
 } from "../runtime-shell-state.js";
@@ -90,6 +91,38 @@ test("shell state keeps route delivery distinct from adapter live", () => {
   assert.equal(live.connection.label, "Live");
   assert.equal(live.interaction.adapterLive, true);
   assert.equal(runtimeShellConnectionToneClass("live"), "connStateText-connected");
+});
+
+test("shell state exposes runtime materialization budget posture", () => {
+  const posture = deriveRuntimeMaterializationPosture({
+    runtimeEvents: [{ eventId: "runtime-event-1" }],
+    materializationBudget: {
+      budgetId: "budget:runtime.snapshot.account",
+      state: "withinBudget",
+      copyRole: "snapshot-summary",
+      payloadClass: "safeFacts",
+      privacyTier: "safe",
+      limits: {
+        estimatedSnapshotBytes: 2048,
+        fanout: 1,
+        replayLimit: 12,
+      },
+    },
+    materialization: {
+      consumerFloor: {
+        floorId: "floor:account-ui",
+        lagState: "current",
+      },
+    },
+  });
+
+  assert.equal(posture.kind, "runtime.materialization.posture");
+  assert.equal(posture.state, "withinBudget");
+  assert.equal(posture.budgetId, "budget:runtime.snapshot.account");
+  assert.equal(posture.consumerFloorId, "floor:account-ui");
+  assert.equal(posture.runtimeEventCount, 1);
+  assert.equal(posture.payloadClass, "safeFacts");
+  assert.equal(posture.privacyTier, "safe");
 });
 
 test("shell state can use retained browser cache as display evidence without raw storage authority", () => {

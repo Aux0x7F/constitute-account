@@ -1,4 +1,7 @@
-import { preparedServiceRegistry } from 'constitute-ui';
+import {
+  deriveRuntimeMaterializationPosture,
+  preparedServiceRegistry,
+} from 'constitute-ui';
 
 function normalizeArray(value) {
   return Array.isArray(value) ? value : [];
@@ -137,8 +140,9 @@ function preparedPostureStatus(posture = {}, fallbackState = 'unknown') {
   };
 }
 
-export function buildRuntimeSnapshotView(snapshot = {}) {
+export function buildRuntimeSnapshotView(snapshot = {}, options = {}) {
   const serviceRegistry = preparedServiceRegistry(snapshot);
+  const materialization = deriveRuntimeMaterializationPosture(snapshot, options);
   const catalog = preparedRuntimeServiceCatalog(snapshot);
   const edge = preparedSwarmEdgeStatus(snapshot);
   const projections = preparedRuntimeProjectionStatus(snapshot);
@@ -150,6 +154,7 @@ export function buildRuntimeSnapshotView(snapshot = {}) {
     serviceRegistry,
     edge,
     projections,
+    materialization,
     resource,
     retention,
   };
@@ -170,8 +175,8 @@ function appendTextLine(documentRef, parent, className, value) {
   return el;
 }
 
-export function renderRuntimeSnapshotView(elements, snapshot = {}, documentRef = globalThis.document) {
-  const view = buildRuntimeSnapshotView(snapshot);
+export function renderRuntimeSnapshotView(elements, snapshot = {}, documentRef = globalThis.document, options = {}) {
+  const view = buildRuntimeSnapshotView(snapshot, options);
   if (!elements || !documentRef) return view;
 
   if (elements.catalogStatusEl) elements.catalogStatusEl.textContent = view.catalogLabel;
